@@ -1,3 +1,145 @@
-fn main() {
-    println!("Hello, world!");
+mod gui;
+mod output;
+mod plugin;
+mod plugins;
+mod shell;
+
+use std::env;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use rustyline::error::ReadlineError;
+use rustyline::{
+    Cmd, ConditionalEventHandler, DefaultEditor, Event, EventContext, EventHandler,
+    ExternalPrinter, KeyEvent, RepeatCount,
+};
+
+use output::OutputBuffer;
+use plugin::{ContextInner, Plugin};
+use plugins::{DevicePlugin, MusicPlugin, WolPlugin};
+use shell::{PluginFactory, Shell, UiMode};
+
+fn main() -> Result<()> {
+    let ctx = Arc::new(Mutex::new(ContextInner::default()));
+    let output = Arc::new(OutputBuffer::new());
+
+    let factories: Vec<(&'static str, PluginFactory)> = vec![
+        ("wol", Box::new(|ctx| Box::new(WolPlugin::new(ctx)) as Box<dyn Plugin>)),
+        (
+            "device",
+            Box::new(|ctx| Box::new(DevicePlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "music",
+            Box::new(|ctx| Box::new(MusicPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+    ];
+    let shell = Arc::new(Mutex::new(Shell::new(ctx, factories, output.clone())));
+    let mut printed = 0usize;
+
+    let script_path = env::args().nth(1).unwrap_or_else(|| "script.cli".to_string());
+    if Path::new(&script_path).exists() {
+        shell.lock().unwrap().run_script(Path::new(&script_path))?;
+        flush_new_lines(&output, &mut printed);
+    }
+
+    let mut ui = UiMode::Cli;
+    loop {
+        if shell.lock().unwrap().should_exit() {
+            break;
+        }
+        match ui {
+            UiMode::Cli => run_cli_ui(&shell, &output, &mut printed)?,
+            UiMode::Gui => gui::run(&shell, &output)?,
+        }
+        if shell.lock().unwrap().should_exit() {
+            break;
+        }
+        match shell.lock().unwrap().take_requested_ui() {
+            Some(next) => ui = next,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+/// 把 `output` 裡從 `printed` 開始、還沒印到 stdout 的行印出來，並更新游標。
+fn flush_new_lines(output: &OutputBuffer, printed: &mut usize) {
+    for line in output.lines_from(*printed) {
+        println!("{line}");
+    }
+    *printed = output.len();
+}
+
+/// 按下 `?` 立刻顯示當前 mode 的 help，不需要按 Enter，也不會把 `?` 插入輸入緩衝區。
+/// 用 rustyline 的 external printer 輸出，這樣顯示完之後 prompt 會自動重新出現，
+/// 不用像直接 `println!` 那樣得等使用者按下一次 Enter 才會重繪。
+struct HelpKeyHandler<P> {
+    shell: Arc<Mutex<Shell>>,
+    printer: Mutex<P>,
+}
+
+impl<P: ExternalPrinter + Send> ConditionalEventHandler for HelpKeyHandler<P> {
+    fn handle(&self, _evt: &Event, _n: RepeatCount, _positive: bool, ctx: &EventContext) -> Option<Cmd> {
+        let before_cursor = &ctx.line()[..ctx.pos()];
+        let text = self.shell.lock().unwrap().context_help_text(before_cursor);
+        let _ = self.printer.lock().unwrap().print(text);
+        Some(Cmd::Noop)
+    }
+}
+
+/// `mode cli`：一般的 rustyline 互動模式，單行出錯只印錯誤、不中止整個 session。
+/// 遇到 `exit` 或 `mode gui` 就回傳，讓 `main` 決定接下來要結束程式還是切去 GUI。
+fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &mut usize) -> Result<()> {
+    let mut rl = DefaultEditor::new()?;
+    // 非 tty（例如把指令用 pipe 導進 stdin）拿不到 external printer，
+    // 這種情境下 `?` 這個按鍵綁定本來就用不到，略過即可，不影響其餘功能。
+    if let Ok(printer) = rl.create_external_printer() {
+        rl.bind_sequence(
+            KeyEvent::from('?'),
+            EventHandler::Conditional(Box::new(HelpKeyHandler {
+                shell: shell.clone(),
+                printer: Mutex::new(printer),
+            })),
+        );
+    }
+
+    // 從 GUI 切回來時，GUI 期間累積的內容（包含切換指令本身的 echo）都還沒印到
+    // 這個新的 CLI session 上，先補印出來，不用等使用者按下一行才觸發。
+    flush_new_lines(output, printed);
+
+    loop {
+        let prompt = shell.lock().unwrap().prompt();
+        match rl.readline(&prompt) {
+            Ok(line) => {
+                let _ = rl.add_history_entry(line.as_str());
+                let mut sh = shell.lock().unwrap();
+                let trimmed = line.trim();
+                if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with('!') {
+                    // 終端機自己的 echo 已經讓使用者看到這行了，這裡寫進 output
+                    // 只是為了讓之後切去 GUI 時歷史記錄還在，所以順便把 printed
+                    // 往前推過這一行，CLI 這邊才不會重複印一次。
+                    output.push(&format!("{}{}\n", sh.prompt(), trimmed));
+                    *printed = output.len();
+                }
+                if let Err(err) = sh.execute_line(&line) {
+                    output.push(&format!("錯誤: {err:#}\n"));
+                }
+                let done = sh.should_exit() || sh.has_pending_mode_switch();
+                drop(sh);
+                flush_new_lines(output, printed);
+                if done {
+                    break;
+                }
+            }
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => break,
+            Err(err) => {
+                output.push(&format!("讀取輸入失敗: {err}\n"));
+                flush_new_lines(output, printed);
+                break;
+            }
+        }
+    }
+    Ok(())
 }
