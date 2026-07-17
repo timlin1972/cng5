@@ -1,11 +1,21 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
 
 use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
+
+/// 現在終端機（CLI/GUI）跟背景的 web server（見 `web::spawn`）共用同一個
+/// `Arc<Mutex<Shell>>`，如果任何一個執行緒在持有這把鎖的時候 panic，鎖會被標記
+/// 為「poisoned」，之後別的執行緒對它呼叫 `.lock().unwrap()` 就會跟著 panic——
+/// 對 GUI 來說這會跳過畫面收尾（`disable_raw_mode`/離開 alternate screen），
+/// 讓終端機卡在 raw mode 出不來。`Shell` 本身沒有會因為操作中斷而壞掉的不變量，
+/// 所以直接把內容拿出來繼續用即可，不需要讓一個執行緒的 panic 拖累其他執行緒。
+pub fn lock_shell(shell: &Mutex<Shell>) -> MutexGuard<'_, Shell> {
+    shell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub enum Mode {
     Root,
@@ -448,10 +458,16 @@ impl Shell {
         self.output.push(&s);
     }
 
-    fn plugin_list_text(&self) -> String {
-        let mut names: Vec<&str> = self.active.keys().map(String::as_str).collect();
+    /// 目前所有 plugin 的名稱（含 `output`），依字母順序排列。CLI 的 `plugin show`
+    /// 跟 web 的 `/api/plugins` 共用這一份清單，不各自維護一套。
+    pub fn plugin_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.active.keys().cloned().collect();
         names.sort();
-        format!("可用的 plugin: {}\n", names.join(", "))
+        names
+    }
+
+    fn plugin_list_text(&self) -> String {
+        format!("可用的 plugin: {}\n", self.plugin_names().join(", "))
     }
 
     fn plugin_help_text(&self, name: &str) -> String {

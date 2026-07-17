@@ -3,6 +3,7 @@ mod output;
 mod plugin;
 mod plugins;
 mod shell;
+mod web;
 
 use std::env;
 use std::path::Path;
@@ -18,7 +19,7 @@ use rustyline::{
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
 use plugins::{DevicePlugin, MusicPlugin, OutputPlugin, SystemPlugin, WolPlugin};
-use shell::{PluginFactory, Shell, UiMode};
+use shell::{lock_shell, PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
     let ctx = Arc::new(Mutex::new(ContextInner::default()));
@@ -44,33 +45,37 @@ fn main() -> Result<()> {
         ),
     ];
     let shell = Arc::new(Mutex::new(Shell::new(ctx, factories, output.clone())));
+    // 跟目前終端機是 CLI 還是 GUI mode 無關，整個程式活著期間都在背景監聽
+    // port 9759，跟終端機共用同一個 shell/output，讓瀏覽器上開的 panel 能
+    // 即時反映終端機這邊做的變更（例如 `mode server`）。
+    web::spawn(shell.clone(), output.clone());
     let mut printed = 0usize;
 
     let script_path = env::args().nth(1).unwrap_or_else(|| "script.cli".to_string());
     let mut ui = UiMode::Cli;
     if Path::new(&script_path).exists() {
-        shell.lock().unwrap().run_script(Path::new(&script_path))?;
+        lock_shell(&shell).run_script(Path::new(&script_path))?;
         flush_new_lines(&output, &mut printed);
         // script 裡如果下過 `mode gui`/`mode cli`，一開始就照那個模式啟動，
         // 而不是永遠先固定開 CLI。
-        if let Some(requested) = shell.lock().unwrap().take_requested_ui() {
+        if let Some(requested) = lock_shell(&shell).take_requested_ui() {
             ui = requested;
         }
     }
 
     loop {
-        if shell.lock().unwrap().should_exit() {
+        if lock_shell(&shell).should_exit() {
             break;
         }
-        shell.lock().unwrap().set_current_ui(ui);
+        lock_shell(&shell).set_current_ui(ui);
         match ui {
             UiMode::Cli => run_cli_ui(&shell, &output, &mut printed)?,
             UiMode::Gui => gui::run(&shell, &output)?,
         }
-        if shell.lock().unwrap().should_exit() {
+        if lock_shell(&shell).should_exit() {
             break;
         }
-        match shell.lock().unwrap().take_requested_ui() {
+        match lock_shell(&shell).take_requested_ui() {
             Some(next) => ui = next,
             None => break,
         }
@@ -97,7 +102,7 @@ struct HelpKeyHandler<P> {
 impl<P: ExternalPrinter + Send> ConditionalEventHandler for HelpKeyHandler<P> {
     fn handle(&self, _evt: &Event, _n: RepeatCount, _positive: bool, ctx: &EventContext) -> Option<Cmd> {
         let before_cursor = &ctx.line()[..ctx.pos()];
-        let text = self.shell.lock().unwrap().context_help_text(before_cursor);
+        let text = lock_shell(&self.shell).context_help_text(before_cursor);
         let _ = self.printer.lock().unwrap().print(text);
         Some(Cmd::Noop)
     }
@@ -125,16 +130,16 @@ fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &m
 
     // 把之前執行過的指令（包含 script.cli 跑過的、以及先前 GUI session 打的）
     // 灌進 rustyline 自己的 history，這樣一開始按上下鍵就找得到。
-    for past in shell.lock().unwrap().history() {
+    for past in lock_shell(shell).history() {
         let _ = rl.add_history_entry(past.as_str());
     }
 
     loop {
-        let prompt = shell.lock().unwrap().prompt();
+        let prompt = lock_shell(shell).prompt();
         match rl.readline(&prompt) {
             Ok(line) => {
                 let _ = rl.add_history_entry(line.as_str());
-                let mut sh = shell.lock().unwrap();
+                let mut sh = lock_shell(shell);
                 let trimmed = line.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with('!') {
                     // 終端機自己的 echo 已經讓使用者看到這行了，這裡寫進 output

@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 
 use crate::output::OutputBuffer;
-use crate::shell::{PanelState, Shell};
+use crate::shell::{lock_shell, PanelState, Shell};
 
 /// Alt-方向鍵每按一下，active panel 移動幾個百分點（見 `run_loop` 裡的按鍵處理）。
 const PANEL_MOVE_STEP: i64 = 5;
@@ -51,13 +51,30 @@ pub fn run(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>) -> Result<()> 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_loop(&mut terminal, shell, output);
+    // 用 catch_unwind 包住整個迴圈：現在 `shell`/`output` 是跟背景 web server
+    // （見 `web::spawn`）共用的，任何一邊的 panic 都可能透過 `lock_shell` 波及
+    // 到這裡（見 `shell::lock_shell` 的說明）。不管 panic 是從哪裡來的，都要先
+    // 把終端機還原（關掉 raw mode、離開 alternate screen）再往外報錯，不然使用者
+    // 會卡在一個看不到自己打字、換行也不會回到最前面的畫面。
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_loop(&mut terminal, shell, output)
+    }));
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    result
+    match result {
+        Ok(inner) => inner,
+        Err(payload) => {
+            let msg = payload
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "未知的 panic".to_string());
+            anyhow::bail!("GUI 執行緒發生 panic，已還原終端機狀態: {msg}");
+        }
+    }
 }
 
 fn run_loop(
@@ -73,8 +90,8 @@ fn run_loop(
     let mut draft = String::new();
 
     loop {
-        let prompt = shell.lock().unwrap().prompt();
-        let panels = shell.lock().unwrap().visible_panels();
+        let prompt = lock_shell(shell).prompt();
+        let panels = lock_shell(shell).visible_panels();
 
         terminal.draw(|frame| {
             // 輸入框固定佔畫面最下面 3 行（含外框），panel 的 rect 百分比要以扣掉
@@ -111,7 +128,7 @@ fn run_loop(
                     let start = lines.len().saturating_sub(height);
                     let visible: Vec<Line> = lines[start..].iter().map(|l| Line::raw(l.as_str())).collect();
                     frame.render_widget(Paragraph::new(visible).block(block), rect);
-                } else if let Some(text) = shell.lock().unwrap().plugin_panel_text(name) {
+                } else if let Some(text) = lock_shell(shell).plugin_panel_text(name) {
                     frame.render_widget(Paragraph::new(text).block(block), rect);
                 } else {
                     frame.render_widget(block, rect);
@@ -147,7 +164,7 @@ fn run_loop(
                 let line = std::mem::take(&mut input);
                 history_index = None;
                 draft.clear();
-                let mut sh = shell.lock().unwrap();
+                let mut sh = lock_shell(shell);
                 let trimmed = line.trim();
                 if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with('!') {
                     output.push(&format!("{}{}\n", sh.prompt(), trimmed));
@@ -168,19 +185,19 @@ fn run_loop(
                 input.pop();
             }
             KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
-                shell.lock().unwrap().move_active_panel(0, -PANEL_MOVE_STEP);
+                lock_shell(shell).move_active_panel(0, -PANEL_MOVE_STEP);
             }
             KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
-                shell.lock().unwrap().move_active_panel(0, PANEL_MOVE_STEP);
+                lock_shell(shell).move_active_panel(0, PANEL_MOVE_STEP);
             }
             KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
-                shell.lock().unwrap().move_active_panel(-PANEL_MOVE_STEP, 0);
+                lock_shell(shell).move_active_panel(-PANEL_MOVE_STEP, 0);
             }
             KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
-                shell.lock().unwrap().move_active_panel(PANEL_MOVE_STEP, 0);
+                lock_shell(shell).move_active_panel(PANEL_MOVE_STEP, 0);
             }
             KeyCode::Up => {
-                let history = shell.lock().unwrap().history().to_vec();
+                let history = lock_shell(shell).history().to_vec();
                 if !history.is_empty() {
                     let new_index = match history_index {
                         None => {
@@ -194,7 +211,7 @@ fn run_loop(
                 }
             }
             KeyCode::Down => {
-                let history = shell.lock().unwrap().history().to_vec();
+                let history = lock_shell(shell).history().to_vec();
                 match history_index {
                     None => {}
                     Some(i) if i + 1 < history.len() => {
@@ -209,26 +226,26 @@ fn run_loop(
             }
             KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::ALT) => {
                 match c.to_ascii_lowercase() {
-                    'w' => shell.lock().unwrap().resize_active_panel(0, PANEL_MOVE_STEP),
-                    's' => shell.lock().unwrap().resize_active_panel(0, -PANEL_MOVE_STEP),
-                    'd' => shell.lock().unwrap().resize_active_panel(PANEL_MOVE_STEP, 0),
-                    'a' => shell.lock().unwrap().resize_active_panel(-PANEL_MOVE_STEP, 0),
-                    'm' => shell.lock().unwrap().toggle_maximize_active_panel(),
+                    'w' => lock_shell(shell).resize_active_panel(0, PANEL_MOVE_STEP),
+                    's' => lock_shell(shell).resize_active_panel(0, -PANEL_MOVE_STEP),
+                    'd' => lock_shell(shell).resize_active_panel(PANEL_MOVE_STEP, 0),
+                    'a' => lock_shell(shell).resize_active_panel(-PANEL_MOVE_STEP, 0),
+                    'm' => lock_shell(shell).toggle_maximize_active_panel(),
                     _ => {}
                 }
             }
             KeyCode::Char('?') => {
-                let sh = shell.lock().unwrap();
+                let sh = lock_shell(shell);
                 output.push(&format!("{}{}?\n", sh.prompt(), input));
                 let text = sh.context_help_text(&input);
                 drop(sh);
                 output.push(&text);
             }
             KeyCode::Tab => {
-                shell.lock().unwrap().cycle_active_panel();
+                lock_shell(shell).cycle_active_panel();
             }
             KeyCode::BackTab => {
-                shell.lock().unwrap().cycle_active_panel_reverse();
+                lock_shell(shell).cycle_active_panel_reverse();
             }
             KeyCode::Char(c) => input.push(c),
             _ => {}

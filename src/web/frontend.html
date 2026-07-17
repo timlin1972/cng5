@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>cng5</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #111318;
+    color: #d8dee9;
+    height: 100vh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  #toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 8px 12px;
+    background: #1b1e26;
+    border-bottom: 1px solid #333a46;
+  }
+  #toolbar select, #toolbar button {
+    background: #262a33;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font: inherit;
+  }
+  #toolbar button:hover { background: #323844; cursor: pointer; }
+  #desk {
+    position: relative;
+    width: 100%;
+    flex: 1;
+    overflow: hidden;
+  }
+  #cmdbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: #1b1e26;
+    border-top: 1px solid #333a46;
+    font-size: 13px;
+  }
+  #cmd-prompt {
+    white-space: pre;
+    color: #6f9dff;
+  }
+  #cmd-input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: #d8dee9;
+    font: inherit;
+  }
+  #cmd-status {
+    color: #ff6b6b;
+    white-space: pre;
+  }
+  .panel {
+    position: absolute;
+    min-width: 160px;
+    min-height: 80px;
+    background: #1b1e26;
+    border: 1px solid #3a4150;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  }
+  .panel.active { border-color: #6f9dff; }
+  .panel.minimized { min-height: 0; min-width: 0; }
+  .panel-title {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    background: #262a33;
+    border-bottom: 1px solid #3a4150;
+    cursor: move;
+    user-select: none;
+    font-size: 13px;
+  }
+  .panel-buttons {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .panel-buttons button {
+    background: none;
+    border: none;
+    color: #d8dee9;
+    cursor: pointer;
+    font: inherit;
+    line-height: 1;
+    padding: 0 4px;
+  }
+  .panel-buttons .minimize:hover,
+  .panel-buttons .maximize:hover { background: #3a4150; }
+  .panel-buttons .close:hover { color: #ff6b6b; }
+  .panel-body {
+    flex: 1;
+    margin: 0;
+    padding: 8px;
+    overflow: auto;
+    white-space: pre-wrap;
+    font-size: 13px;
+  }
+  .resize-handle {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 14px;
+    height: 14px;
+    cursor: nwse-resize;
+  }
+  .resize-handle::after {
+    content: "";
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 6px;
+    height: 6px;
+    border-right: 2px solid #5a6272;
+    border-bottom: 2px solid #5a6272;
+  }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <select id="plugin-select"></select>
+  <button id="open-btn">開啟 panel</button>
+</div>
+<div id="desk"></div>
+<div id="cmdbar">
+  <span id="cmd-prompt">cng5&gt; </span>
+  <input id="cmd-input" type="text" autocomplete="off" spellcheck="false" autofocus>
+  <span id="cmd-status"></span>
+</div>
+<script>
+(function () {
+  "use strict";
+
+  const desk = document.getElementById("desk");
+  const select = document.getElementById("plugin-select");
+  const openBtn = document.getElementById("open-btn");
+
+  // 每個 tab 自己的 panel 版面（位置/大小/疊放順序/開了哪些），只存在這個
+  // JS 變數裡，重新整理就消失，也完全不會送回後端——跟後端 `rect`/`show`/
+  // `activate` 那一套是兩回事。
+  const open = new Map(); // name -> { el, es }
+  let zTop = 1;
+  let cascade = 0;
+
+  // 最小化的 panel 停靠在 #desk 左下角（輸入列上方），每個固定佔 10% 寬、
+  // 依最小化的先後順序由左往右排，一排最多 10 個，超過就疊到上面一排——
+  // 所有 minimized panel 共用這一份順序清單，不是各自 panel 自己的狀態。
+  const MIN_DOCK_COLS = 10;
+  const minimizedPanels = [];
+
+  function updateDockMembership(panel, shouldDock) {
+    const idx = minimizedPanels.indexOf(panel);
+    if (shouldDock && idx === -1) {
+      minimizedPanels.push(panel);
+    } else if (!shouldDock && idx !== -1) {
+      minimizedPanels.splice(idx, 1);
+    }
+  }
+
+  function layoutMinimizedDock() {
+    minimizedPanels.forEach((p, i) => {
+      const col = i % MIN_DOCK_COLS;
+      const row = Math.floor(i / MIN_DOCK_COLS);
+      const rowHeight = p.querySelector(".panel-title").offsetHeight;
+      p.style.left = `${col * 10}%`;
+      p.style.width = "10%";
+      p.style.bottom = `${row * rowHeight}px`;
+    });
+  }
+
+  function bringToFront(panel) {
+    for (const p of desk.children) p.classList.remove("active");
+    panel.style.zIndex = String(++zTop);
+    panel.classList.add("active");
+  }
+
+  function startDrag(panel, evt) {
+    evt.preventDefault();
+    bringToFront(panel);
+    const startX = evt.clientX;
+    const startY = evt.clientY;
+    const startLeft = panel.offsetLeft;
+    const startTop = panel.offsetTop;
+    function onMove(e) {
+      panel.style.left = `${startLeft + e.clientX - startX}px`;
+      panel.style.top = `${startTop + e.clientY - startY}px`;
+    }
+    function onUp() {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  function startResize(panel, evt) {
+    evt.preventDefault();
+    evt.stopPropagation();
+    bringToFront(panel);
+    const startX = evt.clientX;
+    const startY = evt.clientY;
+    const startWidth = panel.offsetWidth;
+    const startHeight = panel.offsetHeight;
+    function onMove(e) {
+      panel.style.width = `${Math.max(160, startWidth + e.clientX - startX)}px`;
+      panel.style.height = `${Math.max(80, startHeight + e.clientY - startY)}px`;
+    }
+    function onUp() {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+    }
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  function closePanel(name) {
+    const entry = open.get(name);
+    if (!entry) return;
+    entry.es.close();
+    entry.el.remove();
+    open.delete(name);
+    updateDockMembership(entry.el, false);
+    layoutMinimizedDock();
+  }
+
+  // 開一個 panel：畫出可拖拉/縮放的框，並訂閱後端 `/api/panel/<name>/stream`
+  // 這個 SSE，內容一有變化後端就會推播過來，不用自己去 poll。
+  function openPanel(name) {
+    if (open.has(name)) {
+      bringToFront(open.get(name).el);
+      return;
+    }
+    const panel = document.createElement("div");
+    panel.className = "panel";
+    const offset = 24 * (cascade++ % 8);
+    panel.style.left = `${40 + offset}px`;
+    panel.style.top = `${40 + offset}px`;
+    panel.style.width = "360px";
+    panel.style.height = "220px";
+
+    const title = document.createElement("div");
+    title.className = "panel-title";
+    const label = document.createElement("span");
+    label.textContent = name;
+
+    const buttons = document.createElement("div");
+    buttons.className = "panel-buttons";
+    const minimizeBtn = document.createElement("button");
+    minimizeBtn.className = "minimize";
+    minimizeBtn.textContent = "_";
+    const maximizeBtn = document.createElement("button");
+    maximizeBtn.className = "maximize";
+    maximizeBtn.textContent = "□";
+    const close = document.createElement("button");
+    close.className = "close";
+    close.textContent = "×";
+    close.addEventListener("click", () => closePanel(name));
+    buttons.appendChild(minimizeBtn);
+    buttons.appendChild(maximizeBtn);
+    buttons.appendChild(close);
+
+    title.appendChild(label);
+    title.appendChild(buttons);
+    title.addEventListener("mousedown", (e) => {
+      if (buttons.contains(e.target) || layoutState === "maximized" || layoutState === "minimized") return;
+      startDrag(panel, e);
+    });
+
+    const body = document.createElement("pre");
+    body.className = "panel-body";
+    body.textContent = "(等待資料...)";
+
+    const handle = document.createElement("div");
+    handle.className = "resize-handle";
+    handle.addEventListener("mousedown", (e) => startResize(panel, e));
+
+    panel.appendChild(title);
+    panel.appendChild(body);
+    panel.appendChild(handle);
+    panel.addEventListener("mousedown", () => bringToFront(panel));
+    desk.appendChild(panel);
+    bringToFront(panel);
+
+    // 「原本大小」只在離開 normal 狀態的當下存一次，不管接下來是先最小化再
+    // 最大化、還是反過來，回到 normal 時都還原成同一組數字，不會被中間狀態
+    // 覆蓋掉。再按一次同一顆按鈕（已經是那個狀態）就是切回 normal。
+    let layoutState = "normal";
+    let savedRect = null;
+
+    function applyLayoutState() {
+      panel.classList.toggle("minimized", layoutState === "minimized");
+      if (layoutState === "normal") {
+        panel.style.bottom = "";
+        if (savedRect) {
+          panel.style.left = savedRect.left;
+          panel.style.top = savedRect.top;
+          panel.style.width = savedRect.width;
+          panel.style.height = savedRect.height;
+        }
+        body.style.display = "";
+        handle.style.display = "";
+      } else if (layoutState === "minimized") {
+        body.style.display = "none";
+        handle.style.display = "none";
+        panel.style.top = ""; // 停靠位置用 bottom 定位，見 layoutMinimizedDock()
+        panel.style.height = `${title.offsetHeight}px`;
+        // left/width/bottom 交給 layoutMinimizedDock() 依停靠順序統一排版。
+      } else if (layoutState === "maximized") {
+        panel.style.bottom = "";
+        body.style.display = "";
+        handle.style.display = "none";
+        panel.style.left = "0px";
+        panel.style.top = "0px";
+        panel.style.width = "100%";
+        panel.style.height = "100%";
+      }
+      maximizeBtn.textContent = layoutState === "maximized" ? "❐" : "□";
+    }
+
+    function toggleLayoutState(next) {
+      if (layoutState === "normal") {
+        savedRect = {
+          left: panel.style.left,
+          top: panel.style.top,
+          width: panel.style.width,
+          height: panel.style.height,
+        };
+      }
+      layoutState = layoutState === next ? "normal" : next;
+      updateDockMembership(panel, layoutState === "minimized");
+      applyLayoutState();
+      layoutMinimizedDock();
+      bringToFront(panel);
+    }
+
+    minimizeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleLayoutState("minimized");
+    });
+    maximizeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleLayoutState("maximized");
+    });
+
+    // EventSource 斷線會自動重連，不用自己寫 retry。
+    const es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
+    es.onmessage = (e) => {
+      // 使用者如果往上捲去看舊內容，不要硬把它拉回底部；只有原本就在（或接近）
+      // 最底下時，新內容進來才跟著捲到最新，跟終端機 tail 的習慣一致。
+      const wasNearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+      try {
+        body.textContent = JSON.parse(e.data);
+      } catch (_err) {
+        body.textContent = e.data;
+      }
+      if (wasNearBottom) {
+        body.scrollTop = body.scrollHeight;
+      }
+    };
+    open.set(name, { el: panel, es });
+  }
+
+  fetch("/api/plugins")
+    .then((r) => r.json())
+    .then((names) => {
+      for (const name of names) {
+        const opt = document.createElement("option");
+        opt.value = name;
+        opt.textContent = name;
+        select.appendChild(opt);
+      }
+    });
+
+  openBtn.addEventListener("click", () => {
+    if (select.value) openPanel(select.value);
+  });
+
+  // 指令輸入列：跟終端機共用同一個 Shell，所以這裡打的指令（包含
+  // `mode`/`plugin enter` 之類會換 mode 的）會直接影響後端狀態，Enter 送出、
+  // Up/Down 在這個分頁自己的輸入紀錄裡瀏覽（純前端，不是後端的 history）。
+  const cmdPromptEl = document.getElementById("cmd-prompt");
+  const cmdInput = document.getElementById("cmd-input");
+  const cmdStatus = document.getElementById("cmd-status");
+  const cmdHistory = [];
+  let historyIndex = -1;
+  let draft = "";
+
+  function refreshPrompt() {
+    fetch("/api/prompt")
+      .then((r) => r.json())
+      .then((d) => { cmdPromptEl.textContent = d.prompt; });
+  }
+  refreshPrompt();
+
+  cmdInput.addEventListener("keydown", (evt) => {
+    if (evt.key === "Enter") {
+      const line = cmdInput.value;
+      cmdInput.value = "";
+      historyIndex = -1;
+      if (line.trim()) cmdHistory.push(line);
+      fetch("/api/exec", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ line }),
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          cmdPromptEl.textContent = d.prompt;
+          cmdStatus.textContent = d.error ? `錯誤: ${d.error}` : "";
+        });
+    } else if (evt.key === "ArrowUp") {
+      if (cmdHistory.length === 0) return;
+      evt.preventDefault();
+      if (historyIndex === -1) {
+        draft = cmdInput.value;
+        historyIndex = cmdHistory.length - 1;
+      } else if (historyIndex > 0) {
+        historyIndex--;
+      }
+      cmdInput.value = cmdHistory[historyIndex];
+    } else if (evt.key === "ArrowDown") {
+      if (historyIndex === -1) return;
+      evt.preventDefault();
+      if (historyIndex < cmdHistory.length - 1) {
+        historyIndex++;
+        cmdInput.value = cmdHistory[historyIndex];
+      } else {
+        historyIndex = -1;
+        cmdInput.value = draft;
+      }
+    }
+  });
+})();
+</script>
+</body>
+</html>
