@@ -17,7 +17,7 @@ use rustyline::{
 
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
-use plugins::{DevicePlugin, MusicPlugin, WolPlugin};
+use plugins::{DevicePlugin, MusicPlugin, OutputPlugin, SystemPlugin, WolPlugin};
 use shell::{PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
@@ -34,21 +34,35 @@ fn main() -> Result<()> {
             "music",
             Box::new(|ctx| Box::new(MusicPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
+        (
+            "output",
+            Box::new(|ctx| Box::new(OutputPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "system",
+            Box::new(|ctx| Box::new(SystemPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
     ];
     let shell = Arc::new(Mutex::new(Shell::new(ctx, factories, output.clone())));
     let mut printed = 0usize;
 
     let script_path = env::args().nth(1).unwrap_or_else(|| "script.cli".to_string());
+    let mut ui = UiMode::Cli;
     if Path::new(&script_path).exists() {
         shell.lock().unwrap().run_script(Path::new(&script_path))?;
         flush_new_lines(&output, &mut printed);
+        // script 裡如果下過 `mode gui`/`mode cli`，一開始就照那個模式啟動，
+        // 而不是永遠先固定開 CLI。
+        if let Some(requested) = shell.lock().unwrap().take_requested_ui() {
+            ui = requested;
+        }
     }
 
-    let mut ui = UiMode::Cli;
     loop {
         if shell.lock().unwrap().should_exit() {
             break;
         }
+        shell.lock().unwrap().set_current_ui(ui);
         match ui {
             UiMode::Cli => run_cli_ui(&shell, &output, &mut printed)?,
             UiMode::Gui => gui::run(&shell, &output)?,
@@ -108,6 +122,12 @@ fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &m
     // 從 GUI 切回來時，GUI 期間累積的內容（包含切換指令本身的 echo）都還沒印到
     // 這個新的 CLI session 上，先補印出來，不用等使用者按下一行才觸發。
     flush_new_lines(output, printed);
+
+    // 把之前執行過的指令（包含 script.cli 跑過的、以及先前 GUI session 打的）
+    // 灌進 rustyline 自己的 history，這樣一開始按上下鍵就找得到。
+    for past in shell.lock().unwrap().history() {
+        let _ = rl.add_history_entry(past.as_str());
+    }
 
     loop {
         let prompt = shell.lock().unwrap().prompt();

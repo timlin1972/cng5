@@ -17,4 +17,9 @@ pub trait Plugin: Send {
     fn commands(&self) -> &'static [&'static str];
     /// `out` 是輸出的地方，不要直接 `println!`——CLI 跟 GUI 模式顯示的方式不一樣。
     fn dispatch(&mut self, cmd: &str, args: &[String], out: &OutputBuffer) -> Result<()>;
+    /// 這個 plugin 的 panel 要顯示的內容；預設 `None`（空殼，只有邊框標題）。
+    /// `output` panel 的內容是即時捲動紀錄，由 GUI 直接處理，不走這個。
+    fn panel_text(&self) -> Option<String> {
+        None
+    }
 }

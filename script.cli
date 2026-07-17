@@ -1,4 +1,13 @@
-plugin add music
-plugin enter music
-help
+mode gui
+plugin enter output
+panel
+rect 0 0 100 100
+show
+exit
+exit
+plugin enter system
+panel
+rect 10 10 40 40
+show
+exit
 exit
