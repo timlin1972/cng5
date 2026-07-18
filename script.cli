@@ -11,3 +11,9 @@ rect 10 10 40 40
 show
 exit
 exit
+plugin enter weather
+location add Xidian
+location add Tainan
+location add Tokyo
+location add Eindhoven
+exit

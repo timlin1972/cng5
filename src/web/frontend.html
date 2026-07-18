@@ -8,7 +8,13 @@
   * { box-sizing: border-box; }
   body {
     margin: 0;
-    font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    /* 純西文等寬字型（Consolas/Menlo…）沒有中文字型，瀏覽器排到中文字時會換去
+       「系統隨便挑的中文字型」，那個字型的中文字寬度不保證剛好是西文字寬的兩倍
+       ——這才是欄位對不齊的根本原因，不是我們自己排版算錯。把設計成中西文寬度
+       成比例（中文剛好是西文兩倍寬）的等寬字型排在前面，能大幅改善這個問題，
+       但仍要那個字型真的有裝在瀏覽器所在的系統上才有效，不是萬用解。 */
+    font-family: "Sarasa Term SC", "Sarasa Term TC", "Sarasa Mono SC", "Sarasa Mono TC", "Noto Sans Mono CJK SC",
+      "Noto Sans Mono CJK TC", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     background: #111318;
     color: #d8dee9;
     height: 100vh;

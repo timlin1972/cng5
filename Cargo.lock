@@ -445,6 +445,7 @@ dependencies = [
  "serde_json",
  "shell-words",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]

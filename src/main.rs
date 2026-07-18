@@ -18,7 +18,7 @@ use rustyline::{
 
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
-use plugins::{DevicePlugin, MusicPlugin, OutputPlugin, SystemPlugin, WolPlugin};
+use plugins::{DevicePlugin, MusicPlugin, OutputPlugin, SystemPlugin, WeatherPlugin, WolPlugin};
 use shell::{lock_shell, PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
@@ -42,6 +42,10 @@ fn main() -> Result<()> {
         (
             "system",
             Box::new(|ctx| Box::new(SystemPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "weather",
+            Box::new(|ctx| Box::new(WeatherPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
     ];
     let shell = Arc::new(Mutex::new(Shell::new(ctx, factories, output.clone())));

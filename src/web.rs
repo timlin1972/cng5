@@ -116,7 +116,7 @@ fn panel_text_for(shell: &Mutex<Shell>, output: &OutputBuffer, name: &str) -> St
         let start = lines.len().saturating_sub(OUTPUT_TAIL_LINES);
         lines[start..].join("\n")
     } else {
-        lock_shell(&shell).plugin_panel_text(name).unwrap_or_default()
+        lock_shell(shell).plugin_panel_text(name).unwrap_or_default()
     }
 }
 

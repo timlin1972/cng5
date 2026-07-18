@@ -235,7 +235,7 @@ impl Shell {
                 // 相關指令馬上就能用，不用等到真的切換到 GUI 迴圈那一刻。
                 self.current_ui = target;
             }
-            (Mode::Root, "exit") => self.should_exit = true,
+            (Mode::Root, "exit" | "quit") => self.should_exit = true,
             // 已經在 root，`~` 沒事做，但仍然是一個合法指令（跟其他 mode 底下的
             // `~` 行為一致，不管在哪一層打都不會被當成「不認得的指令」）。
             (Mode::Root, "~") => {}
@@ -246,7 +246,7 @@ impl Shell {
             // 當 current_ui 是 Gui 的時候，見 usage_lines；CLI 模式下打這個字
             // 在 resolve 那一步就已經被當成不認得的指令擋掉了，不會走到這裡。
             (Mode::InPlugin(name), "panel") => self.mode = Mode::InPanel(name.clone()),
-            (Mode::InPlugin(_), "exit") => self.mode = Mode::Root,
+            (Mode::InPlugin(_), "exit" | "quit") => self.mode = Mode::Root,
             // `~`：不管巢狀多深都直接跳回 root，跟逐層 `exit` 不同。
             (Mode::InPlugin(_), "~") => self.mode = Mode::Root,
             (Mode::InPlugin(name), other) => {
@@ -272,7 +272,7 @@ impl Shell {
                 let name = name.clone();
                 self.panel_activate(&name);
             }
-            (Mode::InPanel(name), "exit") => self.mode = Mode::InPlugin(name.clone()),
+            (Mode::InPanel(name), "exit" | "quit") => self.mode = Mode::InPlugin(name.clone()),
             (Mode::InPanel(_), "~") => self.mode = Mode::Root,
             (Mode::InPanel(_), _) => unreachable!("resolve 只會回傳 usage_lines 裡的字"),
         }
@@ -351,6 +351,7 @@ impl Shell {
                 "mode cli",
                 "mode gui",
                 "exit",
+                "quit",
                 "~",
             ],
             Mode::InPlugin(name) => {
@@ -365,6 +366,7 @@ impl Shell {
                     lines.push("panel");
                 }
                 lines.push("exit");
+                lines.push("quit");
                 lines.push("~");
                 lines
             }
@@ -375,6 +377,7 @@ impl Shell {
                 "hidden",
                 "activate",
                 "exit",
+                "quit",
                 "~",
             ],
         }
@@ -440,6 +443,7 @@ impl Shell {
         s.push_str("  mode cli             切換成一般的命令列畫面\n");
         s.push_str("  mode gui             切換成上下兩個 panel 的畫面\n");
         s.push_str("  exit                 離開程式\n");
+        s.push_str("  quit                 跟 exit 一樣，離開程式\n");
         s.push_str("  ~                    跳回 root（不管在哪一層都直接回來）\n");
         s.push_str(&self.plugin_list_text());
         s
@@ -484,6 +488,7 @@ impl Shell {
             s.push_str("  panel              進入 panel 畫面\n");
         }
         s.push_str("  exit               回到 root\n");
+        s.push_str("  quit               跟 exit 一樣，回到 root\n");
         s.push_str("  ~                  跳回 root（不管在哪一層都直接回來）\n");
         for cmd in plugin.commands() {
             s.push_str(&format!("  {cmd}\n"));
@@ -502,6 +507,7 @@ impl Shell {
         s.push_str(&format!("  {:<30} 隱藏這個 panel\n", "hidden"));
         s.push_str(&format!("  {:<30} 把這個 panel 拉到最上層（不改變顯示與否）\n", "activate"));
         s.push_str(&format!("  {:<30} 回到 {name} plugin mode\n", "exit"));
+        s.push_str(&format!("  {:<30} 跟 exit 一樣，回到 {name} plugin mode\n", "quit"));
         s.push_str(&format!("  {:<30} 跳回 root（不管在哪一層都直接回來）\n", "~"));
         s
     }
