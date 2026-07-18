@@ -19,7 +19,7 @@ use rustyline::{
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
 use plugins::{DevicePlugin, MusicPlugin, OutputPlugin, SystemPlugin, WeatherPlugin, WolPlugin};
-use shell::{lock_shell, PluginFactory, Shell, UiMode};
+use shell::{lock_shell, run_host_shell, PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
     let ctx = Arc::new(Mutex::new(ContextInner::default()));
@@ -163,8 +163,12 @@ fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &m
                     output.push(&format!("錯誤: {err:#}\n"));
                 }
                 let done = sh.should_exit() || sh.has_pending_mode_switch();
+                let shell_passthrough = sh.take_pending_shell_passthrough();
                 drop(sh);
                 flush_new_lines(output, printed);
+                if shell_passthrough {
+                    run_host_shell();
+                }
                 if done {
                     break;
                 }

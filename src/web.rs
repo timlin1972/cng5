@@ -1,10 +1,14 @@
 use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::Duration;
 
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
+use actix_ws::Message;
 use async_stream::stream;
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
@@ -66,6 +70,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std:
             .route("/api/panel/{name}/stream", web::get().to(panel_stream))
             .route("/api/prompt", web::get().to(prompt))
             .route("/api/exec", web::post().to(exec))
+            .route("/api/shell/ws", web::get().to(shell_ws))
             .route("/api/music/files", web::get().to(music_files))
             .route("/api/music/file/{name}/audio", web::get().to(music_file_audio))
             .route("/api/music/file/{name}/cover", web::get().to(music_file_cover))
@@ -188,6 +193,153 @@ async fn exec(
     .await
     .unwrap_or_else(|_| ExecResponse { prompt: String::new(), error: Some("內部錯誤".to_string()) });
     HttpResponse::Ok().json(result)
+}
+
+/// 前端 xterm.js 用 JSON 文字訊息傳「resize」這種控制訊息（跟一般鍵盤輸入的
+/// binary frame 分開，見 `shell_ws` 的說明），格式是 `{"resize":{"cols":.., "rows":..}}`。
+#[derive(Deserialize)]
+struct ShellControlMessage {
+    resize: Option<ShellResize>,
+}
+
+#[derive(Deserialize)]
+struct ShellResize {
+    cols: u16,
+    rows: u16,
+}
+
+/// `GET /api/shell/ws`：跟 `Shell`/`Mode` 完全無關、每個連線各自獨立的一個
+/// 真正的 host shell（PTY），概念上跟 `music/` 檔案管理那些端點一樣「純粹是
+/// 系統操作」，不透過 `lock_shell`——這個功能本來就是要讓使用者拿到一個完全
+/// 獨立、不受目前終端機/其他瀏覽器分頁模式影響的 shell，共用 `Shell` 反而沒
+/// 意義（而且互動 shell 可能開很久，共用鎖會卡住其他人，跟 CLI/GUI 版本
+/// `shell` 指令刻意不做成 `Plugin::dispatch` 是同一個考量，見 `shell.rs` 的
+/// `run_host_shell`）。
+///
+/// 每條 WebSocket 連線各自開一個 PTY + `$SHELL` 子行程：
+/// - 讀取端：獨立的 OS 執行緒阻塞讀 PTY 的輸出，讀到的位元組透過 channel
+///   轉給下面這個 async task，讀到 EOF（子行程離開、pty 關閉）就順便呼叫
+///   `child.wait()` 把這個子行程 reap 掉，不留殭屍行程。
+/// - 寫入端：也是獨立的 OS 執行緒（`writer` 是同步的 `Write`），async task
+///   收到瀏覽器送來的鍵盤輸入（binary frame）就轉丟給這個執行緒寫進 pty。
+/// - resize：瀏覽器端的 `addon-fit` 算出新的欄/列數後送一個 JSON text
+///   frame，直接用 `master.resize(...)`（快速的 ioctl，不需要額外開執行緒）。
+/// - 不管是 PTY 輸出先結束（子行程自己 exit，例如使用者在 shell 裡打
+///   `exit`）還是瀏覽器那邊先斷線，都會呼叫 `killer.kill()` 確保子行程
+///   一定會被清掉，不會變成孤兒行程。
+async fn shell_ws(
+    req: HttpRequest,
+    body: web::Payload,
+    output: web::Data<Arc<OutputBuffer>>,
+) -> actix_web::Result<HttpResponse> {
+    let (response, mut session, mut msg_stream) = actix_ws::handle(&req, body)?;
+
+    let setup = (|| -> anyhow::Result<_> {
+        let pty_system = native_pty_system();
+        let pair = pty_system.openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })?;
+        let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+        let child = pair.slave.spawn_command(CommandBuilder::new(shell_program))?;
+        // 一定要早點放掉這份 slave 端 handle：只要我們自己的行程還握著一份
+        // slave fd，就算子行程已經結束，master 那邊的讀取也不會收到 EOF
+        // （見 portable-pty 官方範例都是這樣做的）。
+        drop(pair.slave);
+        let killer = child.clone_killer();
+        let reader = pair.master.try_clone_reader()?;
+        let writer = pair.master.take_writer()?;
+        Ok((pair.master, child, killer, reader, writer))
+    })();
+
+    let (master, child, killer, reader, writer) = match setup {
+        Ok(v) => v,
+        Err(err) => {
+            output.push(&format!("web shell 開啟失敗: {err:#}\n"));
+            let _ = session.close(None).await;
+            return Ok(response);
+        }
+    };
+
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let (write_tx, write_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+
+    // 寫入執行緒：`writer` 是同步的 `Write`，用一個獨立執行緒把 async task
+    // 收到的鍵盤輸入依序寫進去，不會卡住 tokio 的 executor。
+    thread::spawn(move || {
+        let mut writer = writer;
+        while let Ok(bytes) = write_rx.recv() {
+            if writer.write_all(&bytes).is_err() {
+                break;
+            }
+        }
+    });
+
+    // 讀取＋reap 執行緒：阻塞讀 PTY 輸出轉給 async task；讀到 EOF（不管是
+    // 子行程自然結束、還是被下面 async task 的 `killer.kill()` 殺掉）就呼叫
+    // `child.wait()` 把它 reap 掉。
+    thread::spawn(move || {
+        let mut reader = reader;
+        let mut child = child;
+        let mut buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+        let _ = child.wait();
+    });
+
+    actix_web::rt::spawn(async move {
+        let master = master;
+        let mut killer = killer;
+        loop {
+            tokio::select! {
+                chunk = out_rx.recv() => {
+                    match chunk {
+                        Some(bytes) => {
+                            if session.binary(bytes).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                msg = msg_stream.recv() => {
+                    match msg {
+                        Some(Ok(Message::Binary(bytes))) => {
+                            let _ = write_tx.send(bytes.to_vec());
+                        }
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(ctrl) = serde_json::from_str::<ShellControlMessage>(&text)
+                                && let Some(resize) = ctrl.resize
+                            {
+                                let _ = master.resize(PtySize {
+                                    rows: resize.rows,
+                                    cols: resize.cols,
+                                    pixel_width: 0,
+                                    pixel_height: 0,
+                                });
+                            }
+                        }
+                        Some(Ok(Message::Ping(bytes))) => {
+                            let _ = session.pong(&bytes).await;
+                        }
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // 不管是哪一邊先結束（PTY 輸出斷了 or 瀏覽器斷線），都確保子行程
+        // 一定會被清掉，不留孤兒行程。
+        let _ = killer.kill();
+        let _ = session.close(None).await;
+    });
+
+    Ok(response)
 }
 
 /// SSE 的一個 `data:` frame：內容用 JSON 編碼成單行字串，因為 panel 內容本身

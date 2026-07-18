@@ -17,6 +17,17 @@ pub fn lock_shell(shell: &Mutex<Shell>) -> MutexGuard<'_, Shell> {
     shell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// `shell` 指令實際借出終端機的地方：CLI（`main.rs`）跟 GUI（`gui.rs`）都要在
+/// `Shell` 的鎖已經放開之後才呼叫這個，讓子行程（一個完整的、可能跑很久的互動
+/// shell session）不會卡住其他共用同一個 `Shell` 的執行緒（例如背景的 web
+/// server）。子行程預設繼承目前行程的 stdin/stdout/stderr，也就是使用者現在打
+/// 字用的這個終端機，用起來就像真的執行了 `$SHELL` 一樣；執行失敗（例如
+/// `$SHELL`/`/bin/bash` 都不存在）就當作使用者按了一下就離開，不特別報錯。
+pub fn run_host_shell() {
+    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+    let _ = std::process::Command::new(shell_program).status();
+}
+
 pub enum Mode {
     Root,
     InPlugin(String),
@@ -63,6 +74,12 @@ pub struct Shell {
     mode: Mode,
     should_exit: bool,
     requested_ui: Option<UiMode>,
+    /// root mode 執行過 `shell` 之後設成 true，呼叫端（CLI/GUI 迴圈）應該在放開
+    /// `Shell` 的鎖之後，把目前的終端機借給一個真正的 host shell 用（見
+    /// `has_pending_shell_passthrough`/`take_pending_shell_passthrough`）。跟
+    /// `requested_ui` 一樣不能直接在這裡跑（`execute_line` 呼叫時鎖還握著，
+    /// 互動 shell 可能跑很久，會卡住其他共用同一個 `Shell` 的執行緒，例如 web）。
+    requested_shell_passthrough: bool,
     /// 目前實際顯示中的 UI（跟 `requested_ui` 不同：那個是「待切換」，這個是
     /// 「現在畫面就是這個」），`panel` 指令要不要出現在候選清單裡靠這個判斷。
     current_ui: UiMode,
@@ -97,6 +114,7 @@ impl Shell {
             mode: Mode::Root,
             should_exit: false,
             requested_ui: None,
+            requested_shell_passthrough: false,
             current_ui: UiMode::Cli,
             panels: HashMap::new(),
             panel_order: Vec::new(),
@@ -171,6 +189,12 @@ impl Shell {
         self.requested_ui.take()
     }
 
+    /// 取出並清除待執行的 shell passthrough 旗標：root mode 執行過 `shell` 之後
+    /// 這裡回傳 true，呼叫端應該在放開鎖之後把終端機借給一個真正的 host shell 用。
+    pub fn take_pending_shell_passthrough(&mut self) -> bool {
+        std::mem::take(&mut self.requested_shell_passthrough)
+    }
+
     pub fn prompt(&self) -> String {
         match &self.mode {
             Mode::Root => "cng5> ".to_string(),
@@ -235,6 +259,7 @@ impl Shell {
                 // 相關指令馬上就能用，不用等到真的切換到 GUI 迴圈那一刻。
                 self.current_ui = target;
             }
+            (Mode::Root, "shell") => self.requested_shell_passthrough = true,
             (Mode::Root, "exit" | "quit") => self.should_exit = true,
             // 已經在 root，`~` 沒事做，但仍然是一個合法指令（跟其他 mode 底下的
             // `~` 行為一致，不管在哪一層打都不會被當成「不認得的指令」）。
@@ -350,6 +375,7 @@ impl Shell {
                 "plugin enter <name>",
                 "mode cli",
                 "mode gui",
+                "shell",
                 "exit",
                 "quit",
                 "~",
@@ -442,6 +468,7 @@ impl Shell {
         s.push_str("  plugin enter <name>  進入 plugin mode\n");
         s.push_str("  mode cli             切換成一般的命令列畫面\n");
         s.push_str("  mode gui             切換成上下兩個 panel 的畫面\n");
+        s.push_str("  shell                借用目前終端機開一個真正的 host shell，exit 就會回來\n");
         s.push_str("  exit                 離開程式\n");
         s.push_str("  quit                 跟 exit 一樣，離開程式\n");
         s.push_str("  ~                    跳回 root（不管在哪一層都直接回來）\n");

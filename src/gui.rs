@@ -13,7 +13,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratatui::Terminal;
 
 use crate::output::OutputBuffer;
-use crate::shell::{lock_shell, PanelState, Shell};
+use crate::shell::{lock_shell, run_host_shell, PanelState, Shell};
 
 /// Alt-方向鍵每按一下，active panel 移動幾個百分點（見 `run_loop` 裡的按鍵處理）。
 const PANEL_MOVE_STEP: i64 = 5;
@@ -176,7 +176,29 @@ fn run_loop(
                 // 就像真的終端機一樣，前一個指令的輸出結束、下一個 prompt 出現。
                 output.push(&format!("{}\n", sh.prompt()));
                 let done = sh.should_exit() || sh.has_pending_mode_switch();
+                let shell_passthrough = sh.take_pending_shell_passthrough();
                 drop(sh);
+                if shell_passthrough {
+                    // 把終端機借給真正的 host shell 用之前，先跟 `run()` 結尾的
+                    // 收尾動作一樣把畫面還原成一般終端機模式，不然子行程會直接
+                    // 把輸出畫到 alternate screen 上（使用者切回來之後看不到）。
+                    disable_raw_mode()?;
+                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                    terminal.show_cursor()?;
+                    run_host_shell();
+                    enable_raw_mode()?;
+                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    // 子行程離開前直接寫過真正的畫面，ratatui 內部的 diff buffer
+                    // 並不知道，需要重置才不會誤以為某些格子沒變而跳過重繪，留下
+                    // 子行程殘留的畫面內容。不能用 `terminal.clear()`——ratatui
+                    // 0.30 的 `clear()` 為了「清完畫面後把游標放回原位」會先查詢
+                    // 目前游標位置（送出 DSR escape code 再等終端機回覆），但這裡
+                    // 剛重新進入 alternate screen、根本不需要保留游標位置；用
+                    // `Terminal::new` 直接重建一個乾淨的 buffer 狀態最單純，也不會
+                    // 卡在等一個不需要的游標位置回應上（某些終端機/multiplexer
+                    // 環境下這個查詢可能遲遲收不到回應，讓整個 GUI 卡死或報錯）。
+                    *terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+                }
                 if done {
                     return Ok(());
                 }
