@@ -253,14 +253,29 @@
     border: 1px solid #3a4150;
     border-radius: 4px;
   }
-  .player-seek {
+  /* 進度條＋右邊的時間顯示（"1:20/3:30"）放同一排，時間文字寬度固定
+     （`.player-time`），進度條吃掉剩下的寬度。 */
+  .player-seek-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     width: 100%;
     max-width: 220px;
+  }
+  .player-seek {
+    flex: 1;
+    min-width: 0;
     /* 現代瀏覽器支援用 `accent-color` 幫原生 range 元件上色，不用自己刻
        track/thumb 的 pseudo-element（那個要分瀏覽器各寫一份，麻煩很多），
        拖拉/鍵盤/觸控操作都還是瀏覽器內建那一套，不會有自訂控制項常見的
        小毛病。 */
     accent-color: #6f9dff;
+  }
+  .player-time {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: #9aa3b2;
+    white-space: nowrap;
   }
   .player-track-name {
     max-width: 100%;
@@ -295,9 +310,28 @@
     color: #5a6272;
     padding: 8px 0;
   }
+  /* 這一整排要撐滿 `.player-right` 的寬度：播放模式按鈕（`modeBtn`）固定貼在
+     最左邊，上一首/播放/下一首（`.player-transport`）維持在正中央——用三欄
+     grid（左/中/右）而不是單純的 flex，兩側各留一份等寬的空間夾住中間置中的
+     按鈕群，這樣中間那群按鈕才不會因為左邊多了 `modeBtn` 就跟著偏移。 */
   .player-controls {
+    display: grid;
+    /* 兩側欄位要用 `minmax(0, 1fr)`，不能只寫 `1fr`——`1fr` 欄位預設還是會被
+       裡面內容的最小寬度撐開（`modeBtn` 有自己的 padding），左右兩欄含的
+       內容寬度不一樣，`1fr` 就不再是真正的「等寬」，中間那欄（`.player-transport`）
+       就會跟著偏移、不是整排的正中央。`minmax(0, 1fr)` 才會確保兩欄真的
+       等寬，中間置中的按鈕群才會精準對齊整排的水平中心。 */
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    width: 100%;
+  }
+  .player-controls .player-mode-btn {
+    justify-self: start;
+  }
+  .player-transport {
     display: flex;
     gap: 8px;
+    justify-self: center;
   }
   .player-controls button {
     background: #262a33;
@@ -707,6 +741,28 @@
     musicUi.stopPolling = () => clearInterval(timer);
   }
 
+  // 秒數轉成 "分:秒"（例如 80 -> "1:20"），超過一小時才會多帶一段時
+  // （"1:05:00" 這種），一般歌曲長度用不到那一段、不用特別去補前導 0。
+  function formatTime(seconds) {
+    const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    const paddedSecs = String(secs).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${paddedSecs}`;
+    }
+    return `${minutes}:${paddedSecs}`;
+  }
+
+  // 進度條右邊「現在播放時間/這首全部時長」的文字，`timeupdate`（播放中）、
+  // `loadedmetadata`（換歌後拿到新的總時長）、拖拉進度條時都要更新，共用
+  // 這個函式才不會三個地方各寫一份格式化邏輯。
+  function updateTimeLabel(musicUi) {
+    if (!musicUi.timeLabel) return;
+    musicUi.timeLabel.textContent = `${formatTime(musicUi.player.currentTime)}/${formatTime(musicUi.player.duration)}`;
+  }
+
   // 播放清單靠「目前正在播的檔名」而不是數字索引來記位置——清單每 3 秒重新
   // 抓一次，中間如果有檔案被加入/刪除，數字索引會對錯歌，用檔名去查目前
   // 清單裡的位置就不會有這個問題。
@@ -729,6 +785,7 @@
       // `loadedmetadata`/`timeupdate` 觸發後很快就會被覆蓋成正確的值。
       musicUi.seekBar.max = "0";
       musicUi.seekBar.value = "0";
+      updateTimeLabel(musicUi);
     }
     if (musicUi.lyricsEl) {
       // 歌詞是 `download` 順便抓到的 YouTube 字幕轉出來的，不是每首歌都有
@@ -791,6 +848,39 @@
     if (next >= 0 && next < musicUi.playlist.length) {
       playByName(musicUi, musicUi.playlist[next]);
     }
+  }
+
+  // 隨機播放模式共用的「隨機挑清單裡別首來播」：清單裡還有別首就隨機挑一首
+  // （排除目前這首，不然感覺像沒換），只剩這一首（或清單是空的）就原地重播/
+  // 不做事——「隨機播放模式下按下一首」（見 `nextBtn` 的點擊事件）跟「隨機
+  // 播放模式下一首歌自然播完」（見 `advanceOnEnded`）都是同一種「换一首」，
+  // 共用這個函式才不會兩邊各寫一份邏輯、之後改一邊忘了改另一邊。
+  function playRandomOther(musicUi) {
+    const others = musicUi.playlist.filter((name) => name !== musicUi.currentName);
+    if (others.length > 0) {
+      playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
+    } else if (musicUi.playlist.length > 0) {
+      musicUi.player.currentTime = 0;
+      musicUi.player.play();
+    }
+  }
+
+  // 一首歌自然播完（`ended` 事件）之後接下來要做什麼，依 `musicUi.playMode`
+  // （見 player panel 裡 `modeBtn` 的三個狀態）決定：
+  // - "single"：原地重播同一首。
+  // - "shuffle"：清單裡隨機挑一首（清單只剩一首時就等同 "single"）。
+  // - "sequential"（預設）：跟原本的行為一樣，照清單順序播下一首。
+  function advanceOnEnded(musicUi) {
+    if (musicUi.playMode === "single") {
+      musicUi.player.currentTime = 0;
+      musicUi.player.play();
+      return;
+    }
+    if (musicUi.playMode === "shuffle") {
+      playRandomOther(musicUi);
+      return;
+    }
+    offsetTrack(musicUi, 1);
   }
 
   function highlightPlaying(musicUi) {
@@ -924,6 +1014,8 @@
       // 這首歌沒有封面（`404`）就讓圖片直接空著，不要顯示瀏覽器預設的
       // 破圖示。
       cover.addEventListener("error", () => cover.removeAttribute("src"));
+      const seekRow = document.createElement("div");
+      seekRow.className = "player-seek-row";
       const seekBar = document.createElement("input");
       seekBar.type = "range";
       seekBar.className = "player-seek";
@@ -931,6 +1023,11 @@
       seekBar.max = "0";
       seekBar.value = "0";
       seekBar.step = "0.1";
+      const timeLabel = document.createElement("span");
+      timeLabel.className = "player-time";
+      timeLabel.textContent = "0:00/0:00";
+      seekRow.appendChild(seekBar);
+      seekRow.appendChild(timeLabel);
       const trackName = document.createElement("div");
       trackName.className = "player-track-name";
       trackName.textContent = "(尚未播放)";
@@ -938,20 +1035,54 @@
       lyricsEl.className = "player-lyrics";
       const rightControls = document.createElement("div");
       rightControls.className = "player-controls";
+      // 播放模式按鈕：依序播放 -> 隨機播放 -> 播放單首，循環切換，只影響
+      // 一首歌自然播完（`ended` 事件）之後接下來要做什麼；手動按上一首/
+      // 下一首永遠照清單順序走，不受這個模式影響（跟大部分播放器的習慣
+      // 一致：模式只管「自動接下一首」的行為，手動操作永遠照使用者按的）。
+      // 圖示都用純箭頭類符號（跟 ⏮ ▶ ⏭ 同一路子），不要用 🔁🔀🔂 這種全彩
+      // emoji——那幾個在大部分系統的 emoji 字型裡本身就帶一個色底圖示，跟其他
+      // 單色按鈕擺在一起風格不一致。三個狀態的圖示也要各自不同、一眼就能分
+      // 辨：依序是直線箭頭，單曲是繞一圈回原地的箭頭，隨機是交叉箭頭。
+      const PLAY_MODES = [
+        { mode: "sequential", icon: "→", title: "依序播放" },
+        { mode: "shuffle", icon: "⇄", title: "隨機播放" },
+        { mode: "single", icon: "↻", title: "播放單首" },
+      ];
+      const modeBtn = document.createElement("button");
+      modeBtn.className = "player-mode-btn";
+      modeBtn.textContent = PLAY_MODES[0].icon;
+      modeBtn.title = PLAY_MODES[0].title;
+      modeBtn.addEventListener("click", () => {
+        const idx = PLAY_MODES.findIndex((m) => m.mode === musicUi.playMode);
+        const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
+        musicUi.playMode = next.mode;
+        modeBtn.textContent = next.icon;
+        modeBtn.title = next.title;
+      });
+      // 這幾個媒體控制符號（⏮ ▶ ⏸ ⏭）在 Unicode 裡同時有純文字／全彩 emoji
+      // 兩種畫法，不少系統的 emoji 字型預設會畫成帶色底的圖示——跟 modeBtn
+      // 那幾個圖示同樣的毛病（見上面 PLAY_MODES 的說明）。在字元後面加上
+      // `︎`（文字呈現的 variation selector）明確要求瀏覽器用純文字/單色
+      // 畫法，不要套用 emoji 那份帶顏色的畫法。
+      const TEXT_STYLE = "︎";
       const prevBtn = document.createElement("button");
-      prevBtn.textContent = "⏮";
+      prevBtn.textContent = "⏮" + TEXT_STYLE;
       prevBtn.title = "上一首";
       const playPauseBtn = document.createElement("button");
-      playPauseBtn.textContent = "▶";
+      playPauseBtn.textContent = "▶" + TEXT_STYLE;
       playPauseBtn.title = "播放/暫停";
       const nextBtn = document.createElement("button");
-      nextBtn.textContent = "⏭";
+      nextBtn.textContent = "⏭" + TEXT_STYLE;
       nextBtn.title = "下一首";
-      rightControls.appendChild(prevBtn);
-      rightControls.appendChild(playPauseBtn);
-      rightControls.appendChild(nextBtn);
+      const transport = document.createElement("div");
+      transport.className = "player-transport";
+      transport.appendChild(prevBtn);
+      transport.appendChild(playPauseBtn);
+      transport.appendChild(nextBtn);
+      rightControls.appendChild(modeBtn);
+      rightControls.appendChild(transport);
       right.appendChild(cover);
-      right.appendChild(seekBar);
+      right.appendChild(seekRow);
       right.appendChild(trackName);
       right.appendChild(lyricsEl);
       right.appendChild(rightControls);
@@ -969,16 +1100,27 @@
         cover,
         trackName,
         seekBar,
+        timeLabel,
         lyricsEl,
         lyricsLines: [],
         lyricsActiveIndex: -1,
         playlist: [],
         currentName: null,
+        playMode: PLAY_MODES[0].mode,
         stopPolling: () => {},
       };
 
+      // 上一首永遠照清單順序走（隨機播放模式下沒有「上一首」的歷史紀錄可以
+      // 回溯，照順序走是最直覺的退回方式）；下一首在隨機播放模式下則是真的
+      // 隨機換一首，跟「隨機播放模式下一首歌自然播完」的行為一致。
       prevBtn.addEventListener("click", () => offsetTrack(musicUi, -1));
-      nextBtn.addEventListener("click", () => offsetTrack(musicUi, 1));
+      nextBtn.addEventListener("click", () => {
+        if (musicUi.playMode === "shuffle") {
+          playRandomOther(musicUi);
+        } else {
+          offsetTrack(musicUi, 1);
+        }
+      });
       playPauseBtn.addEventListener("click", () => {
         if (player.paused) {
           if (!musicUi.currentName && musicUi.playlist.length > 0) {
@@ -990,9 +1132,9 @@
           player.pause();
         }
       });
-      player.addEventListener("play", () => { playPauseBtn.textContent = "⏸"; });
-      player.addEventListener("pause", () => { playPauseBtn.textContent = "▶"; });
-      player.addEventListener("ended", () => offsetTrack(musicUi, 1));
+      player.addEventListener("play", () => { playPauseBtn.textContent = "⏸" + TEXT_STYLE; });
+      player.addEventListener("pause", () => { playPauseBtn.textContent = "▶" + TEXT_STYLE; });
+      player.addEventListener("ended", () => advanceOnEnded(musicUi));
 
       // 進度條：`loadedmetadata` 才拿得到這首歌的總長度（`duration`），拖拉中
       // （`input` 事件，每移動一點就會觸發）直接即時 seek，同時標記 `seeking`，
@@ -1001,14 +1143,17 @@
       let seeking = false;
       player.addEventListener("loadedmetadata", () => {
         seekBar.max = String(player.duration || 0);
+        updateTimeLabel(musicUi);
       });
       player.addEventListener("timeupdate", () => {
         if (!seeking) seekBar.value = String(player.currentTime);
         updateLyricsHighlight(musicUi);
+        updateTimeLabel(musicUi);
       });
       seekBar.addEventListener("input", () => {
         seeking = true;
         player.currentTime = Number(seekBar.value);
+        updateTimeLabel(musicUi);
       });
       seekBar.addEventListener("change", () => {
         seeking = false;
