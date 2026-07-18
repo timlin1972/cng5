@@ -95,7 +95,11 @@ fn flush_new_lines(output: &OutputBuffer, printed: &mut usize) {
     *printed = output.len();
 }
 
-/// 按下 `?` 立刻顯示當前 mode 的 help，不需要按 Enter，也不會把 `?` 插入輸入緩衝區。
+/// 按下 `?` 立刻顯示當前 mode 的 help，不需要按 Enter。只有在「正要開始打一個
+/// 新的字」（游標前面是空字串或以空白結尾）時才這樣做；如果游標前面那個字還沒
+/// 打完（例如網址 `watch?v=...` 打到一半），就回傳 `None` 讓 rustyline 照預設
+/// 行為把 `?` 當一般字元插進去——不然像 URL 這種本來就含有 `?` 的內容會被這個
+/// 按鍵整個吃掉，永遠打不出來。
 /// 用 rustyline 的 external printer 輸出，這樣顯示完之後 prompt 會自動重新出現，
 /// 不用像直接 `println!` 那樣得等使用者按下一次 Enter 才會重繪。
 struct HelpKeyHandler<P> {
@@ -106,6 +110,9 @@ struct HelpKeyHandler<P> {
 impl<P: ExternalPrinter + Send> ConditionalEventHandler for HelpKeyHandler<P> {
     fn handle(&self, _evt: &Event, _n: RepeatCount, _positive: bool, ctx: &EventContext) -> Option<Cmd> {
         let before_cursor = &ctx.line()[..ctx.pos()];
+        if !before_cursor.is_empty() && !before_cursor.ends_with(char::is_whitespace) {
+            return None;
+        }
         let text = lock_shell(&self.shell).context_help_text(before_cursor);
         let _ = self.printer.lock().unwrap().print(text);
         Some(Cmd::Noop)

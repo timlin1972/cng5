@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+actix-files = "0.6"
 actix-web = "4"
 anyhow = "1.0.103"
 async-stream = "0.3"
+id3 = "1"
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 rustyline = "18.0.1"

@@ -1,13 +1,15 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use actix_web::{web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use async_stream::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
+use crate::plugins::{MUSIC_DIR, SUBTITLE_LANG_PRIORITY};
 use crate::shell::{lock_shell, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
@@ -64,6 +66,11 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std:
             .route("/api/panel/{name}/stream", web::get().to(panel_stream))
             .route("/api/prompt", web::get().to(prompt))
             .route("/api/exec", web::post().to(exec))
+            .route("/api/music/files", web::get().to(music_files))
+            .route("/api/music/file/{name}/audio", web::get().to(music_file_audio))
+            .route("/api/music/file/{name}/cover", web::get().to(music_file_cover))
+            .route("/api/music/file/{name}/lyrics", web::get().to(music_file_lyrics))
+            .route("/api/music/file/{name}", web::delete().to(music_file_delete))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -214,4 +221,166 @@ async fn panel_stream(path: web::Path<String>, hub: web::Data<Hub>) -> impl Resp
         }
     };
     HttpResponse::Ok().content_type("text/event-stream").streaming(body)
+}
+
+/// web 這邊播放/管理 `music/` 資料夾裡的檔案是獨立於 `MusicPlugin`/`Shell` 之外
+/// 的功能——純粹是檔案系統操作（列出/串流/刪除），不需要跟 `download` 指令共用
+/// 的下載狀態協調，所以不透過 `lock_shell`，直接讀寫磁碟就好，也不會因此卡到
+/// 持有 `Shell` 鎖的其他操作。
+///
+/// `name` 只接受單一檔名（不能含路徑分隔符或是 `.`/`..`），避免有人把檔名做成
+/// path traversal 跑到 `music/` 資料夾以外的地方去讀/刪別的檔案。回傳 `None`
+/// 代表這個名字不安全，呼叫端應該回 400。
+fn safe_music_path(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return None;
+    }
+    Some(Path::new(MUSIC_DIR).join(name))
+}
+
+/// `GET /api/music/files`：`music/` 資料夾裡目前有的檔案名稱（依字母排序），
+/// 資料夾還不存在就當作空清單，不報錯——跟 `MusicPlugin::list_text()` 判斷
+/// 資料夾不存在時的容錯邏輯一致。只列 `.mp3`，`download` 順便存的 `.srt`
+/// 歌詞字幕檔是附屬品，不該被當成清單裡可以播放/刪除的一個項目（見
+/// `MusicPlugin::list_text()` 的同一個理由）。
+async fn music_files() -> impl Responder {
+    let names: Vec<String> = std::fs::read_dir(MUSIC_DIR)
+        .map(|entries| {
+            let mut names: Vec<String> = entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.to_ascii_lowercase().ends_with(".mp3"))
+                .collect();
+            names.sort();
+            names
+        })
+        .unwrap_or_default();
+    HttpResponse::Ok().json(names)
+}
+
+/// `GET /api/music/file/{name}/audio`：把檔案內容當音訊串流回去，用
+/// `actix_files::NamedFile` 是因為它會自動處理 `Range`/條件式請求（`<audio>`
+/// 標籤拖拉播放進度需要靠 Range 請求做區段讀取），自己手刻這段容易漏掉細節。
+async fn music_file_audio(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let name = path.into_inner();
+    let Some(file_path) = safe_music_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match actix_files::NamedFile::open(&file_path) {
+        Ok(file) => file.into_response(&req),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `DELETE /api/music/file/{name}`：從 `music/` 資料夾刪掉這個檔案。
+async fn music_file_delete(path: web::Path<String>) -> impl Responder {
+    let name = path.into_inner();
+    let Some(file_path) = safe_music_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match std::fs::remove_file(&file_path) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `GET /api/music/file/{name}/cover`：讀 mp3 的 ID3 標籤，把 `download` 指令
+/// 用 `yt-dlp --embed-thumbnail` 嵌進去的封面圖原始位元組讀出來直接回傳，給
+/// web 播放器介面顯示用。檔案不存在、沒有 ID3 標籤、或標籤裡沒有封面圖都算
+/// 沒有，回 404（沒有封面圖是正常情況，不是錯誤，例如舊格式音檔或手動放進去
+/// 的檔案）。
+async fn music_file_cover(path: web::Path<String>) -> HttpResponse {
+    let name = path.into_inner();
+    let Some(file_path) = safe_music_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    let Ok(tag) = id3::Tag::read_from_path(&file_path) else {
+        return HttpResponse::NotFound().finish();
+    };
+    match tag.pictures().next() {
+        Some(picture) => HttpResponse::Ok().content_type(picture.mime_type.clone()).body(picture.data.clone()),
+        None => HttpResponse::NotFound().finish(),
+    }
+}
+
+#[derive(Serialize)]
+struct LyricLine {
+    /// 這一句開始的秒數（可以有小數），前端拿播放進度（`currentTime`）跟這個
+    /// 比對，決定目前要把哪一句反白。
+    start: f64,
+    text: String,
+}
+
+/// `download` 用 `yt-dlp --write-subs` 抓字幕時，檔名慣例是
+/// `{標題}.{語言代碼}.srt`（例如 `Song.zh-TW.srt`）。同一部影片如果同時有好
+/// 幾種語言的字幕，`yt-dlp` 會全部抓下來，不是只抓一個——如果這裡對資料夾做
+/// 無排序的掃描、抓到第一個「檔名開頭對得上」的 `.srt` 就用，配到的很可能不是
+/// 想要的語言（例如明明中文歌，卻因為資料夾掃描順序配到英文字幕）。所以改成
+/// 依照 `SUBTITLE_LANG_PRIORITY` 的順序一個一個組出確切檔名去檢查存在，跟
+/// `MusicPlugin::download` 抓字幕用的是同一份優先順序，保證兩邊一致。
+/// 都沒有就是 `None`（沒有字幕，很正常，不是每支影片都有）。
+fn find_lyrics_path(mp3_name: &str) -> Option<PathBuf> {
+    let stem = Path::new(mp3_name).file_stem()?.to_str()?;
+    SUBTITLE_LANG_PRIORITY
+        .iter()
+        .map(|lang| Path::new(MUSIC_DIR).join(format!("{stem}.{lang}.srt")))
+        .find(|candidate| candidate.is_file())
+}
+
+/// 簡單的 `.srt` 解析：每個字幕塊是「編號」「時間範圍」「一行以上的文字」，
+/// 塊與塊之間空一行。這裡只取每塊的開始時間跟文字內容（合成一行），不需要
+/// 結束時間——「目前唱到哪一句」只需要知道下一句開始前都算這一句還在唱。
+fn parse_srt(content: &str) -> Vec<LyricLine> {
+    let normalized = content.replace("\r\n", "\n");
+    normalized
+        .split("\n\n")
+        .filter_map(|block| {
+            let mut lines = block.trim().lines();
+            let first = lines.next()?;
+            // 第一行通常是編號；但保守一點，如果它本身就長得像時間範圍
+            // （某些工具轉出來的 `.srt` 省略編號），就直接當時間範圍用。
+            let time_line = if first.contains("-->") { first } else { lines.next()? };
+            let start = parse_srt_start(time_line)?;
+            let text: String = lines.collect::<Vec<_>>().join(" ").trim().to_string();
+            if text.is_empty() {
+                return None;
+            }
+            Some(LyricLine { start, text })
+        })
+        .collect()
+}
+
+/// `"00:00:11,960 --> 00:00:15,820"` 這種時間範圍字串，取開始時間換算成秒數。
+fn parse_srt_start(time_line: &str) -> Option<f64> {
+    let start_str = time_line.split("-->").next()?.trim();
+    let (hms, millis_str) = start_str.split_once(',')?;
+    let millis: f64 = millis_str.trim().parse().ok()?;
+    let mut parts = hms.split(':');
+    let hours: f64 = parts.next()?.parse().ok()?;
+    let minutes: f64 = parts.next()?.parse().ok()?;
+    let seconds: f64 = parts.next()?.parse().ok()?;
+    Some(hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0)
+}
+
+/// `GET /api/music/file/{name}/lyrics`：找這首歌旁邊 `download` 順便存的
+/// `.srt` 歌詞字幕檔（見 `find_lyrics_path`），解析成「開始時間＋文字」的陣列
+/// 回傳給前端做同步顯示。沒有字幕檔、或解析不出東西都回 404——沒有歌詞是
+/// 正常情況，不是每支影片都有字幕可以當歌詞用。
+async fn music_file_lyrics(path: web::Path<String>) -> HttpResponse {
+    let name = path.into_inner();
+    if safe_music_path(&name).is_none() {
+        return HttpResponse::BadRequest().finish();
+    }
+    let Some(lyrics_path) = find_lyrics_path(&name) else {
+        return HttpResponse::NotFound().finish();
+    };
+    let Ok(content) = std::fs::read_to_string(&lyrics_path) else {
+        return HttpResponse::NotFound().finish();
+    };
+    let lines = parse_srt(&content);
+    if lines.is_empty() {
+        return HttpResponse::NotFound().finish();
+    }
+    HttpResponse::Ok().json(lines)
 }

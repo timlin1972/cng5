@@ -7,7 +7,7 @@ exit
 exit
 plugin enter system
 panel
-rect 10 10 40 40
+rect 20 20 40 40
 show
 exit
 exit

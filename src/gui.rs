@@ -234,7 +234,11 @@ fn run_loop(
                     _ => {}
                 }
             }
-            KeyCode::Char('?') => {
+            // `?`只有在「正要開始打一個新的字」（開頭或前一個字元是空白）時才當
+            // 求助鍵，其餘情況（正在打一個字的中間，例如網址 `watch?v=...`）就是
+            // 字面上的問號，直接插入——不然像 URL 這種本來就含有 `?` 的內容永遠
+            // 打不出來，`?` 會被這個鍵直接吃掉。
+            KeyCode::Char('?') if input.is_empty() || input.ends_with(char::is_whitespace) => {
                 let sh = lock_shell(shell);
                 output.push(&format!("{}{}?\n", sh.prompt(), input));
                 let text = sh.context_help_text(&input);

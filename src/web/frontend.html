@@ -2,7 +2,12 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>cng5</title>
+<!-- 一個 ">_" 終端機提示字元的圖示，配色跟頁面本身同一套（深色背景 #1b1e26、
+     邊框 #3a4150、藍色重點 #6f9dff、文字 #d8dee9），SVG 直接用 base64 內嵌，
+     不用額外的圖片檔案，完全自足。 -->
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiMxYjFlMjYiLz4KICA8cmVjdCB4PSIyIiB5PSIyIiB3aWR0aD0iNjAiIGhlaWdodD0iNjAiIHJ4PSIxMiIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjM2E0MTUwIiBzdHJva2Utd2lkdGg9IjMiLz4KICA8cGF0aCBkPSJNMTQgMjAgTDI4IDMyIEwxNCA0NCIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNmY5ZGZmIiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPgogIDxsaW5lIHgxPSIzNCIgeTE9IjQ0IiB4Mj0iNTAiIHkyPSI0NCIgc3Ryb2tlPSIjZDhkZWU5IiBzdHJva2Utd2lkdGg9IjYiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K">
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
@@ -17,7 +22,16 @@
       "Noto Sans Mono CJK TC", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     background: #111318;
     color: #d8dee9;
+    /* Android Chrome（其他行動瀏覽器也一樣）的網址列會依捲動狀態顯示/隱藏，
+       `100vh` 算的是網址列完全收起時的最大高度，網址列還顯示著的時候實際可見
+       範圍比 `100vh` 矮一截——這個 flex 排版的頭尾（toolbar/cmdbar）就有一邊會
+       被排到可見範圍外面（`overflow: hidden` 又不能捲動看到），才會出現「重新
+       整理後上面那列不見、換成下面那列不見」這種看渲染當下網址列狀態決定的
+       不一致現象。`100dvh`（dynamic viewport height）是專門解決這個問題的新
+       單位，永遠對應「現在」實際看得到的範圍；瀏覽器不支援 `100dvh` 的話這行
+       會被整條忽略，留著上面的 `100vh` 當退回方案。 */
     height: 100vh;
+    height: 100dvh;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -136,12 +150,173 @@
     border-right: 2px solid #5a6272;
     border-bottom: 2px solid #5a6272;
   }
+  /* `music-files`/`music-row`… 這幾個類別是 `player` panel 左半邊的檔案清單
+     在用的（`renderMusicFiles`），`music` panel 本身現在已經是普通純文字
+     panel，不再需要這些——名字沒改是因為兩個 panel 共用同一份清單渲染邏輯。 */
+  .music-files {
+    flex: 1;
+    overflow: auto;
+    padding: 0 8px;
+  }
+  .music-empty {
+    color: #5a6272;
+    padding: 8px 0;
+  }
+  .music-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 0;
+    border-bottom: 1px solid #262a33;
+  }
+  .music-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .music-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .music-row button:hover { background: #323844; }
+  .music-row.playing {
+    background: #1e2530;
+    border-radius: 3px;
+  }
+  .music-row.playing .music-name { color: #6f9dff; }
+  /* `player` panel 是特例：跟任何 plugin 都無關，純粹是前端組出來的
+     播放器介面（沒有 SSE 訂閱），左邊檔案清單＋下載列，右邊封面＋播放控制。
+     見 `openPanel` 裡 `name === "player"` 的分支。 */
+  .player-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    font-size: 13px;
+  }
+  .player-left {
+    flex: 1.3;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid #262a33;
+  }
+  .player-left .music-files {
+    flex: 1;
+  }
+  .player-download-row {
+    display: flex;
+    gap: 6px;
+    padding: 8px;
+    border-top: 1px solid #262a33;
+  }
+  .player-url-input {
+    flex: 1;
+    min-width: 0;
+    background: #0d0f13;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 4px 6px;
+    font: inherit;
+  }
+  .player-download-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 4px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .player-download-row button:hover { background: #323844; }
+  .player-right {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 16px;
+    overflow: hidden;
+  }
+  .player-cover {
+    width: 100%;
+    max-width: 220px;
+    aspect-ratio: 1 / 1;
+    object-fit: cover;
+    background: #0d0f13;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+  }
+  .player-seek {
+    width: 100%;
+    max-width: 220px;
+    /* 現代瀏覽器支援用 `accent-color` 幫原生 range 元件上色，不用自己刻
+       track/thumb 的 pseudo-element（那個要分瀏覽器各寫一份，麻煩很多），
+       拖拉/鍵盤/觸控操作都還是瀏覽器內建那一套，不會有自訂控制項常見的
+       小毛病。 */
+    accent-color: #6f9dff;
+  }
+  .player-track-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #d8dee9;
+    text-align: center;
+  }
+  /* 歌詞來自 `download` 順便抓的 YouTube 字幕（真人上傳的才抓，見
+     `MusicPlugin::download` 的說明），不是每首歌都有；`min-height: 0` 是讓
+     這塊在 flex column 裡真的能收縮並且自己捲動，不然子元素會把 `player-right`
+     撐開，反而讓封面/按鈕被擠出可視範圍。 */
+  .player-lyrics {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    max-width: 260px;
+    overflow: auto;
+    text-align: center;
+    color: #6a7383;
+    font-size: 12px;
+  }
+  .player-lyric-line {
+    padding: 3px 0;
+  }
+  .player-lyric-line.active {
+    color: #6f9dff;
+    font-weight: bold;
+  }
+  .player-lyrics-empty {
+    color: #5a6272;
+    padding: 8px 0;
+  }
+  .player-controls {
+    display: flex;
+    gap: 8px;
+  }
+  .player-controls button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 6px 14px;
+    font: inherit;
+    font-size: 15px;
+    cursor: pointer;
+  }
+  .player-controls button:hover { background: #323844; }
 </style>
 </head>
 <body>
 <div id="toolbar">
   <select id="plugin-select"></select>
   <button id="open-btn">開啟 panel</button>
+  <button id="open-player-btn">🎵 Player</button>
 </div>
 <div id="desk"></div>
 <div id="cmdbar">
@@ -156,6 +331,7 @@
   const desk = document.getElementById("desk");
   const select = document.getElementById("plugin-select");
   const openBtn = document.getElementById("open-btn");
+  const openPlayerBtn = document.getElementById("open-player-btn");
 
   // 每個 tab 自己的 panel 版面（位置/大小/疊放順序/開了哪些），只存在這個
   // JS 變數裡，重新整理就消失，也完全不會送回後端——跟後端 `rect`/`show`/
@@ -238,11 +414,176 @@
   function closePanel(name) {
     const entry = open.get(name);
     if (!entry) return;
-    entry.es.close();
+    if (entry.es) entry.es.close();
+    if (entry.musicUi) entry.musicUi.stopPolling();
     entry.el.remove();
     open.delete(name);
     updateDockMembership(entry.el, false);
     layoutMinimizedDock();
+  }
+
+  // 跟終端機共用同一個 Shell，這裡送出去的指令（包含 `mode`/`plugin enter`
+  // 之類會換 mode 的）會直接影響後端狀態——指令列輸入框跟 `player` panel 的
+  // 下載按鈕都靠這個共用函式送指令，不要各自重複一份 fetch 邏輯。
+  async function execLine(line) {
+    const res = await fetch("/api/exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ line }),
+    });
+    return res.json();
+  }
+
+  // `music` panel 專用：定期打 `/api/music/files` 拿目前 `music/` 資料夾裡的
+  // 檔案清單，畫成一列一列（播放/刪除按鈕），跟其他 panel 純文字顯示不一樣，
+  // 是這個 panel 才有的獨立功能——跟後端 `download`/`list` 共用同一個資料夾，
+  // 但直接讀寫檔案，不透過 `Shell`（見 `web.rs` 的說明）。
+  function startMusicFileBrowser(musicUi) {
+    async function refresh() {
+      try {
+        const res = await fetch("/api/music/files");
+        const names = await res.json();
+        renderMusicFiles(musicUi, names, refresh);
+      } catch (_err) {
+        // 這次沒抓到就算了，下一次 poll 再試，不用跳錯誤訊息干擾畫面。
+      }
+    }
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    musicUi.stopPolling = () => clearInterval(timer);
+  }
+
+  // 播放清單靠「目前正在播的檔名」而不是數字索引來記位置——清單每 3 秒重新
+  // 抓一次，中間如果有檔案被加入/刪除，數字索引會對錯歌，用檔名去查目前
+  // 清單裡的位置就不會有這個問題。
+  function playByName(musicUi, name) {
+    musicUi.currentName = name;
+    musicUi.player.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
+    musicUi.player.play();
+    highlightPlaying(musicUi);
+    // `cover`/`trackName`/`seekBar` 只有 `player` panel 才有（`music` panel
+    // 沒有這些顯示），一般 panel 的 `musicUi` 也不會有這幾個欄位。
+    if (musicUi.cover) {
+      musicUi.cover.removeAttribute("src");
+      musicUi.cover.src = `/api/music/file/${encodeURIComponent(name)}/cover`;
+    }
+    if (musicUi.trackName) {
+      musicUi.trackName.textContent = name;
+    }
+    if (musicUi.seekBar) {
+      // 換歌了，先歸零，不要讓上一首播到一半的進度殘留在畫面上，等新的一首
+      // `loadedmetadata`/`timeupdate` 觸發後很快就會被覆蓋成正確的值。
+      musicUi.seekBar.max = "0";
+      musicUi.seekBar.value = "0";
+    }
+    if (musicUi.lyricsEl) {
+      // 歌詞是 `download` 順便抓到的 YouTube 字幕轉出來的，不是每首歌都有
+      // （404 就是沒有），失敗也當作沒有處理，不要跳錯誤訊息干擾畫面。
+      fetch(`/api/music/file/${encodeURIComponent(name)}/lyrics`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((lines) => renderLyrics(musicUi, lines))
+        .catch(() => renderLyrics(musicUi, []));
+    }
+  }
+
+  function renderLyrics(musicUi, lines) {
+    musicUi.lyricsLines = lines;
+    musicUi.lyricsActiveIndex = -1;
+    musicUi.lyricsEl.innerHTML = "";
+    if (lines.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "player-lyrics-empty";
+      empty.textContent = "(沒有歌詞)";
+      musicUi.lyricsEl.appendChild(empty);
+      return;
+    }
+    for (const line of lines) {
+      const div = document.createElement("div");
+      div.className = "player-lyric-line";
+      div.textContent = line.text;
+      musicUi.lyricsEl.appendChild(div);
+    }
+  }
+
+  // 「目前唱到哪一句」＝開始時間不超過目前播放進度的最後一句；每次 `timeupdate`
+  // 都會呼叫，用 `lyricsActiveIndex` 記住上一次反白的是哪一句，沒變就不用重新
+  // 操作 DOM（`timeupdate` 一秒觸發好幾次，沒必要每次都全部重畫）。
+  function updateLyricsHighlight(musicUi) {
+    const lines = musicUi.lyricsLines;
+    if (!musicUi.lyricsEl || !lines || lines.length === 0) return;
+    const t = musicUi.player.currentTime;
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].start <= t) idx = i;
+      else break;
+    }
+    if (idx === musicUi.lyricsActiveIndex) return;
+    musicUi.lyricsActiveIndex = idx;
+    const rows = musicUi.lyricsEl.children;
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle("active", i === idx);
+    }
+    if (idx >= 0 && rows[idx]) {
+      rows[idx].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  // `delta` 是 +1（下一首）或 -1（上一首）；找不到目前這首（例如已經被刪除）
+  // 或已經到清單頭尾就不做事。
+  function offsetTrack(musicUi, delta) {
+    const idx = musicUi.playlist.indexOf(musicUi.currentName);
+    if (idx === -1) return;
+    const next = idx + delta;
+    if (next >= 0 && next < musicUi.playlist.length) {
+      playByName(musicUi, musicUi.playlist[next]);
+    }
+  }
+
+  function highlightPlaying(musicUi) {
+    for (const row of musicUi.fileList.children) {
+      row.classList.toggle("playing", row.dataset.name === musicUi.currentName);
+    }
+  }
+
+  function renderMusicFiles(musicUi, names, refresh) {
+    musicUi.playlist = names;
+    musicUi.fileList.innerHTML = "";
+    if (names.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "music-empty";
+      empty.textContent = "(還沒有下載任何檔案)";
+      musicUi.fileList.appendChild(empty);
+      return;
+    }
+    for (const name of names) {
+      const row = document.createElement("div");
+      row.className = "music-row";
+      row.dataset.name = name;
+      const label = document.createElement("span");
+      label.className = "music-name";
+      label.textContent = name;
+      label.title = name;
+
+      const playBtn = document.createElement("button");
+      playBtn.textContent = "▶";
+      playBtn.title = "播放";
+      playBtn.addEventListener("click", () => playByName(musicUi, name));
+
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "🗑";
+      delBtn.title = "刪除";
+      delBtn.addEventListener("click", async () => {
+        if (!window.confirm(`刪除「${name}」？`)) return;
+        await fetch(`/api/music/file/${encodeURIComponent(name)}`, { method: "DELETE" });
+        refresh();
+      });
+
+      row.appendChild(label);
+      row.appendChild(playBtn);
+      row.appendChild(delBtn);
+      musicUi.fileList.appendChild(row);
+    }
+    highlightPlaying(musicUi);
   }
 
   // 開一個 panel：畫出可拖拉/縮放的框，並訂閱後端 `/api/panel/<name>/stream`
@@ -288,16 +629,163 @@
       startDrag(panel, e);
     });
 
-    const body = document.createElement("pre");
-    body.className = "panel-body";
-    body.textContent = "(等待資料...)";
+    // `player`（獨立的播放器面板，見下面）以外的 panel 都用同一份純文字 body，
+    // 訂閱 `/api/panel/<name>/stream`——`music` 現在也是其中之一：播放/檔案
+    // 管理都搬去 `player` panel 了，這裡就只是照一般 plugin 顯示 `list_text()`
+    // 的純文字內容。
+    let body;
+    let musicUi = null;
+    if (name === "player") {
+      // 跟任何 plugin 都無關的獨立播放器：不訂閱 SSE（`body` 保持 `undefined`），
+      // 左邊檔案清單＋下載列，右邊封面＋播放控制。
+      panel.style.width = "480px";
+      panel.style.height = "340px";
+
+      const container = document.createElement("div");
+      container.className = "player-body";
+
+      const left = document.createElement("div");
+      left.className = "player-left";
+      const fileList = document.createElement("div");
+      fileList.className = "music-files";
+      const downloadRow = document.createElement("div");
+      downloadRow.className = "player-download-row";
+      const urlInput = document.createElement("input");
+      urlInput.type = "text";
+      urlInput.placeholder = "YouTube 連結...";
+      urlInput.className = "player-url-input";
+      const downloadBtn = document.createElement("button");
+      downloadBtn.textContent = "Download";
+      downloadRow.appendChild(urlInput);
+      downloadRow.appendChild(downloadBtn);
+      left.appendChild(fileList);
+      left.appendChild(downloadRow);
+
+      const right = document.createElement("div");
+      right.className = "player-right";
+      const cover = document.createElement("img");
+      cover.className = "player-cover";
+      cover.alt = "";
+      // 這首歌沒有封面（`404`）就讓圖片直接空著，不要顯示瀏覽器預設的
+      // 破圖示。
+      cover.addEventListener("error", () => cover.removeAttribute("src"));
+      const seekBar = document.createElement("input");
+      seekBar.type = "range";
+      seekBar.className = "player-seek";
+      seekBar.min = "0";
+      seekBar.max = "0";
+      seekBar.value = "0";
+      seekBar.step = "0.1";
+      const trackName = document.createElement("div");
+      trackName.className = "player-track-name";
+      trackName.textContent = "(尚未播放)";
+      const lyricsEl = document.createElement("div");
+      lyricsEl.className = "player-lyrics";
+      const rightControls = document.createElement("div");
+      rightControls.className = "player-controls";
+      const prevBtn = document.createElement("button");
+      prevBtn.textContent = "⏮";
+      prevBtn.title = "上一首";
+      const playPauseBtn = document.createElement("button");
+      playPauseBtn.textContent = "▶";
+      playPauseBtn.title = "播放/暫停";
+      const nextBtn = document.createElement("button");
+      nextBtn.textContent = "⏭";
+      nextBtn.title = "下一首";
+      rightControls.appendChild(prevBtn);
+      rightControls.appendChild(playPauseBtn);
+      rightControls.appendChild(nextBtn);
+      right.appendChild(cover);
+      right.appendChild(seekBar);
+      right.appendChild(trackName);
+      right.appendChild(lyricsEl);
+      right.appendChild(rightControls);
+
+      container.appendChild(left);
+      container.appendChild(right);
+
+      const player = document.createElement("audio");
+      container.appendChild(player);
+
+      musicUi = {
+        container,
+        fileList,
+        player,
+        cover,
+        trackName,
+        seekBar,
+        lyricsEl,
+        lyricsLines: [],
+        lyricsActiveIndex: -1,
+        playlist: [],
+        currentName: null,
+        stopPolling: () => {},
+      };
+
+      prevBtn.addEventListener("click", () => offsetTrack(musicUi, -1));
+      nextBtn.addEventListener("click", () => offsetTrack(musicUi, 1));
+      playPauseBtn.addEventListener("click", () => {
+        if (player.paused) {
+          if (!musicUi.currentName && musicUi.playlist.length > 0) {
+            playByName(musicUi, musicUi.playlist[0]);
+          } else {
+            player.play();
+          }
+        } else {
+          player.pause();
+        }
+      });
+      player.addEventListener("play", () => { playPauseBtn.textContent = "⏸"; });
+      player.addEventListener("pause", () => { playPauseBtn.textContent = "▶"; });
+      player.addEventListener("ended", () => offsetTrack(musicUi, 1));
+
+      // 進度條：`loadedmetadata` 才拿得到這首歌的總長度（`duration`），拖拉中
+      // （`input` 事件，每移動一點就會觸發）直接即時 seek，同時標記 `seeking`，
+      // 讓 `timeupdate` 暫時不要去覆蓋使用者正在拖的位置——不然拖到一半畫面
+      // 又被播放進度跳回去，會覺得拖不動。
+      let seeking = false;
+      player.addEventListener("loadedmetadata", () => {
+        seekBar.max = String(player.duration || 0);
+      });
+      player.addEventListener("timeupdate", () => {
+        if (!seeking) seekBar.value = String(player.currentTime);
+        updateLyricsHighlight(musicUi);
+      });
+      seekBar.addEventListener("input", () => {
+        seeking = true;
+        player.currentTime = Number(seekBar.value);
+      });
+      seekBar.addEventListener("change", () => {
+        seeking = false;
+      });
+
+      // 下載跟終端機打 `plugin enter music` -> `download <url>` -> `~` 是同一件
+      // 事，只是自動連續送出三行指令——`download` 只在 `music` plugin mode 底下
+      // 才認得，送完照樣退回 root，不留著佔用共用的 Shell mode。
+      downloadBtn.addEventListener("click", async () => {
+        const url = urlInput.value.trim();
+        if (!url) return;
+        urlInput.value = "";
+        await execLine("~");
+        await execLine("plugin enter music");
+        const result = await execLine(`download "${url}"`);
+        await execLine("~");
+        if (result.error) {
+          window.alert(`下載失敗: ${result.error}`);
+        }
+      });
+    } else {
+      body = document.createElement("pre");
+      body.className = "panel-body";
+      body.textContent = "(等待資料...)";
+    }
 
     const handle = document.createElement("div");
     handle.className = "resize-handle";
     handle.addEventListener("mousedown", (e) => startResize(panel, e));
 
     panel.appendChild(title);
-    panel.appendChild(body);
+    panel.appendChild(musicUi ? musicUi.container : body);
     panel.appendChild(handle);
     panel.addEventListener("mousedown", () => bringToFront(panel));
     desk.appendChild(panel);
@@ -311,6 +799,8 @@
 
     function applyLayoutState() {
       panel.classList.toggle("minimized", layoutState === "minimized");
+      // `player` panel 沒有獨立的 `body`（不訂閱 SSE，見下面），用 `?.` 讓這幾行
+      // 對它來說直接跳過，不會因為 `body` 是 `undefined` 而整個 throw 出去。
       if (layoutState === "normal") {
         panel.style.bottom = "";
         if (savedRect) {
@@ -319,17 +809,17 @@
           panel.style.width = savedRect.width;
           panel.style.height = savedRect.height;
         }
-        body.style.display = "";
+        if (body) body.style.display = "";
         handle.style.display = "";
       } else if (layoutState === "minimized") {
-        body.style.display = "none";
+        if (body) body.style.display = "none";
         handle.style.display = "none";
         panel.style.top = ""; // 停靠位置用 bottom 定位，見 layoutMinimizedDock()
         panel.style.height = `${title.offsetHeight}px`;
         // left/width/bottom 交給 layoutMinimizedDock() 依停靠順序統一排版。
       } else if (layoutState === "maximized") {
         panel.style.bottom = "";
-        body.style.display = "";
+        if (body) body.style.display = "";
         handle.style.display = "none";
         panel.style.left = "0px";
         panel.style.top = "0px";
@@ -364,22 +854,31 @@
       toggleLayoutState("maximized");
     });
 
-    // EventSource 斷線會自動重連，不用自己寫 retry。
-    const es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
-    es.onmessage = (e) => {
-      // 使用者如果往上捲去看舊內容，不要硬把它拉回底部；只有原本就在（或接近）
-      // 最底下時，新內容進來才跟著捲到最新，跟終端機 tail 的習慣一致。
-      const wasNearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
-      try {
-        body.textContent = JSON.parse(e.data);
-      } catch (_err) {
-        body.textContent = e.data;
-      }
-      if (wasNearBottom) {
-        body.scrollTop = body.scrollHeight;
-      }
-    };
-    open.set(name, { el: panel, es });
+    // `player` panel 跟任何 plugin 都無關，沒有 `/api/panel/player/stream`
+    // 可以訂閱（後端會回 404），所以直接跳過，不用白白開一條會一直重連失敗的
+    // EventSource。EventSource 斷線會自動重連，其餘 panel 不用自己寫 retry。
+    let es = null;
+    if (name !== "player") {
+      es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
+      es.onmessage = (e) => {
+        // 使用者如果往上捲去看舊內容，不要硬把它拉回底部；只有原本就在（或接近）
+        // 最底下時，新內容進來才跟著捲到最新，跟終端機 tail 的習慣一致。
+        const wasNearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+        try {
+          body.textContent = JSON.parse(e.data);
+        } catch (_err) {
+          body.textContent = e.data;
+        }
+        if (wasNearBottom) {
+          body.scrollTop = body.scrollHeight;
+        }
+      };
+    }
+
+    if (musicUi) {
+      startMusicFileBrowser(musicUi);
+    }
+    open.set(name, { el: panel, es, musicUi });
   }
 
   fetch("/api/plugins")
@@ -396,6 +895,11 @@
   openBtn.addEventListener("click", () => {
     if (select.value) openPanel(select.value);
   });
+
+  // 完全獨立於 plugin 下拉選單之外的一顆按鈕，固定開一個叫 `player` 的
+  // panel——跟從下拉選單開出來的 panel 是同一套外框（拖拉/縮放/最小化/
+  // 最大化/關閉），只是內容是 `openPanel` 裡特判出來的播放器介面。
+  openPlayerBtn.addEventListener("click", () => openPanel("player"));
 
   // 指令輸入列：跟終端機共用同一個 Shell，所以這裡打的指令（包含
   // `mode`/`plugin enter` 之類會換 mode 的）會直接影響後端狀態，Enter 送出、
@@ -420,16 +924,10 @@
       cmdInput.value = "";
       historyIndex = -1;
       if (line.trim()) cmdHistory.push(line);
-      fetch("/api/exec", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ line }),
-      })
-        .then((r) => r.json())
-        .then((d) => {
-          cmdPromptEl.textContent = d.prompt;
-          cmdStatus.textContent = d.error ? `錯誤: ${d.error}` : "";
-        });
+      execLine(line).then((d) => {
+        cmdPromptEl.textContent = d.prompt;
+        cmdStatus.textContent = d.error ? `錯誤: ${d.error}` : "";
+      });
     } else if (evt.key === "ArrowUp") {
       if (cmdHistory.length === 0) return;
       evt.preventDefault();
