@@ -67,6 +67,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std:
             .app_data(web::Data::new(output.clone()))
             .route("/", web::get().to(index))
             .route("/api/plugins", web::get().to(api_plugins))
+            .route("/api/version", web::get().to(api_version))
             .route("/api/panel/{name}/stream", web::get().to(panel_stream))
             .route("/api/prompt", web::get().to(prompt))
             .route("/api/exec", web::post().to(exec))
@@ -140,6 +141,18 @@ async fn api_plugins(hub: web::Data<Hub>) -> impl Responder {
     let mut names: Vec<&String> = hub.channels.keys().collect();
     names.sort();
     HttpResponse::Ok().json(names)
+}
+
+#[derive(Serialize)]
+struct VersionResponse {
+    build: &'static str,
+}
+
+/// `GET /api/version`：這個 build 的編譯日期/時間（`build.rs` 塞進去的
+/// `CNG5_BUILD_TIMESTAMP`，跟 `system` plugin 的 `version` 指令/panel 是同一份），
+/// 給前端畫面最左上角顯示用。
+async fn api_version() -> impl Responder {
+    HttpResponse::Ok().json(VersionResponse { build: env!("CNG5_BUILD_TIMESTAMP") })
 }
 
 #[derive(Serialize)]

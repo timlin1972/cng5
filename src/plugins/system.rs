@@ -42,6 +42,13 @@ impl SystemPlugin {
         Ok(())
     }
 
+    /// `CNG5_BUILD_TIMESTAMP` 是 `build.rs` 在編譯當下算好塞進來的環境變數
+    /// （build date/time），不是執行當下的時間。
+    fn version(&self, out: &OutputBuffer) -> Result<()> {
+        out.push(&format!("build: {}\n", env!("CNG5_BUILD_TIMESTAMP")));
+        Ok(())
+    }
+
     fn set_mode(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let target = args.first().context("mode 需要接 server/client/standalone")?;
         self.mode = Self::resolve_mode(target)?;
@@ -90,18 +97,24 @@ impl SystemPlugin {
 
 impl Plugin for SystemPlugin {
     fn commands(&self) -> &'static [&'static str] {
-        &["status", "mode server", "mode client", "mode standalone"]
+        &["status", "mode server", "mode client", "mode standalone", "version"]
     }
 
     fn dispatch(&mut self, cmd: &str, args: &[String], out: &OutputBuffer) -> Result<()> {
         match cmd {
             "status" => self.status(out),
+            "version" => self.version(out),
             "mode" => self.set_mode(args, out),
             other => bail!("system 不認得指令: {other}"),
         }
     }
 
     fn panel_text(&self) -> Option<String> {
-        Some(format!("tailscale ip: {}\nmode: {}", Self::tailscale_ip(), self.mode.as_str()))
+        Some(format!(
+            "tailscale ip: {}\nmode: {}\nbuild: {}",
+            Self::tailscale_ip(),
+            self.mode.as_str(),
+            env!("CNG5_BUILD_TIMESTAMP")
+        ))
     }
 }

@@ -53,6 +53,11 @@
     font: inherit;
   }
   #toolbar button:hover { background: #323844; cursor: pointer; }
+  #version-label {
+    color: #6b7280;
+    white-space: nowrap;
+    font-size: 12px;
+  }
   #desk {
     position: relative;
     width: 100%;
@@ -589,6 +594,7 @@
 </head>
 <body>
 <div id="toolbar">
+  <span id="version-label"></span>
   <select id="plugin-select"></select>
   <button id="open-btn">開啟 panel</button>
   <button id="open-player-btn">🎵 Player</button>
@@ -617,6 +623,7 @@
   "use strict";
 
   const desk = document.getElementById("desk");
+  const versionLabel = document.getElementById("version-label");
   const select = document.getElementById("plugin-select");
   const openBtn = document.getElementById("open-btn");
   const openPlayerBtn = document.getElementById("open-player-btn");
@@ -1370,6 +1377,10 @@
     }
     open.set(name, { el: panel, es, musicUi, shellUi });
   }
+
+  fetch("/api/version")
+    .then((r) => r.json())
+    .then((d) => { versionLabel.textContent = d.build; });
 
   fetch("/api/plugins")
     .then((r) => r.json())
