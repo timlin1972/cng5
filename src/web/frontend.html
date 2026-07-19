@@ -321,28 +321,18 @@
     color: #5a6272;
     padding: 8px 0;
   }
-  /* 這一整排要撐滿 `.player-right` 的寬度：播放模式按鈕（`modeBtn`）固定貼在
-     最左邊，上一首/播放/下一首（`.player-transport`）維持在正中央——用三欄
-     grid（左/中/右）而不是單純的 flex，兩側各留一份等寬的空間夾住中間置中的
-     按鈕群，這樣中間那群按鈕才不會因為左邊多了 `modeBtn` 就跟著偏移。 */
+  /* 這一整排要撐滿 `.player-right` 的寬度：播放模式按鈕（`modeBtn`）跟
+     上一首/播放/下一首（`.player-transport`）當成同一群，整群一起置中。 */
   .player-controls {
-    display: grid;
-    /* 兩側欄位要用 `minmax(0, 1fr)`，不能只寫 `1fr`——`1fr` 欄位預設還是會被
-       裡面內容的最小寬度撐開（`modeBtn` 有自己的 padding），左右兩欄含的
-       內容寬度不一樣，`1fr` 就不再是真正的「等寬」，中間那欄（`.player-transport`）
-       就會跟著偏移、不是整排的正中央。`minmax(0, 1fr)` 才會確保兩欄真的
-       等寬，中間置中的按鈕群才會精準對齊整排的水平中心。 */
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    display: flex;
     align-items: center;
+    justify-content: center;
+    gap: 8px;
     width: 100%;
-  }
-  .player-controls .player-mode-btn {
-    justify-self: start;
   }
   .player-transport {
     display: flex;
     gap: 8px;
-    justify-self: center;
   }
   .player-controls button {
     background: #262a33;
@@ -783,7 +773,13 @@
     musicUi.currentName = name;
     musicUi.player.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
     musicUi.player.play();
-    highlightPlaying(musicUi);
+    // 隨機播放模式下，接下來要播的那首在清單裡可能離目前捲動位置很遠；換歌時
+    // 把目前播放中的那一列捲進可視範圍——`block: "nearest"` 只有真的被捲出
+    // 範圍外時才會動，本來就看得到的話不會多此一舉亂捲動。
+    const activeRow = highlightPlaying(musicUi);
+    if (activeRow) {
+      activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
     // `cover`/`trackName`/`seekBar` 只有 `player` panel 才有（`music` panel
     // 沒有這些顯示），一般 panel 的 `musicUi` 也不會有這幾個欄位。
     if (musicUi.cover) {
@@ -916,10 +912,17 @@
     offsetTrack(musicUi, 1);
   }
 
+  // 回傳目前正在播放那一列的 DOM 元素（沒有就是 `null`），讓呼叫端決定要不要
+  // 順便捲動——`renderMusicFiles` 每次 poll 都會呼叫這個，捲動與否不該由這裡
+  // 決定（不然使用者在清單裡往下滑找別首歌，畫面會一直被拉回目前播放的那首）。
   function highlightPlaying(musicUi) {
+    let activeRow = null;
     for (const row of musicUi.fileList.children) {
-      row.classList.toggle("playing", row.dataset.name === musicUi.currentName);
+      const isActive = row.dataset.name === musicUi.currentName;
+      row.classList.toggle("playing", isActive);
+      if (isActive) activeRow = row;
     }
+    return activeRow;
   }
 
   function renderMusicFiles(musicUi, names, refresh) {
@@ -1076,24 +1079,39 @@
       // 一首歌自然播完（`ended` 事件）之後接下來要做什麼；手動按上一首/
       // 下一首永遠照清單順序走，不受這個模式影響（跟大部分播放器的習慣
       // 一致：模式只管「自動接下一首」的行為，手動操作永遠照使用者按的）。
-      // 圖示都用純箭頭類符號（跟 ⏮ ▶ ⏭ 同一路子），不要用 🔁🔀🔂 這種全彩
-      // emoji——那幾個在大部分系統的 emoji 字型裡本身就帶一個色底圖示，跟其他
-      // 單色按鈕擺在一起風格不一致。三個狀態的圖示也要各自不同、一眼就能分
-      // 辨：依序是直線箭頭，單曲是繞一圈回原地的箭頭，隨機是交叉箭頭。
+      // 圖示都要單色，不要用 🔁🔀🔂 這種全彩 emoji——那幾個在大部分系統的
+      // emoji 字型裡本身就帶顏色/色底，跟其他單色按鈕擺在一起風格不一致。
+      // 三個狀態的圖示也要各自不同、一眼就能分辨：依序是兩個並排、都指向右邊
+      // 的箭頭，單曲是繞一圈回原地的箭頭；隨機播放要畫成「兩條路徑交叉而過」
+      // 的樣子（不是一般打叉的直線 X），Unicode 沒有現成的純文字字元長這樣，
+      // 所以這個圖示改成一小段內嵌 SVG（`stroke="currentColor"`，顏色自動
+      // 跟著按鈕的文字顏色走，不會額外帶自己的顏色/底色）。
+      // 兩條路徑左邊、右邊都各自是一小段水平的平行線（左邊上下各一條、右邊
+      // 上下各一條，同一條路徑左右兩段互相平行），只有中間那段用曲線彎過去
+      // 交叉、換到另一邊，右邊收尾接一個「>」形的箭頭。這樣才會是「兩側平行、
+      // 只有中間交叉」的樣子，不是頭尾都直通、看起來像打叉的一整條斜線。
+      const SHUFFLE_ICON =
+        '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" ' +
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.125em">' +
+        '<path d="M4 7 L9 7 C12 7 12 17 15 17 L17 17"></path>' +
+        '<path d="M17 14 L21 17 L17 20"></path>' +
+        '<path d="M4 17 L9 17 C12 17 12 7 15 7 L17 7"></path>' +
+        '<path d="M17 4 L21 7 L17 10"></path>' +
+        "</svg>";
       const PLAY_MODES = [
-        { mode: "sequential", icon: "→", title: "依序播放" },
-        { mode: "shuffle", icon: "⇄", title: "隨機播放" },
+        { mode: "sequential", icon: "⇉", title: "依序播放" },
+        { mode: "shuffle", icon: SHUFFLE_ICON, title: "隨機播放" },
         { mode: "single", icon: "↻", title: "播放單首" },
       ];
       const modeBtn = document.createElement("button");
       modeBtn.className = "player-mode-btn";
-      modeBtn.textContent = PLAY_MODES[0].icon;
+      modeBtn.innerHTML = PLAY_MODES[0].icon;
       modeBtn.title = PLAY_MODES[0].title;
       modeBtn.addEventListener("click", () => {
         const idx = PLAY_MODES.findIndex((m) => m.mode === musicUi.playMode);
         const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
         musicUi.playMode = next.mode;
-        modeBtn.textContent = next.icon;
+        modeBtn.innerHTML = next.icon;
         modeBtn.title = next.title;
       });
       // 這幾個媒體控制符號（⏮ ▶ ⏸ ⏭）在 Unicode 裡同時有純文字／全彩 emoji
