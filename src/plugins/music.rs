@@ -20,7 +20,7 @@ pub(crate) const MUSIC_DIR: &str = "music";
 /// 會全部抓下來（不是只抓排最前面那個就好），檔名各自帶語言代碼，所以查找端
 /// 必須自己照優先順序一個一個試著找檔名，不能對資料夾做無排序的掃描亂配到
 /// 第一個剛好符合的字幕檔——不然可能配到抓下來的英文字幕，而不是中文字幕。
-pub(crate) const SUBTITLE_LANG_PRIORITY: [&str; 6] = ["zh-TW", "zh-Hant", "zh-Hans", "zh", "ja", "en"];
+pub(crate) const SUBTITLE_LANG_PRIORITY: [&str; 6] = ["ja", "zh-TW", "zh-Hant", "zh-Hans", "zh", "en"];
 
 #[derive(Clone)]
 enum DownloadStatus {

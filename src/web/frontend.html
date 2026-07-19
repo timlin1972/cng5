@@ -215,6 +215,12 @@
     padding: 8px;
     border-top: 1px solid #262a33;
   }
+  .player-file-count {
+    flex: none;
+    align-self: center;
+    color: #8a92a5;
+    white-space: nowrap;
+  }
   .player-url-input {
     flex: 1;
     min-width: 0;
@@ -780,6 +786,14 @@
     if (musicUi.trackName) {
       musicUi.trackName.textContent = name;
     }
+    // 換歌時同步更新鎖屏畫面/通知列顯示的歌名＋封面（動作處理常式只需要註冊
+    // 一次，見 player panel 建構那段的 `navigator.mediaSession.setActionHandler`）。
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: name,
+        artwork: [{ src: `/api/music/file/${encodeURIComponent(name)}/cover` }],
+      });
+    }
     if (musicUi.seekBar) {
       // 換歌了，先歸零，不要讓上一首播到一半的進度殘留在畫面上，等新的一首
       // `loadedmetadata`/`timeupdate` 觸發後很快就會被覆蓋成正確的值。
@@ -865,6 +879,18 @@
     }
   }
 
+  // 「下一首」按鈕跟 Media Session 的 `nexttrack` 動作（見 player panel 建構
+  // 那段的 `navigator.mediaSession.setActionHandler`）共用同一個判斷：隨機播放
+  // 模式下真的隨機換一首，其餘情況照清單順序走（見上面 `prevBtn`/`nextBtn`
+  // 註解的說明）。
+  function goToNextTrack(musicUi) {
+    if (musicUi.playMode === "shuffle") {
+      playRandomOther(musicUi);
+    } else {
+      offsetTrack(musicUi, 1);
+    }
+  }
+
   // 一首歌自然播完（`ended` 事件）之後接下來要做什麼，依 `musicUi.playMode`
   // （見 player panel 裡 `modeBtn` 的三個狀態）決定：
   // - "single"：原地重播同一首。
@@ -892,6 +918,7 @@
   function renderMusicFiles(musicUi, names, refresh) {
     musicUi.playlist = names;
     musicUi.fileList.innerHTML = "";
+    musicUi.fileCount.textContent = `共 ${names.length} 首`;
     if (names.length === 0) {
       const empty = document.createElement("div");
       empty.className = "music-empty";
@@ -995,12 +1022,15 @@
       fileList.className = "music-files";
       const downloadRow = document.createElement("div");
       downloadRow.className = "player-download-row";
+      const fileCount = document.createElement("span");
+      fileCount.className = "player-file-count";
       const urlInput = document.createElement("input");
       urlInput.type = "text";
       urlInput.placeholder = "YouTube 連結...";
       urlInput.className = "player-url-input";
       const downloadBtn = document.createElement("button");
       downloadBtn.textContent = "Download";
+      downloadRow.appendChild(fileCount);
       downloadRow.appendChild(urlInput);
       downloadRow.appendChild(downloadBtn);
       left.appendChild(fileList);
@@ -1096,6 +1126,7 @@
       musicUi = {
         container,
         fileList,
+        fileCount,
         player,
         cover,
         trackName,
@@ -1114,13 +1145,7 @@
       // 回溯，照順序走是最直覺的退回方式）；下一首在隨機播放模式下則是真的
       // 隨機換一首，跟「隨機播放模式下一首歌自然播完」的行為一致。
       prevBtn.addEventListener("click", () => offsetTrack(musicUi, -1));
-      nextBtn.addEventListener("click", () => {
-        if (musicUi.playMode === "shuffle") {
-          playRandomOther(musicUi);
-        } else {
-          offsetTrack(musicUi, 1);
-        }
-      });
+      nextBtn.addEventListener("click", () => goToNextTrack(musicUi));
       playPauseBtn.addEventListener("click", () => {
         if (player.paused) {
           if (!musicUi.currentName && musicUi.playlist.length > 0) {
@@ -1135,6 +1160,19 @@
       player.addEventListener("play", () => { playPauseBtn.textContent = "⏸" + TEXT_STYLE; });
       player.addEventListener("pause", () => { playPauseBtn.textContent = "▶" + TEXT_STYLE; });
       player.addEventListener("ended", () => advanceOnEnded(musicUi));
+
+      // 註冊 Media Session：手機瀏覽器鎖螢幕/切到背景時，有註冊 Media Session
+      // 的分頁會被系統當成正在做媒體播放，鎖屏畫面/通知列會出現歌名＋播放控制
+      // 卡片，也比較不會被系統的省電機制當成一般背景分頁砍掉。歌名/封面則是
+      // 每次換歌時（見 `playByName`）另外更新，這裡只需要註冊一次動作處理常式。
+      if ("mediaSession" in navigator) {
+        navigator.mediaSession.setActionHandler("play", () => player.play());
+        navigator.mediaSession.setActionHandler("pause", () => player.pause());
+        navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
+        navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
+        player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
+        player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
+      }
 
       // 進度條：`loadedmetadata` 才拿得到這首歌的總長度（`duration`），拖拉中
       // （`input` 事件，每移動一點就會觸發）直接即時 seek，同時標記 `seeking`，
