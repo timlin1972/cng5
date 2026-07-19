@@ -90,6 +90,16 @@ fn run_loop(
     let mut draft = String::new();
 
     loop {
+        // 每一圈都先檢查一次：web 端（`/api/exec` 執行 `exit`）跟終端機共用同一個
+        // `Shell`，觸發 `should_exit` 不會經過下面的按鍵事件，如果只在
+        // `KeyCode::Enter` 分支裡檢查（原本的寫法），畫面會一直重畫、卡著不動，
+        // 直到使用者自己在 GUI 裡按一下 Enter 才會離開。這裡提早在最上面檢查，
+        // 讓 `event::poll` 逾時、沒有任何按鍵事件時也能在 200ms 內自然發現並
+        // 正常返回，讓 `run()` 收尾（`disable_raw_mode`/離開 alternate screen）
+        // 走一般流程。
+        if lock_shell(shell).should_exit() {
+            return Ok(());
+        }
         let prompt = lock_shell(shell).prompt();
         let panels = lock_shell(shell).visible_panels();
 

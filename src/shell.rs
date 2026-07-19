@@ -130,6 +130,15 @@ impl Shell {
         self.current_ui = ui;
     }
 
+    /// 目前實際顯示中的 UI，見 `set_current_ui`。給 `main` 背景的 exit 監控執行緒
+    /// 判斷用：只有 CLI mode 才會卡在 `rl.readline()` 的阻塞讀取、不會主動檢查
+    /// `should_exit`，需要額外用 `std::process::exit` 硬中斷；GUI mode 自己每
+    /// 200ms 就會輪詢一次 `should_exit`，能在 raw mode/alternate screen 正常收尾
+    /// 後自然離開，這裡不需要（也不應該）搶在它收尾前強制中斷行程。
+    pub fn current_ui(&self) -> UiMode {
+        self.current_ui
+    }
+
     /// GUI 裡按 Tab 呼叫：把目前疊放順序最底下（最久沒被 activate）的那個可見
     /// panel 拉到最上層，變成新的 active panel。持續按 Tab 就會依序把每個開著
     /// 的 panel 都輪流拉到最上面。少於兩個可見 panel 時沒有意義，不做事。

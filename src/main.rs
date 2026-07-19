@@ -8,6 +8,8 @@ mod web;
 use std::env;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use rustyline::error::ReadlineError;
@@ -53,6 +55,7 @@ fn main() -> Result<()> {
     // port 9759，跟終端機共用同一個 shell/output，讓瀏覽器上開的 panel 能
     // 即時反映終端機這邊做的變更（例如 `mode server`）。
     web::spawn(shell.clone(), output.clone());
+    spawn_exit_watcher(shell.clone());
     let mut printed = 0usize;
 
     let script_path = env::args().nth(1).unwrap_or_else(|| "script.cli".to_string());
@@ -85,6 +88,27 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 從 web（`/api/exec` 執行 `exit`）觸發的離開只會設定 `Shell` 的 `should_exit`
+/// 旗標，不會去動終端機這邊的 CLI 迴圈——但 CLI 迴圈卡在 `rl.readline()` 的阻塞
+/// 讀取上，只有使用者在終端機自己再按一下 Enter（讓 `readline` 返回）才有機會
+/// 檢查到這個旗標並離開。額外開一個背景執行緒定期輪詢，一偵測到「該離開了、
+/// 而且現在卡著的是 CLI」就直接用 `std::process::exit` 硬中斷整個行程。
+/// 限定只在 `current_ui` 是 `Cli` 時才這樣做：GUI mode 自己每 200ms 會輪詢一次
+/// `should_exit`（見 `gui::run_loop`），可以在 `disable_raw_mode`/離開 alternate
+/// screen 正常收尾後才自然離開，這裡搶著在收尾前用 `process::exit` 中斷會讓
+/// 終端機卡在 raw mode 出不來。
+fn spawn_exit_watcher(shell: Arc<Mutex<Shell>>) {
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(200));
+        let sh = lock_shell(&shell);
+        let stuck_in_cli = sh.should_exit() && sh.current_ui() == UiMode::Cli;
+        drop(sh);
+        if stuck_in_cli {
+            std::process::exit(0);
+        }
+    });
 }
 
 /// 把 `output` 裡從 `printed` 開始、還沒印到 stdout 的行印出來，並更新游標。
