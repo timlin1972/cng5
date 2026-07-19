@@ -498,6 +498,13 @@ impl Shell {
         self.output.push(&s);
     }
 
+    /// 依名稱取得某個 plugin 的可變參考，讓外部（目前只有 GUI 的 notepad 編輯
+    /// 功能，見 `gui.rs` 的 `with_notepad`）能透過 `Plugin::as_any_mut` 向下轉型成
+    /// 具體型別直接操作內部狀態，而不用透過 `execute_line` 逐行送指令字串。
+    pub fn plugin_mut(&mut self, name: &str) -> Option<&mut Box<dyn Plugin>> {
+        self.active.get_mut(name)
+    }
+
     /// 目前所有 plugin 的名稱（含 `output`），依字母順序排列。CLI 的 `plugin show`
     /// 跟 web 的 `/api/plugins` 共用這一份清單，不各自維護一套。
     pub fn plugin_names(&self) -> Vec<String> {

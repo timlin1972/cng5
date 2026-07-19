@@ -48,4 +48,8 @@ impl Plugin for DevicePlugin {
             other => bail!("device 不認得指令: {other}"),
         }
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

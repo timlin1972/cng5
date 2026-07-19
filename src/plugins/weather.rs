@@ -477,4 +477,8 @@ impl Plugin for WeatherPlugin {
     fn panel_text(&self) -> Option<String> {
         Some(self.text())
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -36,4 +36,8 @@ impl Plugin for WolPlugin {
             other => bail!("wol 不認得指令: {other}"),
         }
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

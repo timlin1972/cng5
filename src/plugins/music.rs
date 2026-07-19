@@ -167,4 +167,8 @@ impl Plugin for MusicPlugin {
     fn panel_text(&self) -> Option<String> {
         Some(self.list_text())
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
-use crate::plugins::{MUSIC_DIR, SUBTITLE_LANG_PRIORITY};
+use crate::plugins::{DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
 use crate::shell::{lock_shell, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
@@ -77,6 +77,8 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std:
             .route("/api/music/file/{name}/cover", web::get().to(music_file_cover))
             .route("/api/music/file/{name}/lyrics", web::get().to(music_file_lyrics))
             .route("/api/music/file/{name}", web::delete().to(music_file_delete))
+            .route("/api/notepad/content", web::get().to(notepad_get_content))
+            .route("/api/notepad/content", web::post().to(notepad_save_content))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -548,4 +550,63 @@ async fn music_file_lyrics(path: web::Path<String>) -> HttpResponse {
         return HttpResponse::NotFound().finish();
     }
     HttpResponse::Ok().json(lines)
+}
+
+/// `name` 只接受單一檔名（不能含路徑分隔符或是 `.`/`..`），避免有人把檔名
+/// 做成 path traversal 跑到 `notepad/` 資料夾以外的地方去讀/寫別的檔案——
+/// 這裡的檔名是透過瀏覽器打進來的網路輸入（Ctrl-F 切換檔案），跟 CLI/GUI
+/// 由本機操作者直接輸入的信任層級不一樣，比照 `safe_music_path` 的防護。
+/// 回傳 `None` 代表這個名字不安全，呼叫端應該回 400。
+fn safe_notepad_path(name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return None;
+    }
+    Some(Path::new(NOTEPAD_DIR).join(name))
+}
+
+#[derive(Serialize)]
+struct NotepadContentResponse {
+    name: String,
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct NotepadQuery {
+    name: Option<String>,
+}
+
+/// web 這邊的 notepad 編輯功能純粹是檔案讀寫、不透過 `Shell`/`NotepadPlugin`
+/// ——理由跟 `music/` 檔案管理一樣（見上面的說明）：這是獨立於終端機當下
+/// 編輯狀態之外的操作，兩邊各自對同一個檔案讀寫，最後存檔的人為準，不需要
+/// （也沒有必要）讓瀏覽器分頁跟終端機的編輯 session 即時同步每一個按鍵。
+/// `?name=` 沒帶就是 `DEFAULT_NOTEPAD_FILE`，對應 Ctrl-F 切換檔案的功能。
+async fn notepad_get_content(query: web::Query<NotepadQuery>) -> HttpResponse {
+    let name = query.name.clone().unwrap_or_else(|| DEFAULT_NOTEPAD_FILE.to_string());
+    let Some(path) = safe_notepad_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    let content = std::fs::read_to_string(&path).unwrap_or_default();
+    HttpResponse::Ok().json(NotepadContentResponse { name, content })
+}
+
+#[derive(Deserialize)]
+struct NotepadSaveRequest {
+    name: Option<String>,
+    content: String,
+}
+
+/// `POST /api/notepad/content`：把瀏覽器編輯完的內容存回 `name` 指定的檔案
+/// （沒帶就是 `DEFAULT_NOTEPAD_FILE`）。
+async fn notepad_save_content(body: web::Json<NotepadSaveRequest>) -> HttpResponse {
+    let name = body.name.clone().unwrap_or_else(|| DEFAULT_NOTEPAD_FILE.to_string());
+    let Some(path) = safe_notepad_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    if std::fs::create_dir_all(NOTEPAD_DIR).is_err() {
+        return HttpResponse::InternalServerError().finish();
+    }
+    match std::fs::write(&path, &body.content) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
 }

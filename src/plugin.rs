@@ -22,4 +22,13 @@ pub trait Plugin: Send {
     fn panel_text(&self) -> Option<String> {
         None
     }
+
+    /// 把 `Box<dyn Plugin>` 向下轉型回具體型別，讓外部（目前只有 GUI 的
+    /// notepad 編輯功能，見 `gui.rs` 的 `with_notepad`）能直接操作某個 plugin
+    /// 的內部狀態，而不是只能透過 `dispatch` 送指令字串——逐字元編輯這種高
+    /// 頻率、內容含任意字元（含空白/引號）的操作，透過 `execute_line`/
+    /// `shell_words` 指令解析既麻煩也沒必要。這是 Rust trait object 向下轉型
+    /// 的標準寫法，沒辦法只在這裡寫一次預設實作套用到所有型別，每個 plugin
+    /// 都要各自實作成 `{ self }`。
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }

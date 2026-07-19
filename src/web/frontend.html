@@ -355,6 +355,178 @@
     padding: 4px;
   }
   .shell-body .xterm { height: 100%; }
+  /* `notepad` panel：跟 `player`/`shell` 一樣完全獨立於一般 plugin 的純文字
+     SSE 顯示，見 openPanel 裡 name === "notepad" 的分支。檢視模式（
+     `.notepad-view`）跟編輯模式（`.notepad-edit`，左邊原始 markdown 文字、
+     右邊即時渲染預覽並排）共用同一份 `.notepad-view, .notepad-preview` 排版
+     樣式，兩邊看到的成果才會一致。 */
+  .notepad-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .notepad-view {
+    flex: 1;
+    overflow: auto;
+    padding: 10px 14px;
+    outline: none;
+  }
+  .notepad-edit {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+  }
+  .notepad-textarea {
+    flex: 1;
+    min-width: 0;
+    resize: none;
+    background: #0d0f13;
+    border: none;
+    border-right: 1px solid #262a33;
+    color: #d8dee9;
+    padding: 10px 14px;
+    font: inherit;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    outline: none;
+  }
+  .notepad-preview {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    padding: 10px 14px;
+  }
+  .notepad-hint {
+    flex: none;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 14px;
+    border-top: 1px solid #262a33;
+    color: #6b7280;
+    font-size: 12px;
+  }
+  .notepad-hint-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Ctrl-F 觸發時取代 `.notepad-hint` 顯示，位置/邊框跟它一致，兩者互斥
+     切換 `display`。 */
+  .notepad-filename-input {
+    flex: none;
+    padding: 5px 14px;
+    border: none;
+    border-top: 1px solid #262a33;
+    background: #0d0f13;
+    color: #d8dee9;
+    font: inherit;
+    font-size: 12px;
+    outline: none;
+  }
+  .notepad-empty { color: #5a6272; }
+  /* 檢視/預覽兩邊都會塞進 `renderMarkdown()` 產生的原始 HTML，這幾個標籤的
+     樣式只在這個範圍內生效，不會影響到頁面其他地方。 */
+  .notepad-view h1, .notepad-view h2, .notepad-view h3,
+  .notepad-view h4, .notepad-view h5, .notepad-view h6,
+  .notepad-preview h1, .notepad-preview h2, .notepad-preview h3,
+  .notepad-preview h4, .notepad-preview h5, .notepad-preview h6 {
+    color: #6f9dff;
+    margin: 0.6em 0 0.3em;
+  }
+  /* 一級、二級標題底下自動加一條分隔線（跟 GUI 那邊 `render_notepad_lines`
+     的規則一致），三級以下的標題不用——層級越低的標題本來就越不像章節
+     標題，不需要用分隔線強調。 */
+  .notepad-view h1, .notepad-view h2,
+  .notepad-preview h1, .notepad-preview h2 {
+    border-bottom: 1px solid #3a4150;
+    padding-bottom: 0.2em;
+  }
+  .notepad-view p, .notepad-preview p { margin: 0.4em 0; }
+  .notepad-view code, .notepad-preview code {
+    background: #a0a0a0;
+    color: #8b0000;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  .notepad-view s, .notepad-preview s { text-decoration: line-through; }
+  .notepad-underline { text-decoration: underline; }
+  .notepad-highlight { background: #d8dee9; color: #1b1e26; }
+  .notepad-view pre, .notepad-preview pre {
+    background: #0d0f13;
+    border: 1px solid #262a33;
+    border-radius: 4px;
+    padding: 8px 10px;
+    overflow: auto;
+  }
+  .notepad-view pre code, .notepad-preview pre code { background: none; color: inherit; border: none; padding: 0; }
+  /* code fence 語法上色（見 `highlightCodeLine`），跟 GUI 那邊
+     `highlight_code_line` 的顏色語意一致：關鍵字藍色粗體、字串黃色、數字
+     紫色、註解灰色斜體。 */
+  .notepad-view .tok-keyword, .notepad-preview .tok-keyword { color: #5c8ae6; font-weight: bold; }
+  .notepad-view .tok-string, .notepad-preview .tok-string { color: #d7ba48; }
+  .notepad-view .tok-number, .notepad-preview .tok-number { color: #c678dd; }
+  .notepad-view .tok-comment, .notepad-preview .tok-comment { color: #6b7280; font-style: italic; }
+  /* ` ```lang= ` 語法（語言後面接一個 `=`）表示要加行號，見
+     `renderMarkdown` 的 `codeShowLineNumbers`；固定寬度、靠右對齊，跟程式碼
+     內容之間用一條直線隔開，是常見的行號欄樣式。 */
+  .notepad-view .line-no, .notepad-preview .line-no {
+    display: inline-block;
+    width: 2.5em;
+    margin-right: 0.8em;
+    padding-right: 0.4em;
+    border-right: 1px solid #3a4150;
+    text-align: right;
+    color: #6b7280;
+    user-select: none;
+  }
+  .notepad-view blockquote, .notepad-preview blockquote {
+    margin: 0.4em 0;
+    padding-left: 10px;
+    border-left: 3px solid #3a4150;
+    color: #8a92a5;
+    font-style: italic;
+  }
+  .notepad-view ul, .notepad-preview ul,
+  .notepad-view ol, .notepad-preview ol {
+    margin: 0.3em 0;
+    padding-left: 1.6em;
+  }
+  /* checklist 項目不需要項目符號跟 checkbox 一起出現，所以把預設的
+     `list-style` 拿掉、往回縮排跟其他清單項目對齊。 */
+  .notepad-view li.notepad-task, .notepad-preview li.notepad-task {
+    list-style: none;
+    margin-left: -1.6em;
+  }
+  .notepad-view li.notepad-task input, .notepad-preview li.notepad-task input {
+    margin-right: 4px;
+  }
+  .notepad-view hr, .notepad-preview hr {
+    border: none;
+    border-top: 1px solid #3a4150;
+    margin: 0.6em 0;
+  }
+  .notepad-view a, .notepad-preview a { color: #6f9dff; font-weight: bold; text-decoration: underline; }
+  /* table：header 粗體、header 跟第一筆資料之間是比較粗的線（`border-bottom`
+     設 2px），資料列跟資料列之間才是一般細線（用 `:not(:first-child)` 排除
+     掉第一筆資料，不然會跟 header 的 `border-bottom` 重複畫一條）；最上面、
+     最下面都不畫線，跟 GUI 那邊 `render_notepad_lines` 的規則一致。 */
+  .notepad-view table, .notepad-preview table {
+    border-collapse: collapse;
+    margin: 0.4em 0;
+  }
+  .notepad-view th, .notepad-preview th {
+    font-weight: bold;
+    text-align: left;
+    padding: 3px 10px;
+    border-bottom: 2px solid #3a4150;
+  }
+  .notepad-view td, .notepad-preview td { padding: 3px 10px; }
+  .notepad-view tbody tr:not(:first-child) td,
+  .notepad-preview tbody tr:not(:first-child) td {
+    border-top: 1px solid #262a33;
+  }
 </style>
 <style>
 /* 內嵌的 xterm.js 樣式（版本 5.5.0，從 jsdelivr 抓下來原封不動貼上，
@@ -967,6 +1139,356 @@
     highlightPlaying(musicUi);
   }
 
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // code fence 的語法上色規則：關鍵字清單、單行註解開頭符號、區塊註解頭尾
+  // 符號——跟 `gui.rs` 的 `language_spec` 是同一套規則（維持兩邊一致），不是
+  // 完整的詞法分析器，但字串/註解/數字/關鍵字這幾類最常見、最有用的分類
+  // 已經涵蓋。
+  const CODE_LANGUAGES = {
+    rust: {
+      keywords: ["fn","let","mut","pub","struct","enum","impl","trait","use","mod","if","else","match","for","while","loop","return","break","continue","const","static","self","Self","super","crate","as","in","move","ref","where","async","await","dyn","unsafe","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    python: {
+      keywords: ["def","class","if","elif","else","for","while","return","import","from","as","with","try","except","finally","raise","pass","break","continue","lambda","yield","in","is","not","and","or","None","True","False","self","global","nonlocal","async","await"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    javascript: {
+      keywords: ["function","const","let","var","if","else","for","while","return","class","extends","new","this","import","export","from","as","try","catch","finally","throw","break","continue","switch","case","default","typeof","instanceof","in","of","async","await","yield","null","undefined","true","false","super"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    c: {
+      keywords: ["int","char","float","double","void","if","else","for","while","return","struct","typedef","enum","union","static","const","unsigned","signed","long","short","sizeof","switch","case","default","break","continue","class","public","private","protected","namespace","template","new","delete","this","virtual","override","nullptr","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    java: {
+      keywords: ["public","private","protected","class","interface","extends","implements","static","final","void","int","long","float","double","boolean","char","String","if","else","for","while","return","new","this","super","try","catch","finally","throw","throws","import","package","break","continue","switch","case","default","true","false","null"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    go: {
+      keywords: ["func","package","import","var","const","type","struct","interface","if","else","for","range","return","go","chan","select","case","default","switch","break","continue","defer","map","nil","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    bash: {
+      keywords: ["if","then","else","elif","fi","for","while","do","done","case","esac","function","return","exit","export","local","echo","break","continue","in"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    json: { keywords: ["true", "false", "null"], lineComment: null, blockComment: null },
+    sql: {
+      keywords: ["SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","SET","DELETE","JOIN","LEFT","RIGHT","INNER","OUTER","ON","GROUP","BY","ORDER","HAVING","AS","AND","OR","NOT","NULL","IS","IN","LIKE","LIMIT","CREATE","TABLE","DROP","ALTER","PRIMARY","KEY","FOREIGN","REFERENCES","DEFAULT","DISTINCT"],
+      lineComment: "--",
+      blockComment: ["/*", "*/"],
+    },
+    ruby: {
+      keywords: ["def","end","class","module","if","elsif","else","unless","while","until","for","in","do","return","break","next","yield","begin","rescue","ensure","raise","require","true","false","nil","self"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    yaml: { keywords: ["true", "false", "null"], lineComment: "#", blockComment: null },
+  };
+  const CODE_LANG_ALIASES = {
+    rs: "rust", py: "python",
+    js: "javascript", ts: "javascript", jsx: "javascript", tsx: "javascript", typescript: "javascript",
+    cpp: "c", "c++": "c", h: "c", hpp: "c",
+    golang: "go",
+    sh: "bash", shell: "bash", zsh: "bash",
+    rb: "ruby",
+    yml: "yaml", toml: "yaml",
+  };
+
+  // 依 code fence 開頭標注的語言名稱（例如 ` ```rust ` 的 `rust`）查對應的
+  // 語法上色規則；沒標語言或標了但不認得的語言都回傳 `null`，呼叫端在這種
+  // 情況下維持原本單一顏色的樣子，不強行套用錯誤的規則。
+  function getLanguageSpec(lang) {
+    const key = (lang || "").toLowerCase();
+    return CODE_LANGUAGES[CODE_LANG_ALIASES[key] || key] || null;
+  }
+
+  // 把一行程式碼掃成字串/註解/數字/關鍵字/其餘（plain）幾類，各自包一層
+  // `<span class="tok-...">`；不是完整的詞法分析器（不處理跳脫字元、原始
+  // 字串、巢狀區塊註解），跟 `gui.rs` 的 `highlight_code_line` 是同一套簡化
+  // 規則。`state.inBlockComment` 是跨行狀態（區塊註解可能橫跨好幾行），
+  // 呼叫端每個 code block 開頭要重設成 `{ inBlockComment: false }`，同一個
+  // code block 內逐行往下傳同一個物件（靠物件參考模擬「傳址」，JS 沒有
+  // 像 Rust `&mut bool` 那樣的東西）。
+  function highlightCodeLine(line, spec, state) {
+    let html = "";
+    let plainStart = 0;
+    let i = 0;
+    const flushPlain = (end) => {
+      if (plainStart < end) html += escapeHtml(line.slice(plainStart, end));
+    };
+
+    if (state.inBlockComment && spec.blockComment) {
+      const idx = line.indexOf(spec.blockComment[1]);
+      if (idx === -1) {
+        return line ? `<span class="tok-comment">${escapeHtml(line)}</span>` : "";
+      }
+      const end = idx + spec.blockComment[1].length;
+      html += `<span class="tok-comment">${escapeHtml(line.slice(0, end))}</span>`;
+      i = end;
+      plainStart = end;
+      state.inBlockComment = false;
+    }
+
+    while (i < line.length) {
+      if (spec.blockComment && line.startsWith(spec.blockComment[0], i)) {
+        flushPlain(i);
+        const idx = line.indexOf(spec.blockComment[1], i + spec.blockComment[0].length);
+        if (idx === -1) {
+          html += `<span class="tok-comment">${escapeHtml(line.slice(i))}</span>`;
+          state.inBlockComment = true;
+          i = line.length;
+        } else {
+          const end = idx + spec.blockComment[1].length;
+          html += `<span class="tok-comment">${escapeHtml(line.slice(i, end))}</span>`;
+          i = end;
+        }
+        plainStart = i;
+        continue;
+      }
+      if (spec.lineComment && line.startsWith(spec.lineComment, i)) {
+        flushPlain(i);
+        html += `<span class="tok-comment">${escapeHtml(line.slice(i))}</span>`;
+        plainStart = line.length;
+        break;
+      }
+      const ch = line[i];
+      if (ch === '"' || ch === "'") {
+        const end = line.indexOf(ch, i + 1);
+        if (end !== -1) {
+          flushPlain(i);
+          html += `<span class="tok-string">${escapeHtml(line.slice(i, end + 1))}</span>`;
+          i = end + 1;
+          plainStart = i;
+          continue;
+        }
+      }
+      if (/[A-Za-z_]/.test(ch)) {
+        const word = line.slice(i).match(/^[A-Za-z0-9_]+/)[0];
+        if (spec.keywords.includes(word)) {
+          flushPlain(i);
+          html += `<span class="tok-keyword">${escapeHtml(word)}</span>`;
+          i += word.length;
+          plainStart = i;
+          continue;
+        }
+        i += word.length;
+        continue;
+      }
+      if (/[0-9]/.test(ch)) {
+        const num = line.slice(i).match(/^[0-9.]+/)[0];
+        flushPlain(i);
+        html += `<span class="tok-number">${escapeHtml(num)}</span>`;
+        i += num.length;
+        plainStart = i;
+        continue;
+      }
+      i++;
+    }
+    flushPlain(line.length);
+    return html;
+  }
+
+  // `notepad` panel 的即時 markdown 預覽用：不是完整的 CommonMark 剖析器
+  // （不處理巢狀強調、參照連結、表格這些），只涵蓋最常用的語法，足夠「盡量
+  // 還原排版好的樣子」。文字先跳脫過 HTML 特殊字元，使用者打的原始內容
+  // 不會被當成標籤解讀、也不會有 HTML injection 的風險。
+  function renderInlineMarkdown(text) {
+    let s = escapeHtml(text);
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // `***文字***`（粗體兼斜體）要在 `**` 規則之前處理，不然會被 `**` 先
+    // 吃掉、多出來的一個 `*` 變成殘留字元。
+    s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+    s = s.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_, a, b) => `<strong>${a ?? b}</strong>`);
+    s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+    s = s.replace(/\+\+([^+]+)\+\+/g, '<span class="notepad-underline">$1</span>');
+    s = s.replace(/==([^=]+)==/g, '<span class="notepad-highlight">$1</span>');
+    s = s.replace(/\*([^*]+)\*|_([^_]+)_/g, (_, a, b) => `<em>${a ?? b}</em>`);
+    // 圖片語法 `![替代文字](網址)`：不是每個 panel 都需要真的顯示圖片，這裡
+    // 只當成連結對待——有些論壇（例如 Discourse）的替代文字會夾帶
+    // `|690x460, 50%` 這種縮放/尺寸提示，只取 `|` 前面那段當作顯示文字。
+    // 要先處理過圖片語法，才不會被底下的一般連結規則吃到剩一個孤立的 `!`。
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+      const label = alt.split("|")[0].trim();
+      return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+    });
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => `<a href="${url}" target="_blank" rel="noopener">${label}</a>`);
+    // `<br>` 換行標記：原始文字先被 `escapeHtml` 跳脫成 `&lt;br&gt;`，這裡
+    // 換回真正的 `<br>` 標籤才會讓瀏覽器實際換行，而不是顯示成字面文字。
+    s = s.replace(/&lt;br&gt;/g, "<br>");
+    return s;
+  }
+
+  function isTableRow(line) {
+    return line.includes("|") && line.trim() !== "";
+  }
+
+  // table 的分隔列（header 底下那一行，例如 `| --- | :---: | ---: |`）：只由
+  // `-`、`:`、`|`、空白組成，且至少要有一個 `-`。
+  function isTableSeparator(line) {
+    const t = line.trim();
+    return t.includes("-") && /^[-:|\s]+$/.test(t);
+  }
+
+  // 把一行 table 資料列拆成每一欄內容（已 trim 過前後空白）；行首/行尾的
+  // `|` 是可有可無的分隔符號，不當作多一欄空白內容。
+  function splitTableRow(line) {
+    let t = line.trim();
+    if (t.startsWith("|")) t = t.slice(1);
+    if (t.endsWith("|")) t = t.slice(0, -1);
+    return t.split("|").map((cell) => cell.trim());
+  }
+
+  // 逐行處理區塊層級語法（標題/引言/清單/table/code fence/分隔線/段落），
+  // 行內語法交給 `renderInlineMarkdown`。清單/code fence 需要跨行的「目前在
+  // 哪個區塊裡」狀態，用 `listType`/`inCodeBlock` 這兩個區域變數追蹤；table
+  // 則需要往下看一行才能判斷是不是 table（含 `|` 的下一行是不是分隔列），
+  // 所以這裡用索引迴圈而不是 `for...of`，才能在判斷完 table 之後直接把
+  // 迴圈游標跳到 table 結束的下一行。
+  function renderMarkdown(source) {
+    const lines = source.split("\n");
+    let html = "";
+    let inCodeBlock = false;
+    let codeSpec = null;
+    let codeState = null;
+    let codeShowLineNumbers = false;
+    let codeLineCounter = 0;
+    let listType = null; // "ul" | "ol" | null
+    const closeList = () => {
+      if (listType) {
+        html += `</${listType}>`;
+        listType = null;
+      }
+    };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith("```")) {
+        if (!inCodeBlock) {
+          closeList();
+          // 開頭 fence 標注的語言（例如 ` ```rust ` 的 `rust`）決定語法上色
+          // 規則；語言名稱後面接一個 `=`（例如 ` ```rust= `）表示要加行號，
+          // 兩者是各自獨立的標注，`=` 拿掉之後剩下的部分才是真正的語言
+          // 名稱。`codeState` 是這個 code block 專屬的跨行狀態，每個 code
+          // block 都要重新從 `false` 開始，不能沿用上一個 code block 剩下
+          // 的狀態。
+          const rawLang = line.trim().slice(3).trim();
+          codeShowLineNumbers = rawLang.endsWith("=");
+          codeSpec = getLanguageSpec(codeShowLineNumbers ? rawLang.slice(0, -1) : rawLang);
+          codeState = { inBlockComment: false };
+          codeLineCounter = 0;
+          html += `<pre data-line="${i}"><code>`;
+          inCodeBlock = true;
+        } else {
+          html += "</code></pre>";
+          inCodeBlock = false;
+          codeSpec = null;
+        }
+        continue;
+      }
+      if (inCodeBlock) {
+        if (codeShowLineNumbers) {
+          codeLineCounter++;
+          html += `<span class="line-no">${codeLineCounter}</span>`;
+        }
+        html += codeSpec ? highlightCodeLine(line, codeSpec, codeState) : escapeHtml(line);
+        html += "\n";
+        continue;
+      }
+
+      // table：一行含 `|` 的資料列，緊接著一行分隔列，就當作 table 的開頭；
+      // 後面連續含 `|` 的行都算資料列，直到遇到不符合的行或內容結尾為止。
+      if (isTableRow(line) && !isTableSeparator(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        closeList();
+        const headerCells = splitTableRow(line);
+        let j = i + 2;
+        const dataRows = [];
+        while (j < lines.length && isTableRow(lines[j])) {
+          dataRows.push(splitTableRow(lines[j]));
+          j++;
+        }
+        html += `<table data-line="${i}"><thead><tr>`;
+        for (const cell of headerCells) html += `<th>${renderInlineMarkdown(cell)}</th>`;
+        html += "</tr></thead><tbody>";
+        for (const [rowOffset, row] of dataRows.entries()) {
+          // 每一列各自帶自己的來源行號（`i + 2` 是資料列的起點，跳過 header
+          // 跟分隔列），捲動同步時才能精準對到你正在編輯的那一列，不是整個
+          // table 一起跳。
+          html += `<tr data-line="${i + 2 + rowOffset}">`;
+          for (const cell of row) html += `<td>${renderInlineMarkdown(cell)}</td>`;
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        i = j - 1; // for 迴圈本身還會再 +1
+        continue;
+      }
+
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        closeList();
+        const level = heading[1].length;
+        html += `<h${level} data-line="${i}">${renderInlineMarkdown(heading[2])}</h${level}>`;
+        continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        closeList();
+        html += `<blockquote data-line="${i}">${renderInlineMarkdown(line.replace(/^\s*>\s?/, ""))}</blockquote>`;
+        continue;
+      }
+      const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+      if (ul) {
+        if (listType !== "ul") {
+          closeList();
+          html += "<ul>";
+          listType = "ul";
+        }
+        // GFM 風格的 checklist 項目（`- [ ] 內容`／`- [x] 內容`）：畫成一個
+        // 唯讀的 checkbox，`disabled` 是因為這裡只是把目前的 markdown 內容
+        // 呈現出來，不是要讓使用者直接點擊改變原始檔案。
+        const checkbox = ul[1].match(/^\[( |x|X)\]\s+(.*)$/);
+        if (checkbox) {
+          const checked = checkbox[1].toLowerCase() === "x";
+          html += `<li class="notepad-task" data-line="${i}"><input type="checkbox" disabled${checked ? " checked" : ""}> ${renderInlineMarkdown(checkbox[2])}</li>`;
+        } else {
+          html += `<li data-line="${i}">${renderInlineMarkdown(ul[1])}</li>`;
+        }
+        continue;
+      }
+      const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+      if (ol) {
+        if (listType !== "ol") {
+          closeList();
+          html += "<ol>";
+          listType = "ol";
+        }
+        html += `<li data-line="${i}">${renderInlineMarkdown(ol[1])}</li>`;
+        continue;
+      }
+      if (/^\s*(---|\*\*\*)\s*$/.test(line)) {
+        closeList();
+        html += `<hr data-line="${i}">`;
+        continue;
+      }
+      closeList();
+      if (line.trim() !== "") {
+        html += `<p data-line="${i}">${renderInlineMarkdown(line)}</p>`;
+      }
+    }
+    closeList();
+    if (inCodeBlock) html += "</code></pre>";
+    return html;
+  }
+
   // 開一個 panel：畫出可拖拉/縮放的框，並訂閱後端 `/api/panel/<name>/stream`
   // 這個 SSE，內容一有變化後端就會推播過來，不用自己去 poll。
   function openPanel(name) {
@@ -1017,6 +1539,7 @@
     let body;
     let musicUi = null;
     let shellUi = null;
+    let notepadUi = null;
     if (name === "player") {
       // 跟任何 plugin 都無關的獨立播放器：不訂閱 SSE（`body` 保持 `undefined`），
       // 左邊檔案清單＋下載列，右邊封面＋播放控制。
@@ -1288,6 +1811,190 @@
       resizeObserver.observe(container);
 
       shellUi = { container, term, ws, resizeObserver };
+    } else if (name === "notepad") {
+      // 跟 `player`/`shell` 一樣完全獨立於一般 plugin 的純文字 SSE 顯示：
+      // 讀寫後端的筆記檔案（`/api/notepad/content`，見 `web.rs`），跟終端機
+      // 那邊各自讀寫同一批檔案，不即時同步彼此的編輯狀態（見 `web.rs` 的
+      // `notepad_get_content`/`notepad_save_content` 說明）。檢視模式
+      // （`viewEl`）顯示渲染好的 markdown；按 Ctrl-E 切到編輯模式
+      // （`editEl`）：左邊是原始文字的 `<textarea>`、右邊即時渲染預覽；
+      // Ctrl-F 切換要顯示/編輯的檔案。跟終端機用同一套 Ctrl-E/Ctrl-F/
+      // Ctrl-S/Ctrl-X 快速鍵語意（見 `gui.rs` 的 `notepad_editing`/
+      // `notepad_prompting` 那段），只是終端機沒有並排預覽的畫面空間，
+      // 這裡有。
+      panel.style.width = "640px";
+      panel.style.height = "440px";
+
+      const container = document.createElement("div");
+      container.className = "notepad-body";
+
+      const viewEl = document.createElement("div");
+      viewEl.className = "notepad-view";
+      viewEl.tabIndex = 0;
+
+      const editEl = document.createElement("div");
+      editEl.className = "notepad-edit";
+      editEl.style.display = "none";
+      const textarea = document.createElement("textarea");
+      textarea.className = "notepad-textarea";
+      textarea.spellcheck = false;
+      const previewEl = document.createElement("div");
+      previewEl.className = "notepad-preview";
+      editEl.appendChild(textarea);
+      editEl.appendChild(previewEl);
+
+      // 快速鍵提示（左）＋目前檔名（右），用 flex 兩端對齊，不用像終端機
+      // 那樣手動算空白補齊——網頁字型不是等寬網格，補空白對不齊。
+      const hint = document.createElement("div");
+      hint.className = "notepad-hint";
+      const hintText = document.createElement("span");
+      const hintName = document.createElement("span");
+      hintName.className = "notepad-hint-name";
+      hint.appendChild(hintText);
+      hint.appendChild(hintName);
+
+      // Ctrl-F 按下後取代 `hint` 顯示的檔名輸入框，位置/樣式跟 `hint` 一致
+      // （兩者互斥切換 `display`），輸入完按 Enter 確認、Esc 放棄。
+      const filenameInput = document.createElement("input");
+      filenameInput.type = "text";
+      filenameInput.className = "notepad-filename-input";
+      filenameInput.style.display = "none";
+      filenameInput.spellcheck = false;
+
+      container.appendChild(viewEl);
+      container.appendChild(editEl);
+      container.appendChild(hint);
+      container.appendChild(filenameInput);
+
+      const state = { savedContent: "", editing: false, promptingFile: false, name: "notepad.md" };
+
+      function updateHint() {
+        hintName.textContent = state.name;
+        hintText.textContent = state.editing ? "Ctrl-S 儲存並離開　Ctrl-X 放棄修改" : "Ctrl-E 編輯　Ctrl-F 切換檔案";
+      }
+
+      function renderView() {
+        viewEl.innerHTML = state.savedContent.trim()
+          ? renderMarkdown(state.savedContent)
+          : '<span class="notepad-empty">(空白，按 Ctrl-E 開始編輯)</span>';
+        updateHint();
+      }
+
+      function enterEdit() {
+        state.editing = true;
+        textarea.value = state.savedContent;
+        previewEl.innerHTML = renderMarkdown(state.savedContent);
+        viewEl.style.display = "none";
+        editEl.style.display = "flex";
+        updateHint();
+        textarea.focus();
+      }
+
+      function exitEdit() {
+        state.editing = false;
+        viewEl.style.display = "";
+        editEl.style.display = "none";
+        renderView();
+        viewEl.focus();
+      }
+
+      async function save() {
+        await fetch("/api/notepad/content", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: state.name, content: textarea.value }),
+        });
+        state.savedContent = textarea.value;
+        exitEdit();
+      }
+
+      async function loadFile(fileName) {
+        const res = await fetch(`/api/notepad/content?name=${encodeURIComponent(fileName)}`);
+        const d = await res.json();
+        state.name = d.name;
+        state.savedContent = d.content;
+        renderView();
+      }
+
+      function startFilePrompt() {
+        state.promptingFile = true;
+        filenameInput.value = state.name;
+        hint.style.display = "none";
+        filenameInput.style.display = "";
+        filenameInput.focus();
+        filenameInput.select();
+      }
+
+      function endFilePrompt() {
+        state.promptingFile = false;
+        filenameInput.style.display = "none";
+        hint.style.display = "";
+        viewEl.focus();
+      }
+
+      filenameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          const fileName = filenameInput.value.trim();
+          endFilePrompt();
+          if (fileName) loadFile(fileName);
+        } else if (e.key === "Escape") {
+          e.preventDefault();
+          endFilePrompt();
+        }
+      });
+
+      // 依游標所在的原始行號，在預覽區找出對應（或最接近之前）的區塊元素並
+      // 捲到那裡——`renderMarkdown` 幫每個區塊標了 `data-line`（原始行號，
+      // 依文件順序遞增排列），只要找「行號 <= 目前游標行號」裡最大的那個，
+      // 就是游標目前對應到的區塊。
+      function scrollPreviewToCursor() {
+        const currentLine = textarea.value.slice(0, textarea.selectionStart).split("\n").length - 1;
+        const marks = previewEl.querySelectorAll("[data-line]");
+        let target = null;
+        for (const el of marks) {
+          if (Number(el.dataset.line) <= currentLine) {
+            target = el;
+          } else {
+            break;
+          }
+        }
+        if (target) {
+          target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+        }
+      }
+
+      textarea.addEventListener("input", () => {
+        previewEl.innerHTML = renderMarkdown(textarea.value);
+        scrollPreviewToCursor();
+      });
+      // 輸入文字之外，純粹移動游標（方向鍵、Home/End、滑鼠點擊）不會觸發
+      // `input`，另外用 `keyup`/`click` 補上，這樣單純瀏覽、沒在打字時預覽
+      // 也會跟著捲動。
+      textarea.addEventListener("keyup", scrollPreviewToCursor);
+      textarea.addEventListener("click", scrollPreviewToCursor);
+
+      const keyHandler = (e) => {
+        if (!state.editing && !state.promptingFile && e.ctrlKey && e.key.toLowerCase() === "e") {
+          e.preventDefault();
+          enterEdit();
+        } else if (!state.editing && !state.promptingFile && e.ctrlKey && e.key.toLowerCase() === "f") {
+          e.preventDefault();
+          startFilePrompt();
+        } else if (state.editing && e.ctrlKey && e.key.toLowerCase() === "s") {
+          e.preventDefault();
+          save();
+        } else if (state.editing && e.ctrlKey && e.key.toLowerCase() === "x") {
+          e.preventDefault();
+          exitEdit();
+        }
+      };
+      viewEl.addEventListener("keydown", keyHandler);
+      textarea.addEventListener("keydown", keyHandler);
+
+      loadFile(state.name).then(() => viewEl.focus());
+
+      notepadUi = { container };
     } else {
       body = document.createElement("pre");
       body.className = "panel-body";
@@ -1299,7 +2006,7 @@
     handle.addEventListener("mousedown", (e) => startResize(panel, e));
 
     panel.appendChild(title);
-    panel.appendChild(musicUi ? musicUi.container : shellUi ? shellUi.container : body);
+    panel.appendChild(musicUi ? musicUi.container : shellUi ? shellUi.container : notepadUi ? notepadUi.container : body);
     panel.appendChild(handle);
     panel.addEventListener("mousedown", () => bringToFront(panel));
     desk.appendChild(panel);
@@ -1370,10 +2077,13 @@
 
     // `player`／`shell` 這兩個 panel 都跟任何 plugin 無關，沒有對應的
     // `/api/panel/<name>/stream` 可以訂閱（後端會回 404），所以直接跳過，
-    // 不用白白開一條會一直重連失敗的 EventSource。EventSource 斷線會自動
-    // 重連，其餘 panel 不用自己寫 retry。
+    // 不用白白開一條會一直重連失敗的 EventSource。`notepad` 雖然是真的
+    // plugin（後端這條 SSE 確實存在，給終端機/GUI 那邊即時反映內容用），但
+    // 前端這裡已經用專屬的 `notepadUi`（`/api/notepad/content`）處理檢視/
+    // 編輯，不需要也訂閱一份純文字版本。EventSource 斷線會自動重連，其餘
+    // panel 不用自己寫 retry。
     let es = null;
-    if (name !== "player" && name !== "shell") {
+    if (name !== "player" && name !== "shell" && name !== "notepad") {
       es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
       es.onmessage = (e) => {
         // 使用者如果往上捲去看舊內容，不要硬把它拉回底部；只有原本就在（或接近）
@@ -1393,7 +2103,7 @@
     if (musicUi) {
       startMusicFileBrowser(musicUi);
     }
-    open.set(name, { el: panel, es, musicUi, shellUi });
+    open.set(name, { el: panel, es, musicUi, shellUi, notepadUi });
   }
 
   fetch("/api/version")
