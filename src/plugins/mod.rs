@@ -12,6 +12,7 @@ pub use music::MusicPlugin;
 pub(crate) use notepad::{DEFAULT_NOTEPAD_FILE, NOTEPAD_DIR};
 pub use notepad::NotepadPlugin;
 pub use output::OutputPlugin;
+pub(crate) use system::REPORT_INTERVAL;
 pub use system::SystemPlugin;
 pub use weather::WeatherPlugin;
 pub use wol::WolPlugin;

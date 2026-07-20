@@ -6,18 +6,25 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 use crate::output::OutputBuffer;
-use crate::plugin::{Plugin, SharedContext};
+use crate::plugin::{DeviceEntry, DeviceListItem, DeviceReport, Plugin, SharedContext};
+use crate::sysinfo;
 
 /// tailscale ip 多久重新查一次。過期後不是在呼叫端（`status`/`panel_text()`，
-/// 可能是 CLI 的 `status` 指令、GUI 畫面重繪，也可能是 web 的
-/// `broadcast_ticker`，見 `web.rs`）當場去跑 `tailscale`，而是丟給背景執行緒
-/// 查（見 `spawn_tailscale_refresh`），呼叫端先拿現有的快取值，不會被這個
-/// 子行程呼叫卡住。這條指令通常很快（查本機的 tailscaled daemon，不是真的
-/// 網路請求），但只要沒有絕對保證一定快（tailscale 沒裝好、daemon 沒起來、
-/// 系統一時忙碌都可能拖到上百毫秒甚至更久），而 `panel_text()`/`status()`
-/// 都是在持有共用的 `Shell` 鎖的情況下呼叫——一旦卡住，CLI 打指令、GUI
-/// 畫面、web 都會跟著卡住等鎖，這正是這個快取機制要避免的狀況。
+/// 可能是 CLI 的 `status` 指令、GUI 畫面重繪、web 的 `broadcast_ticker`，也
+/// 可能是背景回報執行緒 `spawn_reporter`）當場去跑 `tailscale`，而是丟給背景
+/// 執行緒查（見 `TailscaleCache::spawn_refresh`），呼叫端先拿現有的快取值，
+/// 不會被這個子行程呼叫卡住。這條指令通常很快（查本機的 tailscaled daemon，
+/// 不是真的網路請求），但只要沒有絕對保證一定快（tailscale 沒裝好、daemon
+/// 沒起來、系統一時忙碌都可能拖到上百毫秒甚至更久），而 `panel_text()`/
+/// `status()` 都是在持有共用的 `Shell` 鎖的情況下呼叫——一旦卡住，CLI 打
+/// 指令、GUI 畫面、web 都會跟著卡住等鎖，這正是這個快取機制要避免的狀況。
 const TAILSCALE_TTL: Duration = Duration::from_secs(10);
+
+/// 背景回報執行緒（`spawn_reporter`）多久跑一次：把自己的資訊寫進本機的
+/// device registry，mode 是 client 時額外推播給設定的 server、並拉一次完整
+/// 清單回來合併。`pub(crate)` 給 `DevicePlugin` 算 `ALIVE_TTL` 用，兩邊的
+/// 「多久算離線」需要跟這個回報間隔保持倍數關係，避免各自寫死不同步。
+pub(crate) const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SystemMode {
@@ -36,32 +43,212 @@ impl SystemMode {
     }
 }
 
+/// tailscale ip 的 TTL 快取，包成一個可以 `Clone`（內部全是 `Arc`）的小型別，
+/// 這樣同一份快取狀態除了 `SystemPlugin` 自己的方法能用，也能整個搬進背景
+/// 回報執行緒（`spawn_reporter`）的 closure 裡用，不用重複實作一次「讀快取、
+/// 過期就丟一個背景執行緒去重查」的邏輯。
+#[derive(Clone)]
+struct TailscaleCache {
+    cache: Arc<Mutex<Option<(Instant, String)>>>,
+    pending: Arc<Mutex<bool>>,
+}
+
+impl TailscaleCache {
+    fn new() -> Self {
+        Self { cache: Arc::new(Mutex::new(None)), pending: Arc::new(Mutex::new(false)) }
+    }
+
+    /// 只讀快取，不做任何子行程呼叫：有資料就回傳（同時判斷是否過期該重
+    /// 查），沒資料（還沒查過）或查到的是空字串（沒裝/沒登入/沒位址）都回傳
+    /// `None`。真正的查詢一律丟給 `spawn_refresh`，這裡不等它。
+    fn get(&self) -> Option<String> {
+        let cached = self.cache.lock().unwrap().clone();
+        let stale = match &cached {
+            None => true,
+            Some((fetched_at, _)) => fetched_at.elapsed() >= TAILSCALE_TTL,
+        };
+        if stale {
+            self.spawn_refresh();
+        }
+        cached.map(|(_, ip)| ip).filter(|ip| !ip.is_empty())
+    }
+
+    /// 開一個背景執行緒去查 tailscale ip，查完寫回 `cache`；如果已經有一個
+    /// 背景執行緒在查了就不重複開，查詢本身（`sysinfo::fetch_tailscale_ip`）
+    /// 完全不會碰到 `Shell` 的鎖，呼叫端也不用等它做完。
+    fn spawn_refresh(&self) {
+        let mut pending = self.pending.lock().unwrap();
+        if *pending {
+            return; // 已經有背景執行緒在查了。
+        }
+        *pending = true;
+        drop(pending);
+
+        let cache = self.cache.clone();
+        let pending = self.pending.clone();
+        thread::spawn(move || {
+            let ip = sysinfo::fetch_tailscale_ip().unwrap_or_default();
+            *cache.lock().unwrap() = Some((Instant::now(), ip));
+            *pending.lock().unwrap() = false;
+        });
+    }
+}
+
 pub struct SystemPlugin {
-    #[allow(dead_code)]
-    ctx: SharedContext,
-    mode: SystemMode,
-    /// 最後一次查到的 tailscale ip，背景執行緒（`spawn_tailscale_refresh`）
-    /// 抓完寫回這裡；`tailscale_ip()` 只讀，不含任何耗時操作，不會卡住持有
-    /// `Shell` 鎖的那個執行緒。
-    tailscale_cache: Arc<Mutex<Option<(Instant, String)>>>,
-    /// 目前是不是已經有一個背景執行緒在查 tailscale ip，避免快取一過期、
-    /// 短時間內被連續呼叫（例如 web 每個 tick）就開出一堆重複的 tailscale
-    /// 子行程。
-    tailscale_pending: Arc<Mutex<bool>>,
+    /// 這台機器在 device registry 裡的識別碼（電腦名稱）。`DevicePlugin` 判斷
+    /// 「哪一列是自己」用的也是同一個值（各自呼叫 `sysinfo::hostname()`），
+    /// 不需要透過 `ctx` 傳遞。
+    id: String,
+    /// 用 `Arc<Mutex<_>>` 而不是普通欄位，因為背景回報執行緒（`spawn_reporter`）
+    /// 需要讀目前的 mode，而 `set_mode` 是在另一個執行緒（持有 `Shell` 鎖的
+    /// 那個）寫入的。
+    mode: Arc<Mutex<SystemMode>>,
+    /// `server <ip>` 設定的目標，只有 mode 是 client 時背景回報執行緒才會真的
+    /// 用它推播/拉清單。
+    server_addr: Arc<Mutex<Option<String>>>,
+    tailscale: TailscaleCache,
 }
 
 impl SystemPlugin {
     pub fn new(ctx: SharedContext) -> Self {
-        Self {
-            ctx,
-            mode: SystemMode::Standalone,
-            tailscale_cache: Arc::new(Mutex::new(None)),
-            tailscale_pending: Arc::new(Mutex::new(false)),
+        let id = sysinfo::hostname();
+        let mode = Arc::new(Mutex::new(SystemMode::Standalone));
+        let server_addr = Arc::new(Mutex::new(None));
+        let tailscale = TailscaleCache::new();
+        Self::spawn_reporter(ctx, id.clone(), mode.clone(), server_addr.clone(), tailscale.clone());
+        Self { id, mode, server_addr, tailscale }
+    }
+
+    /// 背景回報執行緒，整個程式活著期間持續跑，每 `REPORT_INTERVAL` 一次：
+    /// 1. 不管目前是哪個 mode，都把自己的資訊寫進本機的 device registry
+    ///    （`ContextInner::devices`），這樣 `DevicePlugin` 才能顯示「自己」
+    ///    這一列，standalone/server 模式下 `device list` 也一樣看得到本機
+    ///    資料，不用額外判斷。
+    /// 2. 只有 mode 是 client 且設定過 `server_addr` 時，才推播自己的資訊給
+    ///    對方（`push_report`），並拉一次完整的裝置清單回來合併進本機
+    ///    registry（`pull_peers`）——自己那一列用本機剛查好的資料為準，不
+    ///    會被伺服器回傳、可能有延遲的版本蓋掉。
+    fn spawn_reporter(
+        ctx: SharedContext,
+        id: String,
+        mode: Arc<Mutex<SystemMode>>,
+        server_addr: Arc<Mutex<Option<String>>>,
+        tailscale: TailscaleCache,
+    ) {
+        thread::spawn(move || loop {
+            let current_mode = *mode.lock().unwrap();
+            let report = Self::build_report(&id, &tailscale, current_mode);
+            {
+                let mut inner = ctx.lock().unwrap();
+                inner.devices.insert(id.clone(), DeviceEntry { report: report.clone(), last_seen: Instant::now() });
+            }
+            if current_mode == SystemMode::Client {
+                let addr = server_addr.lock().unwrap().clone();
+                if let Some(addr) = addr {
+                    Self::push_report(&addr, &report);
+                    Self::pull_peers(&addr, &ctx, &id);
+                }
+            }
+            thread::sleep(REPORT_INTERVAL);
+        });
+    }
+
+    fn build_report(id: &str, tailscale: &TailscaleCache, mode: SystemMode) -> DeviceReport {
+        let tailscale_ip = tailscale.get();
+        let ip = tailscale_ip.clone().unwrap_or_else(sysinfo::local_ip);
+        DeviceReport {
+            id: id.to_string(),
+            ip,
+            tailscale: tailscale_ip.is_some(),
+            mode: mode.as_str().to_string(),
+            device_uptime_secs: sysinfo::device_uptime_secs(),
+            app_uptime_secs: sysinfo::app_uptime_secs(),
         }
     }
 
+    /// 把 `report` POST 給 `addr` 這台 server 的 `/api/device/register`。跟
+    /// `WeatherPlugin::fetch`/`sysinfo::fetch_tailscale_ip` 一樣透過 `curl`
+    /// 子行程發網路請求，不額外引入 HTTP client crate。失敗（沒開 server、
+    /// 網路不通、逾時）就放棄這一輪，下一次 `REPORT_INTERVAL` 再試，不重試、
+    /// 不報錯給使用者——背景回報本來就是盡力而為。
+    fn push_report(addr: &str, report: &DeviceReport) {
+        let Ok(body) = serde_json::to_string(report) else { return };
+        let url = format!("http://{addr}:9759/api/device/register");
+        let _ = Command::new("curl")
+            .args([
+                "--silent",
+                "--max-time",
+                "5",
+                "-X",
+                "POST",
+                "-H",
+                "Content-Type: application/json",
+                "-d",
+                &body,
+                &url,
+            ])
+            .output();
+    }
+
+    /// 跟 `addr` 這台 server 的 `/api/device/list` 拿目前完整的裝置清單，合併
+    /// 進本機 registry——除了自己那一列（本機剛查好的資料已經在這一輪寫過，
+    /// 見 `spawn_reporter`，跳過避免被伺服器回傳、可能有延遲的版本蓋掉），其
+    /// 餘每一列都直接覆蓋。`last_seen` 依伺服器回傳的「幾秒前收到」往回推算
+    /// 出一個本機的 `Instant`，這樣 `DevicePlugin` 判斷 alive 用的是同一套
+    /// 邏輯，不需要另外從網路上搬一個「alive」旗標過來。
+    fn pull_peers(addr: &str, ctx: &SharedContext, my_id: &str) {
+        let url = format!("http://{addr}:9759/api/device/list");
+        let Ok(output) = Command::new("curl").args(["--silent", "--max-time", "5", &url]).output() else {
+            return;
+        };
+        if !output.status.success() {
+            return;
+        }
+        let Ok(body) = String::from_utf8(output.stdout) else { return };
+        let Ok(items) = serde_json::from_str::<Vec<DeviceListItem>>(&body) else { return };
+        let mut inner = ctx.lock().unwrap();
+        for item in items {
+            if item.report.id == my_id {
+                continue;
+            }
+            let last_seen = Instant::now()
+                .checked_sub(Duration::from_secs_f64(item.age_secs.max(0.0)))
+                .unwrap_or_else(Instant::now);
+            inner.devices.insert(item.report.id.clone(), DeviceEntry { report: item.report, last_seen });
+        }
+    }
+
+    fn ip(&self) -> String {
+        self.tailscale.get().unwrap_or_else(sysinfo::local_ip)
+    }
+
+    fn tailscale_flag(&self) -> &'static str {
+        if self.tailscale.get().is_some() {
+            "yes"
+        } else {
+            "no"
+        }
+    }
+
+    fn mode_str(&self) -> &'static str {
+        self.mode.lock().unwrap().as_str()
+    }
+
+    fn server_text(&self) -> String {
+        self.server_addr.lock().unwrap().clone().unwrap_or_else(|| "未設定".to_string())
+    }
+
     fn status(&mut self, out: &OutputBuffer) -> Result<()> {
-        out.push(&format!("tailscale ip: {}\nmode: {}\n", self.tailscale_ip(), self.mode.as_str()));
+        out.push(&format!(
+            "id: {}\nip: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\n",
+            self.id,
+            self.ip(),
+            self.tailscale_flag(),
+            self.mode_str(),
+            self.server_text(),
+            sysinfo::format_uptime(sysinfo::device_uptime_secs()),
+            sysinfo::format_uptime(sysinfo::app_uptime_secs()),
+        ));
         Ok(())
     }
 
@@ -74,8 +261,22 @@ impl SystemPlugin {
 
     fn set_mode(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let target = args.first().context("mode 需要接 server/client/standalone")?;
-        self.mode = Self::resolve_mode(target)?;
-        out.push(&format!("system mode 設定為 {}\n", self.mode.as_str()));
+        let resolved = Self::resolve_mode(target)?;
+        *self.mode.lock().unwrap() = resolved;
+        out.push(&format!("system mode 設定為 {}\n", resolved.as_str()));
+        Ok(())
+    }
+
+    /// 設定 client 要回報/拉清單的目標 server ip；mode 不是 client 時這個值
+    /// 一樣可以先設好，等之後 `mode client` 時背景回報執行緒（`spawn_reporter`）
+    /// 就會開始使用它，不需要照特定順序下指令。
+    fn set_server(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
+        let addr = args.first().context("server 需要接伺服器的 ip")?;
+        *self.server_addr.lock().unwrap() = Some(addr.clone());
+        out.push(&format!(
+            "server ip 設定為 {addr}（mode 是 client 時，每 {} 秒回報一次）\n",
+            REPORT_INTERVAL.as_secs()
+        ));
         Ok(())
     }
 
@@ -102,65 +303,11 @@ impl SystemPlugin {
             ),
         }
     }
-
-    /// 只讀快取，不做任何子行程呼叫：有資料就回傳（同時判斷是否過期該重
-    /// 查），沒資料就先回傳「查詢中」的狀態文字。真正的查詢一律丟給
-    /// `spawn_tailscale_refresh`。
-    fn tailscale_ip(&self) -> String {
-        let cached = self.tailscale_cache.lock().unwrap().clone();
-        let stale = match &cached {
-            None => true,
-            Some((fetched_at, _)) => fetched_at.elapsed() >= TAILSCALE_TTL,
-        };
-        if stale {
-            self.spawn_tailscale_refresh();
-        }
-        match cached {
-            Some((_, ip)) => ip,
-            None => "查詢中...".to_string(),
-        }
-    }
-
-    /// 開一個背景執行緒去查 tailscale ip，查完寫回 `tailscale_cache`；如果
-    /// 已經有一個背景執行緒在查了就不重複開，查詢本身（`Self::fetch_tailscale_ip`）
-    /// 完全不會碰到 `Shell` 的鎖，呼叫端也不用等它做完。
-    fn spawn_tailscale_refresh(&self) {
-        let mut pending = self.tailscale_pending.lock().unwrap();
-        if *pending {
-            return; // 已經有背景執行緒在查了。
-        }
-        *pending = true;
-        drop(pending);
-
-        let cache = self.tailscale_cache.clone();
-        let pending = self.tailscale_pending.clone();
-        thread::spawn(move || {
-            let ip = Self::fetch_tailscale_ip();
-            *cache.lock().unwrap() = Some((Instant::now(), ip));
-            *pending.lock().unwrap() = false;
-        });
-    }
-
-    /// 執行 `tailscale ip -4` 取得目前的 tailscale IPv4 位址；沒安裝 tailscale、
-    /// 沒登入或沒有位址（指令失敗或沒輸出）都算沒有，回傳 "N/A"。只會在
-    /// `spawn_tailscale_refresh` 開的背景執行緒裡呼叫，不會卡住任何持有鎖的
-    /// 執行緒。
-    fn fetch_tailscale_ip() -> String {
-        Command::new("tailscale")
-            .args(["ip", "-4"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "N/A".to_string())
-    }
 }
 
 impl Plugin for SystemPlugin {
     fn commands(&self) -> &'static [&'static str] {
-        &["status", "mode server", "mode client", "mode standalone", "version"]
+        &["status", "mode server", "mode client", "mode standalone", "server <ip>", "version"]
     }
 
     fn dispatch(&mut self, cmd: &str, args: &[String], out: &OutputBuffer) -> Result<()> {
@@ -168,15 +315,21 @@ impl Plugin for SystemPlugin {
             "status" => self.status(out),
             "version" => self.version(out),
             "mode" => self.set_mode(args, out),
+            "server" => self.set_server(args, out),
             other => bail!("system 不認得指令: {other}"),
         }
     }
 
     fn panel_text(&self) -> Option<String> {
         Some(format!(
-            "tailscale ip: {}\nmode: {}\nbuild: {}",
-            self.tailscale_ip(),
-            self.mode.as_str(),
+            "id: {}\nip: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\nbuild: {}",
+            self.id,
+            self.ip(),
+            self.tailscale_flag(),
+            self.mode_str(),
+            self.server_text(),
+            sysinfo::format_uptime(sysinfo::device_uptime_secs()),
+            sysinfo::format_uptime(sysinfo::app_uptime_secs()),
             env!("CNG5_BUILD_TIMESTAMP")
         ))
     }

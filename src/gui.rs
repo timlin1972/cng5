@@ -306,6 +306,11 @@ fn hint_line_with_filename(hint: &str, filename: &str, width: usize) -> String {
     format!("{hint}{}{filename}", " ".repeat(gap))
 }
 
+/// 所有 panel 共通的操作快速鍵，畫在每個 panel 最下面一行（notepad 有自己
+/// 專屬的提示，見 `hint_line_with_filename`，不用這個）。這些鍵不管哪個
+/// panel 是 active 都能按，所以提示文字也不分 panel，統一顯示同一行。
+const PANEL_HINT: &str = "Tab 切換面板　Alt-方向鍵 移動　Alt-WASD 縮放　Alt-M 最大化　Alt-X 關閉";
+
 /// 幫一行 code block 內容產生要顯示的 `Span`：有語法上色規則（`spec`，見
 /// `language_spec`）就用 `highlight_code_line` 依關鍵字/字串/註解/數字分類
 /// 上色，沒有（沒標語言，或標了但不認得）就整行套用預設的單一顏色，維持
@@ -982,11 +987,18 @@ fn run_loop(
                     .title(name.as_str());
                 if name == "output" {
                     let inner = block.inner(rect);
-                    let lines = output.all();
-                    let height = inner.height as usize;
-                    let start = lines.len().saturating_sub(height);
-                    let visible: Vec<Line> = lines[start..].iter().map(|l| Line::raw(l.as_str())).collect();
-                    frame.render_widget(Paragraph::new(visible).block(block), rect);
+                    frame.render_widget(block, rect);
+                    if inner.height > 0 {
+                        let body_height = inner.height.saturating_sub(1);
+                        let hint_area = Rect { x: inner.x, y: inner.y + body_height, width: inner.width, height: 1 };
+                        let body_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: body_height };
+                        let lines = output.all();
+                        let start = lines.len().saturating_sub(body_area.height as usize);
+                        let visible: Vec<Line> = lines[start..].iter().map(|l| Line::raw(l.as_str())).collect();
+                        frame.render_widget(Paragraph::new(visible), body_area);
+                        let hint_style = Style::default().fg(Color::DarkGray);
+                        frame.render_widget(Paragraph::new(PANEL_HINT).style(hint_style), hint_area);
+                    }
                 } else if name == "notepad" {
                     // 最下面一行固定顯示快速鍵提示（Ctrl-E/Ctrl-S/Ctrl-X），其餘才是
                     // 內容/編輯區域——跟一般 Paragraph 直接塞進整個 `rect` 不一樣，
@@ -1073,9 +1085,24 @@ fn run_loop(
                         }
                     }
                 } else if let Some(text) = lock_shell(shell).plugin_panel_text(name) {
-                    frame.render_widget(Paragraph::new(text).block(block), rect);
-                } else {
+                    let inner = block.inner(rect);
                     frame.render_widget(block, rect);
+                    if inner.height > 0 {
+                        let body_height = inner.height.saturating_sub(1);
+                        let hint_area = Rect { x: inner.x, y: inner.y + body_height, width: inner.width, height: 1 };
+                        let body_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: body_height };
+                        frame.render_widget(Paragraph::new(text), body_area);
+                        let hint_style = Style::default().fg(Color::DarkGray);
+                        frame.render_widget(Paragraph::new(PANEL_HINT).style(hint_style), hint_area);
+                    }
+                } else {
+                    let inner = block.inner(rect);
+                    frame.render_widget(block, rect);
+                    if inner.height > 0 {
+                        let hint_area = Rect { x: inner.x, y: inner.y + inner.height - 1, width: inner.width, height: 1 };
+                        let hint_style = Style::default().fg(Color::DarkGray);
+                        frame.render_widget(Paragraph::new(PANEL_HINT).style(hint_style), hint_area);
+                    }
                 }
             }
 
@@ -1294,6 +1321,7 @@ fn run_loop(
                     'd' => lock_shell(shell).resize_active_panel(PANEL_MOVE_STEP, 0),
                     'a' => lock_shell(shell).resize_active_panel(-PANEL_MOVE_STEP, 0),
                     'm' => lock_shell(shell).toggle_maximize_active_panel(),
+                    'x' => lock_shell(shell).close_active_panel(),
                     _ => {}
                 }
             }

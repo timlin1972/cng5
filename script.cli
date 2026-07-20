@@ -1,19 +1,28 @@
 mode gui
+
+# output
 plugin enter output
 panel
-rect 0 0 100 100
 show
-exit
-exit
+~
+
+# system
 plugin enter system
 panel
 rect 20 20 40 40
 show
-exit
-exit
+~
+
+# weather
 plugin enter weather
 location add Xidian
 location add Tainan
 location add Tokyo
 location add Eindhoven
-exit
+~
+
+# device
+plugin enter device
+panel
+show
+~

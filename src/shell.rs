@@ -17,15 +17,45 @@ pub fn lock_shell(shell: &Mutex<Shell>) -> MutexGuard<'_, Shell> {
     shell.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// 目前平台預設要開的 host shell 是哪個程式：Unix-like 平台看 `SHELL`（使用者的
+/// 登入 shell），沒設定就退回 `/bin/bash`；Windows 沒有 `SHELL` 這個慣例，改看
+/// `COMSPEC`（一般由系統設好指向 `cmd.exe`），沒設定就退回 `cmd.exe`。`shell.rs`
+/// 的 `run_host_shell` 跟 `web.rs` 的 `shell_ws` 都是「借一個真正的 host shell」
+/// 這個概念，因此共用同一份平台判斷，不要各自維護一套。
+pub fn default_shell_program() -> String {
+    if cfg!(windows) {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
+    } else {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+    }
+}
+
 /// `shell` 指令實際借出終端機的地方：CLI（`main.rs`）跟 GUI（`gui.rs`）都要在
 /// `Shell` 的鎖已經放開之後才呼叫這個，讓子行程（一個完整的、可能跑很久的互動
 /// shell session）不會卡住其他共用同一個 `Shell` 的執行緒（例如背景的 web
 /// server）。子行程預設繼承目前行程的 stdin/stdout/stderr，也就是使用者現在打
-/// 字用的這個終端機，用起來就像真的執行了 `$SHELL` 一樣；執行失敗（例如
-/// `$SHELL`/`/bin/bash` 都不存在）就當作使用者按了一下就離開，不特別報錯。
+/// 字用的這個終端機，用起來就像真的執行了 `$SHELL`（或 Windows 上的 `%COMSPEC%`）
+/// 一樣；執行失敗（例如設定的程式不存在）就當作使用者按了一下就離開，不特別報錯。
 pub fn run_host_shell() {
-    let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let _ = std::process::Command::new(shell_program).status();
+    let _ = std::process::Command::new(default_shell_program()).status();
+}
+
+/// 把一行指令裡 `#` 之後的內容當成註解砍掉，讓 `script.cli`（或 CLI/GUI 手動輸入）
+/// 可以在指令後面加註解，例如 `panel show # 打開音樂面板`。只有沒被單引號/雙引號
+/// 包住的 `#` 才算註解開頭——被引號包住的 `#`（例如某個參數本身就含 `#`）不受影響，
+/// 維持原樣傳給 `shell_words::split` 解析。
+fn strip_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            '#' if !in_single && !in_double => return &line[..i],
+            _ => {}
+        }
+    }
+    line
 }
 
 pub enum Mode {
@@ -213,8 +243,8 @@ impl Shell {
     }
 
     pub fn execute_line(&mut self, line: &str) -> Result<()> {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let line = strip_comment(line).trim();
+        if line.is_empty() {
             return Ok(());
         }
         if let Some(rest) = line.strip_prefix('!') {
@@ -678,6 +708,18 @@ impl Shell {
             state.width = 100;
             state.height = 100;
             self.maximized.insert(name, saved);
+        }
+    }
+
+    /// GUI 裡按 Alt-X 呼叫：把目前的 active panel 關閉（設成不顯示），跟指令列
+    /// `panel hidden` 效果一樣。順便清掉最大化紀錄，不然這個 panel 下次被
+    /// `show` 重新打開時，會直接沿用舊的最大化前 rect，跟使用者這次關閉前
+    /// 看到的大小對不上。沒有 active panel（沒開任何 panel）時沒有意義，不做事。
+    pub fn close_active_panel(&mut self) {
+        let Some(name) = self.active_panel_name() else { return };
+        self.maximized.remove(&name);
+        if let Some(state) = self.panels.get_mut(&name) {
+            state.visible = false;
         }
     }
 

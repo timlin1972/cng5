@@ -3,6 +3,7 @@ mod output;
 mod plugin;
 mod plugins;
 mod shell;
+mod sysinfo;
 mod web;
 
 use std::env;
@@ -54,11 +55,14 @@ fn main() -> Result<()> {
             Box::new(|ctx| Box::new(WeatherPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
     ];
-    let shell = Arc::new(Mutex::new(Shell::new(ctx, factories, output.clone())));
+    let shell = Arc::new(Mutex::new(Shell::new(ctx.clone(), factories, output.clone())));
     // 跟目前終端機是 CLI 還是 GUI mode 無關，整個程式活著期間都在背景監聽
     // port 9759，跟終端機共用同一個 shell/output，讓瀏覽器上開的 panel 能
-    // 即時反映終端機這邊做的變更（例如 `mode server`）。
-    web::spawn(shell.clone(), output.clone());
+    // 即時反映終端機這邊做的變更（例如 `mode server`）；`ctx` 另外傳一份是
+    // 因為 device registry 的讀寫（`/api/device/register`、`/api/device/list`）
+    // 直接操作共用的 `ContextInner`，不透過 `Shell`，避免這種高頻率的網路
+    // 端點跟 CLI/GUI 操作搶同一把 `Shell` 鎖。
+    web::spawn(shell.clone(), output.clone(), ctx);
     spawn_exit_watcher(shell.clone());
     let mut printed = 0usize;
 
@@ -67,11 +71,18 @@ fn main() -> Result<()> {
     if Path::new(&script_path).exists() {
         lock_shell(&shell).run_script(Path::new(&script_path))?;
         flush_new_lines(&output, &mut printed);
-        // script 裡如果下過 `mode gui`/`mode cli`，一開始就照那個模式啟動，
-        // 而不是永遠先固定開 CLI。
-        if let Some(requested) = lock_shell(&shell).take_requested_ui() {
-            ui = requested;
-        }
+    }
+    // `script.cli` 之外，額外讀一份不進版控的 `script-local.cli`（例如每台機器
+    // 各自不同的 server 位址、panel 位置），純粹是本機覆蓋用，檔案不存在就跳過。
+    let local_script_path = "script-local.cli";
+    if Path::new(local_script_path).exists() {
+        lock_shell(&shell).run_script(Path::new(local_script_path))?;
+        flush_new_lines(&output, &mut printed);
+    }
+    // 兩份 script 裡如果下過 `mode gui`/`mode cli`，一開始就照那個模式啟動，
+    // 而不是永遠先固定開 CLI。
+    if let Some(requested) = lock_shell(&shell).take_requested_ui() {
+        ui = requested;
     }
 
     loop {

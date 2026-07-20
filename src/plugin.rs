@@ -1,12 +1,51 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::output::OutputBuffer;
 
-/// 各 plugin 之後要共用的資源放這裡（目前還沒有明確項目）。
+/// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
+/// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
+/// 其他機器回報的，格式都一樣，這樣 `DevicePlugin` 顯示時不用區分來源。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DeviceReport {
+    pub id: String,
+    pub ip: String,
+    pub tailscale: bool,
+    pub mode: String,
+    pub device_uptime_secs: u64,
+    pub app_uptime_secs: u64,
+}
+
+/// `GET /api/device/list` 的一筆回應：`age_secs` 是伺服器收到這筆回報後過了
+/// 幾秒，而不是直接帶 `last_seen`（`Instant` 沒辦法序列化，而且不同機器的
+/// `Instant` 本來就不能互相比較）。拉這份清單的一方（client 端的
+/// `plugins::system::pull_peers`）憑這個秒數重建一個本機的 `Instant`，之後
+/// 判斷 alive 的邏輯（`DevicePlugin`）就能跟本機自己的資料一致。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct DeviceListItem {
+    pub report: DeviceReport,
+    pub age_secs: f64,
+}
+
+/// registry 裡的一筆：上一次收到/寫入的時間，搭配 `DevicePlugin` 顯示時判斷
+/// alive。曾經回報過、後來斷線的裝置，`report` 保留最後一次收到的內容不清
+/// 掉，只有 alive 會變成 false（見 `DevicePlugin` 的 `ALIVE_TTL`）。
+pub struct DeviceEntry {
+    pub report: DeviceReport,
+    pub last_seen: Instant,
+}
+
+/// 各 plugin 之後要共用的資源放這裡。目前只有 `devices`：`system` plugin（不
+/// 管是本機自己、還是透過 web 收到其他機器的回報，見 `web::device_register`）
+/// 寫入，`device` plugin 讀出來顯示。
 #[derive(Default)]
-pub struct ContextInner {}
+pub struct ContextInner {
+    pub devices: HashMap<String, DeviceEntry>,
+}
 
 pub type SharedContext = Arc<Mutex<ContextInner>>;
 

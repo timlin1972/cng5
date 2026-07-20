@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
@@ -259,6 +259,34 @@ impl NotepadPlugin {
             state.cursor_col = state.lines[state.cursor_row].chars().count();
         }
     }
+
+    /// `list` 指令：列出 `notepad/` 資料夾底下目前有哪些檔案，這樣才知道有哪些
+    /// 檔名可以用 Ctrl-F 切換過去，不用自己跳出去開資料夾看。跟 `MusicPlugin`
+    /// 的 `list_text` 是同樣的寫法，只是不篩副檔名——筆記檔名不像 music 只認
+    /// `.mp3`，什麼副檔名都可能是使用者自己開的筆記。
+    fn list_text(&self) -> String {
+        match fs::read_dir(NOTEPAD_DIR) {
+            Ok(entries) => {
+                let mut names: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                if names.is_empty() {
+                    "(notepad 資料夾目前是空的)".to_string()
+                } else {
+                    names.join("\n")
+                }
+            }
+            Err(_) => "(notepad 資料夾還不存在，還沒存過任何筆記)".to_string(),
+        }
+    }
+
+    fn list(&self, out: &OutputBuffer) -> Result<()> {
+        out.push(&format!("{}\n", self.list_text()));
+        Ok(())
+    }
 }
 
 /// 把「第幾個字元」換算成這個字串裡對應的 byte offset（`String` 的索引/切割都
@@ -269,14 +297,17 @@ fn char_byte_index(s: &str, char_idx: usize) -> usize {
 }
 
 impl Plugin for NotepadPlugin {
-    // 沒有任何指令：換檔案是 GUI/web panel 裡的 Ctrl-F（見
-    // `start_file_prompt`），不透過 `execute_line` 送指令字串。
+    // 換檔案是 GUI/web panel 裡的 Ctrl-F（見 `start_file_prompt`），不透過
+    // `execute_line` 送指令字串；`list` 是目前唯一走一般指令路徑的操作。
     fn commands(&self) -> &'static [&'static str] {
-        &[]
+        &["list"]
     }
 
-    fn dispatch(&mut self, cmd: &str, _args: &[String], _out: &OutputBuffer) -> Result<()> {
-        anyhow::bail!("notepad 不認得指令: {cmd}")
+    fn dispatch(&mut self, cmd: &str, _args: &[String], out: &OutputBuffer) -> Result<()> {
+        match cmd {
+            "list" => self.list(out),
+            other => bail!("notepad 不認得指令: {other}"),
+        }
     }
 
     fn panel_text(&self) -> Option<String> {

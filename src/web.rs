@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_ws::Message;
@@ -13,8 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
+use crate::plugin::{DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
 use crate::plugins::{DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
-use crate::shell::{lock_shell, Shell};
+use crate::shell::{default_shell_program, lock_shell, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
 
@@ -41,16 +42,16 @@ type Hub = Arc<PanelHub>;
 /// `Shell`/`OutputBuffer`——這樣終端機下 `mode server` 之後，瀏覽器開著的
 /// `system` panel 才能即時看到內容改變。bind 失敗（例如 port 被佔用）只把錯誤
 /// 寫進 `output`，不能讓整個程式跟著沒了 CLI/GUI。
-pub fn spawn(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) {
+pub fn spawn(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: SharedContext) {
     std::thread::spawn(move || {
         let out_for_err = output.clone();
-        if let Err(err) = actix_web::rt::System::new().block_on(run_server(shell, output)) {
+        if let Err(err) = actix_web::rt::System::new().block_on(run_server(shell, output, ctx)) {
             out_for_err.push(&format!("web server 啟動失敗: {err:#}\n"));
         }
     });
 }
 
-async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std::io::Result<()> {
+async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: SharedContext) -> std::io::Result<()> {
     let names = lock_shell(&shell).plugin_names();
     let channels = names
         .iter()
@@ -65,6 +66,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std:
             .app_data(web::Data::new(hub.clone()))
             .app_data(web::Data::new(shell.clone()))
             .app_data(web::Data::new(output.clone()))
+            .app_data(web::Data::new(ctx.clone()))
             .route("/", web::get().to(index))
             .route("/api/plugins", web::get().to(api_plugins))
             .route("/api/version", web::get().to(api_version))
@@ -79,10 +81,35 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) -> std:
             .route("/api/music/file/{name}", web::delete().to(music_file_delete))
             .route("/api/notepad/content", web::get().to(notepad_get_content))
             .route("/api/notepad/content", web::post().to(notepad_save_content))
+            .route("/api/device/register", web::post().to(device_register))
+            .route("/api/device/list", web::get().to(device_list))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
     .await
+}
+
+/// `POST /api/device/register`：client 端的 `SystemPlugin` 背景回報執行緒
+/// （見 `plugins/system.rs` 的 `push_report`）定期打這個，把自己的資訊寫進/
+/// 更新這台 server 本機的 device registry，`last_seen` 用收到這次請求當下的
+/// 時間，`DevicePlugin` 顯示的 alive 就是靠這個判斷。
+async fn device_register(body: web::Json<DeviceReport>, ctx: web::Data<SharedContext>) -> impl Responder {
+    let report = body.into_inner();
+    ctx.lock().unwrap().devices.insert(report.id.clone(), DeviceEntry { report, last_seen: Instant::now() });
+    HttpResponse::Ok().finish()
+}
+
+/// `GET /api/device/list`：回傳這台 server 本機 registry 裡目前所有裝置，給
+/// client 端的 `SystemPlugin`（見 `pull_peers`）拉回去合併進自己的清單。
+async fn device_list(ctx: web::Data<SharedContext>) -> impl Responder {
+    let items: Vec<DeviceListItem> = ctx
+        .lock()
+        .unwrap()
+        .devices
+        .values()
+        .map(|entry| DeviceListItem { report: entry.report.clone(), age_secs: entry.last_seen.elapsed().as_secs_f64() })
+        .collect();
+    HttpResponse::Ok().json(items)
 }
 
 /// 每 `TICK` 算一次每個 panel 目前該顯示的文字，跟快取裡上一次的比對，只有變了
@@ -231,7 +258,7 @@ struct ShellResize {
 /// `shell` 指令刻意不做成 `Plugin::dispatch` 是同一個考量，見 `shell.rs` 的
 /// `run_host_shell`）。
 ///
-/// 每條 WebSocket 連線各自開一個 PTY + `$SHELL` 子行程：
+/// 每條 WebSocket 連線各自開一個 PTY + host shell 子行程（見 `default_shell_program`）：
 /// - 讀取端：獨立的 OS 執行緒阻塞讀 PTY 的輸出，讀到的位元組透過 channel
 ///   轉給下面這個 async task，讀到 EOF（子行程離開、pty 關閉）就順便呼叫
 ///   `child.wait()` 把這個子行程 reap 掉，不留殭屍行程。
@@ -252,8 +279,7 @@ async fn shell_ws(
     let setup = (|| -> anyhow::Result<_> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })?;
-        let shell_program = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-        let child = pair.slave.spawn_command(CommandBuilder::new(shell_program))?;
+        let child = pair.slave.spawn_command(CommandBuilder::new(default_shell_program()))?;
         // 一定要早點放掉這份 slave 端 handle：只要我們自己的行程還握著一份
         // slave fd，就算子行程已經結束，master 那邊的讀取也不會收到 EOF
         // （見 portable-pty 官方範例都是這樣做的）。
