@@ -95,6 +95,8 @@ impl TailscaleCache {
 }
 
 pub struct SystemPlugin {
+    /// `server_addr`（`ContextInner` 共用欄位，`qr` plugin 也會讀）讀寫要用得到。
+    ctx: SharedContext,
     /// 這台機器在 device registry 裡的識別碼（電腦名稱）。`DevicePlugin` 判斷
     /// 「哪一列是自己」用的也是同一個值（各自呼叫 `sysinfo::hostname()`），
     /// 不需要透過 `ctx` 傳遞。
@@ -103,9 +105,6 @@ pub struct SystemPlugin {
     /// 需要讀目前的 mode，而 `set_mode` 是在另一個執行緒（持有 `Shell` 鎖的
     /// 那個）寫入的。
     mode: Arc<Mutex<SystemMode>>,
-    /// `server <ip>` 設定的目標，只有 mode 是 client 時背景回報執行緒才會真的
-    /// 用它推播/拉清單。
-    server_addr: Arc<Mutex<Option<String>>>,
     tailscale: TailscaleCache,
 }
 
@@ -113,10 +112,9 @@ impl SystemPlugin {
     pub fn new(ctx: SharedContext) -> Self {
         let id = sysinfo::hostname();
         let mode = Arc::new(Mutex::new(SystemMode::Standalone));
-        let server_addr = Arc::new(Mutex::new(None));
         let tailscale = TailscaleCache::new();
-        Self::spawn_reporter(ctx, id.clone(), mode.clone(), server_addr.clone(), tailscale.clone());
-        Self { id, mode, server_addr, tailscale }
+        Self::spawn_reporter(ctx.clone(), id.clone(), mode.clone(), tailscale.clone());
+        Self { ctx, id, mode, tailscale }
     }
 
     /// 背景回報執行緒，整個程式活著期間持續跑，每 `REPORT_INTERVAL` 一次：
@@ -128,26 +126,20 @@ impl SystemPlugin {
     ///    對方（`push_report`），並拉一次完整的裝置清單回來合併進本機
     ///    registry（`pull_peers`）——自己那一列用本機剛查好的資料為準，不
     ///    會被伺服器回傳、可能有延遲的版本蓋掉。
-    fn spawn_reporter(
-        ctx: SharedContext,
-        id: String,
-        mode: Arc<Mutex<SystemMode>>,
-        server_addr: Arc<Mutex<Option<String>>>,
-        tailscale: TailscaleCache,
-    ) {
+    fn spawn_reporter(ctx: SharedContext, id: String, mode: Arc<Mutex<SystemMode>>, tailscale: TailscaleCache) {
         thread::spawn(move || loop {
             let current_mode = *mode.lock().unwrap();
             let report = Self::build_report(&id, &tailscale, current_mode);
-            {
+            let server_addr = {
                 let mut inner = ctx.lock().unwrap();
                 inner.devices.insert(id.clone(), DeviceEntry { report: report.clone(), last_seen: Instant::now() });
-            }
-            if current_mode == SystemMode::Client {
-                let addr = server_addr.lock().unwrap().clone();
-                if let Some(addr) = addr {
-                    Self::push_report(&addr, &report);
-                    Self::pull_peers(&addr, &ctx, &id);
-                }
+                inner.server_addr.clone()
+            };
+            if current_mode == SystemMode::Client
+                && let Some(addr) = server_addr
+            {
+                Self::push_report(&addr, &report);
+                Self::pull_peers(&addr, &ctx, &id);
             }
             thread::sleep(REPORT_INTERVAL);
         });
@@ -235,7 +227,7 @@ impl SystemPlugin {
     }
 
     fn server_text(&self) -> String {
-        self.server_addr.lock().unwrap().clone().unwrap_or_else(|| "未設定".to_string())
+        self.ctx.lock().unwrap().server_addr.clone().unwrap_or_else(|| "未設定".to_string())
     }
 
     fn status(&mut self, out: &OutputBuffer) -> Result<()> {
@@ -272,7 +264,7 @@ impl SystemPlugin {
     /// 就會開始使用它，不需要照特定順序下指令。
     fn set_server(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let addr = args.first().context("server 需要接伺服器的 ip")?;
-        *self.server_addr.lock().unwrap() = Some(addr.clone());
+        self.ctx.lock().unwrap().server_addr = Some(addr.clone());
         out.push(&format!(
             "server ip 設定為 {addr}（mode 是 client 時，每 {} 秒回報一次）\n",
             REPORT_INTERVAL.as_secs()

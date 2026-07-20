@@ -39,12 +39,17 @@ pub struct DeviceEntry {
     pub last_seen: Instant,
 }
 
-/// 各 plugin 之後要共用的資源放這裡。目前只有 `devices`：`system` plugin（不
-/// 管是本機自己、還是透過 web 收到其他機器的回報，見 `web::device_register`）
-/// 寫入，`device` plugin 讀出來顯示。
+/// 各 plugin 之後要共用的資源放這裡。
 #[derive(Default)]
 pub struct ContextInner {
+    /// `system` plugin（不管是本機自己、還是透過 web 收到其他機器的回報，見
+    /// `web::device_register`）寫入，`device` plugin 讀出來顯示。
     pub devices: HashMap<String, DeviceEntry>,
+    /// `system` plugin 的 `server <ip>` 設定的目標。放在這裡（而不是
+    /// `SystemPlugin` 自己的私有欄位）是因為 `qr` plugin 也需要讀它組「server
+    /// 的 web UI 網址」QR code，兩個 plugin 都要碰得到，符合 `ContextInner`
+    /// 本來就是「各 plugin 共用資源」的定位。
+    pub server_addr: Option<String>,
 }
 
 pub type SharedContext = Arc<Mutex<ContextInner>>;

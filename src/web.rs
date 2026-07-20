@@ -19,7 +19,7 @@ use crate::shell::{default_shell_program, lock_shell, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
 
-const PORT: u16 = 9759;
+pub(crate) const PORT: u16 = 9759;
 /// panel 內容多久重新算一次、有變才推播，見 `broadcast_ticker`。
 const TICK: Duration = Duration::from_millis(300);
 /// `output` 這個假 panel 只推最新這麼多行，避免瀏覽器端的內容無限長下去。

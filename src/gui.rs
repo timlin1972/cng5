@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
-use crate::plugins::NotepadPlugin;
+use crate::plugins::{NotepadPlugin, QrPlugin};
 use crate::shell::{lock_shell, run_host_shell, PanelState, Shell};
 
 /// 借出 `notepad` plugin 的具體型別可變參考執行 `f`：`Shell::plugin_mut` 只給
@@ -30,6 +30,15 @@ fn with_notepad<R>(shell: &Arc<Mutex<Shell>>, f: impl FnOnce(&mut NotepadPlugin)
     let plugin = sh.plugin_mut("notepad")?;
     let notepad = plugin.as_any_mut().downcast_mut::<NotepadPlugin>()?;
     Some(f(notepad))
+}
+
+/// 跟 `with_notepad`同一個套路，借出 `qr` plugin 的具體型別可變參考，讓 GUI
+/// 能呼叫 PgUp/PgDn 用的 `cycle_next`/`cycle_prev`。
+fn with_qr<R>(shell: &Arc<Mutex<Shell>>, f: impl FnOnce(&mut QrPlugin) -> R) -> Option<R> {
+    let mut sh = lock_shell(shell);
+    let plugin = sh.plugin_mut("qr")?;
+    let qr = plugin.as_any_mut().downcast_mut::<QrPlugin>()?;
+    Some(f(qr))
 }
 
 /// `line` 是不是標題（`#`..`######` 開頭接空白），是的話回傳 `#` 的個數
@@ -1146,6 +1155,10 @@ fn run_loop(
         let notepad_active = panels.last().is_some_and(|(name, _)| name == "notepad");
         let notepad_editing = with_notepad(shell, |np| np.is_editing()).unwrap_or(false);
         let notepad_prompting = with_notepad(shell, |np| np.is_prompting_file()).unwrap_or(false);
+        // qr 是不是目前的 active panel，決定 PgUp/PgDn 要不要拿去切換它顯示的
+        // 是 local 還是 server（見 `with_qr`）——不是 active 的話這兩個鍵沒有
+        // 意義，跟 notepad 的 Ctrl-E/Ctrl-F 只在 `notepad_active` 時才生效同理。
+        let qr_active = panels.last().is_some_and(|(name, _)| name == "qr");
 
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(()),
@@ -1341,6 +1354,12 @@ fn run_loop(
             }
             KeyCode::BackTab => {
                 lock_shell(shell).cycle_active_panel_reverse();
+            }
+            KeyCode::PageUp if qr_active => {
+                with_qr(shell, |qr| qr.cycle_prev());
+            }
+            KeyCode::PageDown if qr_active => {
+                with_qr(shell, |qr| qr.cycle_next());
             }
             KeyCode::Char(c) => input.push(c),
             _ => {}

@@ -21,7 +21,9 @@ use rustyline::{
 
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
-use plugins::{DevicePlugin, MusicPlugin, NotepadPlugin, OutputPlugin, SystemPlugin, WeatherPlugin, WolPlugin};
+use plugins::{
+    DevicePlugin, MusicPlugin, NotepadPlugin, OutputPlugin, QrPlugin, SystemPlugin, WeatherPlugin, WolPlugin,
+};
 use shell::{lock_shell, run_host_shell, PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
@@ -54,6 +56,7 @@ fn main() -> Result<()> {
             "weather",
             Box::new(|ctx| Box::new(WeatherPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
+        ("qr", Box::new(|ctx| Box::new(QrPlugin::new(ctx)) as Box<dyn Plugin>)),
     ];
     let shell = Arc::new(Mutex::new(Shell::new(ctx.clone(), factories, output.clone())));
     // 跟目前終端機是 CLI 還是 GUI mode 無關，整個程式活著期間都在背景監聽
