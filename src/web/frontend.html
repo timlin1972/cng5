@@ -37,6 +37,7 @@
     flex-direction: column;
   }
   #toolbar {
+    position: relative;
     display: flex;
     gap: 8px;
     align-items: center;
@@ -44,7 +45,7 @@
     background: #1b1e26;
     border-bottom: 1px solid #333a46;
   }
-  #toolbar select, #toolbar button {
+  #toolbar button {
     background: #262a33;
     color: #d8dee9;
     border: 1px solid #3a4150;
@@ -53,10 +54,54 @@
     font: inherit;
   }
   #toolbar button:hover { background: #323844; cursor: pointer; }
+  #menu-btn {
+    font-size: 16px;
+    line-height: 1;
+    padding: 4px 10px;
+  }
   #version-label {
     color: #6b7280;
     white-space: nowrap;
     font-size: 12px;
+  }
+  /* 選單預設收起來（`display: none`），`#menu-btn` 點一下加上 `.open` 才展開；
+     絕對定位貼著 toolbar 下緣，蓋在 `#desk` 上面所有 panel 之上（見 `.panel`
+     的 z-index 都是從 1 開始疊加，這裡給一個穩穩高過去的值）。 */
+  #menu-dropdown {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 12px;
+    margin-top: 4px;
+    min-width: 200px;
+    max-height: 70vh;
+    overflow-y: auto;
+    background: #1b1e26;
+    border: 1px solid #3a4150;
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+    z-index: 9999;
+    padding: 4px;
+  }
+  #menu-dropdown.open { display: block; }
+  .menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .menu-item:hover { background: #323844; }
+  .menu-item-icon {
+    width: 1.2em;
+    text-align: center;
+  }
+  .menu-divider {
+    height: 1px;
+    margin: 4px 6px;
+    background: #3a4150;
   }
   #desk {
     position: relative;
@@ -756,11 +801,9 @@
 </head>
 <body>
 <div id="toolbar">
+  <button id="menu-btn" title="選單">☰</button>
   <span id="version-label"></span>
-  <select id="plugin-select"></select>
-  <button id="open-btn">開啟 panel</button>
-  <button id="open-player-btn">🎵 Player</button>
-  <button id="open-shell-btn">🖥️ Shell</button>
+  <div id="menu-dropdown"></div>
 </div>
 <div id="desk"></div>
 <div id="cmdbar">
@@ -786,10 +829,8 @@
 
   const desk = document.getElementById("desk");
   const versionLabel = document.getElementById("version-label");
-  const select = document.getElementById("plugin-select");
-  const openBtn = document.getElementById("open-btn");
-  const openPlayerBtn = document.getElementById("open-player-btn");
-  const openShellBtn = document.getElementById("open-shell-btn");
+  const menuBtn = document.getElementById("menu-btn");
+  const menuDropdown = document.getElementById("menu-dropdown");
 
   // 每個 tab 自己的 panel 版面（位置/大小/疊放順序/開了哪些），只存在這個
   // JS 變數裡，重新整理就消失，也完全不會送回後端——跟後端 `rect`/`show`/
@@ -2110,30 +2151,58 @@
     .then((r) => r.json())
     .then((d) => { versionLabel.textContent = d.build; });
 
+  // 選單裡每一項的統一外形：圖示 + 名字，點下去開對應的 panel（跟以前下拉
+  // 選單+「開啟 panel」按鈕、或 player/shell 專屬按鈕，最後都是呼叫同一個
+  // `openPanel(name)`，這裡收斂成同一份小函式，不用三處各自組 DOM）。選完
+  // 就把選單收起來，跟一般選單的操作習慣一致。
+  function addMenuItem(name, icon) {
+    const item = document.createElement("div");
+    item.className = "menu-item";
+    const iconEl = document.createElement("span");
+    iconEl.className = "menu-item-icon";
+    iconEl.textContent = icon;
+    const label = document.createElement("span");
+    label.textContent = name;
+    item.appendChild(iconEl);
+    item.appendChild(label);
+    item.addEventListener("click", () => {
+      openPanel(name);
+      menuDropdown.classList.remove("open");
+    });
+    menuDropdown.appendChild(item);
+  }
+
+  // player/shell 立刻加進選單，不用等 `/api/plugins` 回來——跟以前那兩顆
+  // 固定按鈕一樣，一開始就能點，不會因為 plugin 清單還沒抓回來就暫時消失。
+  addMenuItem("player", "🎵");
+  addMenuItem("shell", "🖥️");
+  const menuDivider = document.createElement("div");
+  menuDivider.className = "menu-divider";
+  menuDropdown.appendChild(menuDivider);
+
   fetch("/api/plugins")
     .then((r) => r.json())
     .then((names) => {
+      // 每個 plugin 都用同一種圖示（🪟）——不像 player/shell 各自有代表內容
+      // 的圖示，plugin 清單本來就沒有各自的圖示可用，統一用一個代表「這會
+      // 開一個 panel」的圖示就好，不需要也不該每個 plugin 猜一個不同圖示。
       for (const name of names) {
-        const opt = document.createElement("option");
-        opt.value = name;
-        opt.textContent = name;
-        select.appendChild(opt);
+        addMenuItem(name, "🪟");
       }
     });
 
-  openBtn.addEventListener("click", () => {
-    if (select.value) openPanel(select.value);
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menuDropdown.classList.toggle("open");
   });
 
-  // 完全獨立於 plugin 下拉選單之外的一顆按鈕，固定開一個叫 `player` 的
-  // panel——跟從下拉選單開出來的 panel 是同一套外框（拖拉/縮放/最小化/
-  // 最大化/關閉），只是內容是 `openPanel` 裡特判出來的播放器介面。
-  openPlayerBtn.addEventListener("click", () => openPanel("player"));
-
-  // 同樣完全獨立於下拉選單之外，固定開一個叫 `shell` 的 panel——每次點開
-  // 都是全新的一個 host shell（見 `openPanel` 裡 `name === "shell"` 的分支），
-  // 不是同一個共用的 session，關掉 panel 對應的子行程也會跟著結束。
-  openShellBtn.addEventListener("click", () => openPanel("shell"));
+  // 點選單以外的地方收起來；`stopPropagation`（見上面 `menuBtn` 的 click）
+  // 讓按鈕自己那次點擊不會被這裡立刻收掉，兩個 listener 才不會互相打架。
+  document.addEventListener("click", (e) => {
+    if (!menuDropdown.contains(e.target)) {
+      menuDropdown.classList.remove("open");
+    }
+  });
 
   // 指令輸入列：跟終端機共用同一個 Shell，所以這裡打的指令（包含
   // `mode`/`plugin enter` 之類會換 mode 的）會直接影響後端狀態，Enter 送出、
