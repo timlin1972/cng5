@@ -1,2 +1,1 @@
 - Git 倉庫狀態監控:掃你常用的幾個 repo,顯示 uncommitted changes / ahead-behind origin,適合開發機器上用,面板打開就能一眼看到「這台機器有哪些倉庫還沒 commit/push」。
-- QR code 產生:把文字/URL(例如 tailscale IP、web UI 網址)轉成終端機 ASCII QR code,方便手機掃描連過去——跟現有「多機器互相連線」的情境搭配起來很實用,而且純本地運算不用外部服務。
