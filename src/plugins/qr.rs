@@ -7,6 +7,19 @@ use crate::plugin::{Plugin, SharedContext};
 use crate::sysinfo;
 use crate::web::PORT;
 
+/// `manual` 指令的說明。
+const MANUAL_TEXT: &str = "\
+qr：把這台機器（或設定過的 server）的 web UI 網址轉成終端機 QR code，手機掃一下
+就能連過去，不用手動打 ip。
+
+沒有指令，都在 GUI panel 裡操作：
+  PgUp/PgDn   切換 local（自己）跟 server（system plugin 設定的 server <ip>）
+              兩個目標；沒設定過 server 的話就只有 local 可以看
+
+QR code 內容即時算、不快取，system plugin 那邊改了 server ip，這裡下次重繪就會
+自動反映新網址，不用重新產生。
+";
+
 /// 沒有指令、也不快取——面板開著就照目前狀態即時算，這樣 `system server <ip>`
 /// 改掉之後 QR 面板下次重繪就自動反映新網址，不用另外下指令重新產生。
 pub struct QrPlugin {
@@ -83,6 +96,10 @@ impl Plugin for QrPlugin {
 
     fn panel_text(&self) -> Option<String> {
         Some(self.render())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

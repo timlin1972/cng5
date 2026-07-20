@@ -15,10 +15,10 @@ show
 
 # weather
 plugin enter weather
-location add Xidian
-location add Tainan
-location add Tokyo
-location add Eindhoven
+add Xidian
+add Tainan
+add Tokyo
+add Eindhoven
 ~
 
 # device

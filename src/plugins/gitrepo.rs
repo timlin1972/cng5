@@ -16,6 +16,33 @@ use crate::plugin::{Plugin, SharedContext};
 const GITREPO_DIR: &str = "gitrepo";
 const WATCHED_FILE: &str = "watched.txt";
 
+/// `manual` 指令印出來的說明，比 `commands()`/`help` 那種一行式的用法字串完整，
+/// 帶使用情境跟範例——指令一多，光看 `add <dir>` 這種簽名不容易想起整套流程
+/// 是怎麼運作的（尤其是 scan 跟目錄變動之間的關係）。
+const MANUAL_TEXT: &str = "\
+gitrepo：監控本機一堆 git repo 的乾淨/髒狀態，手動 scan 一次，不會背景 polling。
+
+監控目錄可以是「本身就是一個 repo」（例如 buildroot/moxa），也可以是「底下一層
+每個子目錄各自是一個 repo」（例如 buildroot/dl）。add 的時候不用自己分辨是哪一
+種，程式會自動判斷。「不乾淨」的定義是 git status --porcelain 不是空的，
+untracked 的新檔案也算。
+
+範例：
+  add ~/MoxaBuild.mds.role/buildroot/dl     dl 底下每個子目錄各自是一個 repo
+  add ~/MoxaBuild.mds.role/buildroot/moxa   moxa 本身就是一個 repo
+  scan                                      手動觸發一次掃描
+  list                                      監控目錄清單 + 上一次 scan 的結果
+  remove ~/MoxaBuild.mds.role/buildroot/dl  移除一個監控目錄
+  clear                                     移除所有監控目錄
+
+注意事項：
+  - scan 進行中再下一次 scan 會被擋掉，等上一輪跑完再重來。
+  - add/remove 之後、下一次 scan 完成之前，list 只會顯示「目錄有更動，等待
+    scan...」，不顯示舊資料，因為那已經不代表目前這份監控目錄清單了。
+  - scan 進行中如果又 add/remove，這一輪 scan 的結果會作廢，等於中途停止。
+  - 監控目錄清單會存檔，重開程式不用重新 add。
+";
+
 /// 平行掃描 repo 的執行緒數上限。先設成 1（等於循序執行）是使用者刻意選的保守
 /// 值——`buildroot/dl` 底下可能上百個 repo，先確認正確性，真的太慢了再調高；
 /// 調高這裡就會自動變成平行掃描，不需要改其他程式碼。
@@ -361,6 +388,10 @@ impl Plugin for GitRepoPlugin {
     /// 跑完後 GUI 每 200ms 重繪一次會自然拿到新資料，不需要額外的刷新機制。
     fn panel_text(&self) -> Option<String> {
         Some(self.status_text())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

@@ -67,6 +67,15 @@ pub trait Plugin: Send {
         None
     }
 
+    /// `manual` 指令印出來的完整說明：用途、範例、注意事項，比 `commands()` 那種
+    /// 一行式的用法簽名詳細。跟 `help`/`history` 一樣是每個 plugin mode 底下都有
+    /// 的通用指令（見 `shell::Shell::execute_line`），不是各 plugin 自己在
+    /// `dispatch` 裡處理，這樣才不用每個 plugin 都重複寫一次「印出 manual 文字」
+    /// 這種樣板邏輯。
+    fn manual_text(&self) -> &'static str {
+        "這個 plugin 還沒有寫 manual，可以用 help 看指令清單。\n"
+    }
+
     /// 把 `Box<dyn Plugin>` 向下轉型回具體型別，讓外部（目前只有 GUI 的
     /// notepad 編輯功能，見 `gui.rs` 的 `with_notepad`）能直接操作某個 plugin
     /// 的內部狀態，而不是只能透過 `dispatch` 送指令字串——逐字元編輯這種高

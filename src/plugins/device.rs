@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
@@ -12,6 +12,19 @@ use crate::sysinfo;
 /// 保留最後一次收到的內容）。設成回報間隔（`REPORT_INTERVAL`）的 3 倍，容許
 /// 偶爾漏個一兩次（網路一時不通、server 忙）還不會被判定離線。
 const ALIVE_TTL: Duration = Duration::from_secs(REPORT_INTERVAL.as_secs() * 3);
+
+/// `manual` 指令的說明。
+const MANUAL_TEXT: &str = "\
+device：顯示這台機器跟其他回報過的機器（見 system plugin 的 mode client/server）
+目前的狀態——ip、有沒有 tailscale、mode、開機/程式執行多久、還在不在線上。
+
+範例：
+  list                查表格：每台裝置的 id/ip/tailscale/mode/uptime/alive
+  status              簡短摘要：裝置總數、目前上線幾台
+
+alive 是「多久沒回報就視為離線」（回報間隔的 3 倍），不是真的把資料刪掉，離線
+機器最後一次回報的內容還留著，只是 alive 顯示會變成空白。
+";
 
 pub struct DevicePlugin {
     ctx: SharedContext,
@@ -78,15 +91,6 @@ impl DevicePlugin {
         Ok(())
     }
 
-    fn poweron(&mut self, target: &str, out: &OutputBuffer) -> Result<()> {
-        out.push(&format!("TODO: poweron {target}\n"));
-        Ok(())
-    }
-
-    fn poweroff(&mut self, target: &str, out: &OutputBuffer) -> Result<()> {
-        out.push(&format!("TODO: poweroff {target}\n"));
-        Ok(())
-    }
 }
 
 fn yes_no(b: bool) -> String {
@@ -116,21 +120,23 @@ fn render_table(headers: &[&str], rows: &[[String; 7]]) -> String {
 
 impl Plugin for DevicePlugin {
     fn commands(&self) -> &'static [&'static str] {
-        &["list", "status", "poweron <target>", "poweroff <target>"]
+        &["list", "status"]
     }
 
-    fn dispatch(&mut self, cmd: &str, args: &[String], out: &OutputBuffer) -> Result<()> {
+    fn dispatch(&mut self, cmd: &str, _args: &[String], out: &OutputBuffer) -> Result<()> {
         match cmd {
             "list" => self.list(out),
             "status" => self.status(out),
-            "poweron" => self.poweron(args.first().context("poweron 需要一個目標參數")?, out),
-            "poweroff" => self.poweroff(args.first().context("poweroff 需要一個目標參數")?, out),
             other => bail!("device 不認得指令: {other}"),
         }
     }
 
     fn panel_text(&self) -> Option<String> {
         Some(self.table_text())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

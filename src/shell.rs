@@ -83,6 +83,30 @@ const PANEL_MAX_POSITION: i64 = 90;
 /// 減小都不會讓 panel 整個消失或縮到看不見。
 const PANEL_MIN_SIZE: i64 = 10;
 
+/// root mode 的 `manual` 指令：整體介面怎麼運作（plugin/mode/panel/history 這些
+/// 概念怎麼串起來），比 `help` 那種一行式指令清單詳細。各 plugin 進去之後自己的
+/// `manual` 是 `Plugin::manual_text`，這裡只講 root 這一層。
+const ROOT_MANUAL_TEXT: &str = "\
+cng5 把各種小工具包成一個個 plugin，root 負責在它們之間切換、管理 CLI/GUI 畫面。
+
+範例：
+  plugin show           列出目前有哪些 plugin
+  plugin enter wol      進入 wol plugin，之後打的指令都是它的（help/manual 看
+                        它有哪些指令）
+  mode gui              切換成上下可以開好幾個 panel 的 GUI 畫面
+  mode cli              切換回一般的命令列畫面
+  shell                 借用目前終端機開一個真正的 host shell，exit 就會回來
+  history               列出之前執行過的指令
+  !3                    重新執行 history 裡第 3 筆指令
+
+進到某個 plugin 之後：
+  help                  這個 plugin 底下的指令清單（一行式簽名）
+  manual                這個 plugin 更完整的說明與範例
+  panel                 （只有 GUI 畫面才有）進去設定這個 plugin 的 panel
+                        位置/大小/顯示與否
+  ~                     不管在哪一層都直接跳回 root
+";
+
 impl Default for PanelState {
     fn default() -> Self {
         Self { x: 0, y: 0, width: 100, height: 100, visible: false }
@@ -263,6 +287,7 @@ impl Shell {
 
         match (&self.mode, cmd.as_str()) {
             (Mode::Root, "help") => self.print_help(),
+            (Mode::Root, "manual") => self.output.push(ROOT_MANUAL_TEXT),
             (Mode::Root, "history") => self.print_history(),
             (Mode::Root, "plugin") => {
                 let sub_candidates = self.next_word_candidates(&["plugin"]);
@@ -300,19 +325,25 @@ impl Shell {
             }
             (Mode::Root, "shell") => self.requested_shell_passthrough = true,
             (Mode::Root, "exit" | "quit") => self.should_exit = true,
-            // 已經在 root，`~` 沒事做，但仍然是一個合法指令（跟其他 mode 底下的
-            // `~` 行為一致，不管在哪一層打都不會被當成「不認得的指令」）。
-            (Mode::Root, "~") => {}
+            // 已經在 root，`~`/`..`/`...` 都沒事做，但仍然是合法指令（跟其他
+            // mode 底下的行為一致，不管在哪一層打都不會被當成「不認得的指令」）。
+            (Mode::Root, "~" | ".." | "...") => {}
             (Mode::Root, _) => unreachable!("resolve 只會回傳 top_level 裡的字"),
             (Mode::InPlugin(_), "help") => self.print_help(),
+            (Mode::InPlugin(name), "manual") => {
+                let text = self.active.get(name).expect("mode 對應的 plugin 一定存在").manual_text();
+                self.output.push(text);
+            }
             (Mode::InPlugin(_), "history") => self.print_history(),
             // `panel` 只會出現在 next_word_candidates 裡（因此才能被 resolve 選到）
             // 當 current_ui 是 Gui 的時候，見 usage_lines；CLI 模式下打這個字
             // 在 resolve 那一步就已經被當成不認得的指令擋掉了，不會走到這裡。
             (Mode::InPlugin(name), "panel") => self.mode = Mode::InPanel(name.clone()),
-            (Mode::InPlugin(_), "exit" | "quit") => self.mode = Mode::Root,
-            // `~`：不管巢狀多深都直接跳回 root，跟逐層 `exit` 不同。
-            (Mode::InPlugin(_), "~") => self.mode = Mode::Root,
+            // `..`：往上一層，這一層底下只有 root，跟 `exit`/`quit` 是同一件事。
+            (Mode::InPlugin(_), "exit" | "quit" | "..") => self.mode = Mode::Root,
+            // `~`/`...`：不管巢狀多深都直接跳回 root，跟逐層 `exit`/`..` 不同——
+            // 這一層往上兩層一樣是 root（最多只有兩層），所以效果跟 `~` 相同。
+            (Mode::InPlugin(_), "~" | "...") => self.mode = Mode::Root,
             (Mode::InPlugin(name), other) => {
                 self.active
                     .get_mut(name)
@@ -336,8 +367,11 @@ impl Shell {
                 let name = name.clone();
                 self.panel_activate(&name);
             }
-            (Mode::InPanel(name), "exit" | "quit") => self.mode = Mode::InPlugin(name.clone()),
-            (Mode::InPanel(_), "~") => self.mode = Mode::Root,
+            // `..`：往上一層，回到這個 plugin（不是 root），跟 `exit`/`quit` 一樣。
+            (Mode::InPanel(name), "exit" | "quit" | "..") => self.mode = Mode::InPlugin(name.clone()),
+            // `~`/`...`：往上兩層，從 panel 這一層剛好是 root，`..` 只能到 plugin
+            // 這一層，兩者才會不一樣。
+            (Mode::InPanel(_), "~" | "...") => self.mode = Mode::Root,
             (Mode::InPanel(_), _) => unreachable!("resolve 只會回傳 usage_lines 裡的字"),
         }
         Ok(())
@@ -409,6 +443,7 @@ impl Shell {
         match &self.mode {
             Mode::Root => vec![
                 "help",
+                "manual",
                 "history",
                 "plugin show",
                 "plugin enter <name>",
@@ -418,13 +453,15 @@ impl Shell {
                 "exit",
                 "quit",
                 "~",
+                "..",
+                "...",
             ],
             Mode::InPlugin(name) => {
                 let plugin = self
                     .active
                     .get(name)
                     .expect("mode 對應的 plugin 一定存在");
-                let mut lines = vec!["help", "history"];
+                let mut lines = vec!["help", "manual", "history"];
                 lines.extend(plugin.commands());
                 // panel 只有 GUI 畫面才有意義，CLI 底下不列入候選、也就打不出來。
                 if self.current_ui == UiMode::Gui {
@@ -433,6 +470,8 @@ impl Shell {
                 lines.push("exit");
                 lines.push("quit");
                 lines.push("~");
+                lines.push("..");
+                lines.push("...");
                 lines
             }
             Mode::InPanel(_) => vec![
@@ -444,6 +483,8 @@ impl Shell {
                 "exit",
                 "quit",
                 "~",
+                "..",
+                "...",
             ],
         }
     }
@@ -501,6 +542,7 @@ impl Shell {
         let mut s = String::new();
         s.push_str("可用指令:\n");
         s.push_str("  help                 顯示這個說明\n");
+        s.push_str("  manual               顯示更完整的說明文件與範例\n");
         s.push_str("  history              列出之前執行過的指令\n");
         s.push_str("  !<n>                 重新執行 history 裡第 n 筆指令\n");
         s.push_str("  plugin show          列出可用的 plugin\n");
@@ -511,6 +553,8 @@ impl Shell {
         s.push_str("  exit                 離開程式\n");
         s.push_str("  quit                 跟 exit 一樣，離開程式\n");
         s.push_str("  ~                    跳回 root（不管在哪一層都直接回來）\n");
+        s.push_str("  ..                   往上一層（已經在 root，沒事做）\n");
+        s.push_str("  ...                  往上兩層（已經在 root，沒事做）\n");
         s.push_str(&self.plugin_list_text());
         s
     }
@@ -555,6 +599,7 @@ impl Shell {
 
         let mut s = format!("可用指令 ({name}):\n");
         s.push_str("  help               顯示這個說明\n");
+        s.push_str("  manual             顯示這個 plugin 更完整的說明文件與範例\n");
         s.push_str("  history            列出之前執行過的指令\n");
         s.push_str("  !<n>               重新執行 history 裡第 n 筆指令\n");
         if self.current_ui == UiMode::Gui {
@@ -563,6 +608,8 @@ impl Shell {
         s.push_str("  exit               回到 root\n");
         s.push_str("  quit               跟 exit 一樣，回到 root\n");
         s.push_str("  ~                  跳回 root（不管在哪一層都直接回來）\n");
+        s.push_str("  ..                 往上一層，回到 root（跟 exit 一樣）\n");
+        s.push_str("  ...                往上兩層，這一層底下只有 root，跟 ~ 一樣\n");
         for cmd in plugin.commands() {
             s.push_str(&format!("  {cmd}\n"));
         }
@@ -582,6 +629,8 @@ impl Shell {
         s.push_str(&format!("  {:<30} 回到 {name} plugin mode\n", "exit"));
         s.push_str(&format!("  {:<30} 跟 exit 一樣，回到 {name} plugin mode\n", "quit"));
         s.push_str(&format!("  {:<30} 跳回 root（不管在哪一層都直接回來）\n", "~"));
+        s.push_str(&format!("  {:<30} 往上一層，回到 {name} plugin mode（跟 exit 一樣）\n", ".."));
+        s.push_str(&format!("  {:<30} 往上兩層，從 panel 這一層剛好是 root，跟 ~ 一樣\n", "..."));
         s
     }
 

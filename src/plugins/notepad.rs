@@ -15,6 +15,21 @@ pub(crate) const NOTEPAD_DIR: &str = "notepad";
 /// 一開始（還沒按 Ctrl-F 切換過檔案）預設開這個檔案。
 pub(crate) const DEFAULT_NOTEPAD_FILE: &str = "notepad.md";
 
+/// `manual` 指令的說明。這個 plugin 主要透過 GUI panel 直接打字使用，指令列
+/// 能做的事很少，manual 裡要講清楚真正的操作方式在 panel 裡，不是指令。
+const MANUAL_TEXT: &str = "\
+notepad：簡單的純文字筆記，內容存在 notepad/ 資料夾底下。
+
+主要操作都在 GUI 的 panel 裡，不是透過指令：
+  進入 panel 後直接打字就是編輯，方向鍵移動游標
+  Ctrl-F                 切換/開啟另一個筆記檔案（輸入檔名按 Enter）
+
+指令列（CLI 模式）能做的只有：
+  list    列出 notepad/ 資料夾底下已經存過的筆記檔名
+
+檔案切換讀不到就當成新的空白筆記，不會報錯——這是正常的「開新筆記」情境。
+";
+
 /// 編輯中的緩衝區：用一行一個 `String` 存，而不是單一大字串——游標的「第幾行
 /// 第幾個字」這種操作（換行/上下移動/合併相鄰行）在這種表示法下不用每次都
 /// 重新切割整段文字找換行字元，操作起來單純很多。`cursor_col` 是「第幾個字元」
@@ -312,6 +327,10 @@ impl Plugin for NotepadPlugin {
 
     fn panel_text(&self) -> Option<String> {
         Some(self.content.clone())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

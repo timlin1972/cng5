@@ -22,6 +22,20 @@ pub(crate) const MUSIC_DIR: &str = "music";
 /// 第一個剛好符合的字幕檔——不然可能配到抓下來的英文字幕，而不是中文字幕。
 pub(crate) const SUBTITLE_LANG_PRIORITY: [&str; 6] = ["ja", "zh-TW", "zh-Hant", "zh-Hans", "zh", "en"];
 
+/// `manual` 指令的說明。
+const MANUAL_TEXT: &str = "\
+music：用 yt-dlp 把 YouTube 網址轉成 mp3 存下來，順便試著抓字幕當歌詞。
+
+範例：
+  download https://youtu.be/xxxxxxxxxxx   背景下載+轉檔，不會卡住畫面
+  list                                    已下載的檔案 + 進行中/失敗的下載狀態
+
+download 是丟到背景執行緒跑的（轉檔可能要花不少時間），下指令後馬上就能繼續做
+其他事，用 list 查看目前狀態；下載完成的檔案直接看檔案清單即可，不會重複列在
+「進行中」那邊。字幕依序試 ja/zh-TW/zh-Hant/zh-Hans/zh/en，抓不到就算了，不影響
+音訊本身下載成不成功。
+";
+
 #[derive(Clone)]
 enum DownloadStatus {
     InProgress,
@@ -166,6 +180,10 @@ impl Plugin for MusicPlugin {
     /// 進行中/失敗的下載狀態。
     fn panel_text(&self) -> Option<String> {
         Some(self.list_text())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

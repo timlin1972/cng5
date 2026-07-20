@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use serde_json::Value;
 use unicode_width::UnicodeWidthStr;
 
@@ -62,8 +62,22 @@ fn render_table(headers: &[&str], rows: &[Vec<Vec<String>>]) -> String {
 /// 外部網站回應。
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// `manual` 指令的說明。
+const MANUAL_TEXT: &str = "\
+weather：抓 wttr.in 的天氣資料，用純文字表格顯示現在/今天剩下時段/未來幾天。
+
+範例：
+  show          顯示表格（第一列永遠是依來源 IP 自動判斷的地點，後面接著
+                add 加過的城市）
+  add Tokyo     加一個城市，之後 show/panel 都會列出來
+  remove Tokyo  移除一個城市
+
+資料每 300 秒（CACHE_TTL）快取一次，過期後背景執行緒重新抓，show/panel 顯示的
+都是目前的快取值（或「抓取中」），不會讓你等網路回應卡住畫面。
+";
+
 /// 空字串這個 key 代表讓 wttr.in 依來源 IP 自動判斷地點，`text()` 永遠把它排
-/// 表格第一列，`locations` 裡 `location add` 加進來的城市依序排在後面。
+/// 表格第一列，`locations` 裡 `add` 加進來的城市依序排在後面。
 const AUTO_DETECT: &str = "";
 
 /// 一個地點抓回來、已經整理好的報告：`headers`/`row` 一一對應（`now`、今天剩下
@@ -81,35 +95,10 @@ struct CacheEntry {
     report: LocationReport,
 }
 
-#[derive(Clone, Copy)]
-enum LocationSub {
-    Add,
-    Remove,
-}
-
-/// 用前綴比對 `token` 對應到 add/remove 哪一個：完全相符優先，不然找前綴唯一
-/// 對到誰，找不到或有歧異都清楚報錯——跟 `SystemPlugin::resolve_mode`、
-/// `Shell::resolve` 是同一套縮寫比對邏輯，這個專案裡的一致做法。
-fn resolve_location_sub(token: &str) -> Result<LocationSub> {
-    const CANDIDATES: [(&str, LocationSub); 2] = [("add", LocationSub::Add), ("remove", LocationSub::Remove)];
-    if let Some((_, sub)) = CANDIDATES.iter().find(|(name, _)| *name == token) {
-        return Ok(*sub);
-    }
-    let matches: Vec<&(&str, LocationSub)> = CANDIDATES.iter().filter(|(name, _)| name.starts_with(token)).collect();
-    match matches.as_slice() {
-        [] => bail!("location 不認得: {token}（可用: add/remove）"),
-        [(_, sub)] => Ok(*sub),
-        many => bail!(
-            "location 不明確: {token}（可能是: {}）",
-            many.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", ")
-        ),
-    }
-}
-
 pub struct WeatherPlugin {
     #[allow(dead_code)]
     ctx: SharedContext,
-    /// `location add`/`location remove` 維護的城市清單，依加入順序排列。這個欄位
+    /// `add`/`remove` 維護的城市清單，依加入順序排列。這個欄位
     /// 本身還是只在持有 `Shell` 鎖的時候被讀寫（跟其他 plugin 的欄位一樣），
     /// 真正需要拆開來的是下面兩個會被背景執行緒同時存取的欄位。
     locations: Vec<String>,
@@ -136,10 +125,10 @@ impl WeatherPlugin {
         Ok(())
     }
 
-    fn location_add(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
+    fn add(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let city = args.join(" ");
         if city.is_empty() {
-            bail!("location add 需要接城市名稱");
+            bail!("add 需要接城市名稱");
         }
         if self.locations.iter().any(|l| l == &city) {
             out.push(&format!("weather 已經有 {city} 了\n"));
@@ -150,7 +139,7 @@ impl WeatherPlugin {
         Ok(())
     }
 
-    fn location_remove(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
+    fn remove(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let city = args.join(" ");
         let before = self.locations.len();
         self.locations.retain(|l| l != &city);
@@ -163,15 +152,7 @@ impl WeatherPlugin {
         Ok(())
     }
 
-    fn location(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
-        let sub_token = args.first().context("location 需要接 add/remove <city>")?;
-        match resolve_location_sub(sub_token)? {
-            LocationSub::Add => self.location_add(&args[1..], out),
-            LocationSub::Remove => self.location_remove(&args[1..], out),
-        }
-    }
-
-    /// 把「IP 反查」跟每個 `location add` 加進去的城市合併成同一張表格：第一欄
+    /// 把「IP 反查」跟每個 `add` 加進去的城市合併成同一張表格：第一欄
     /// 是 `location`，後面依序是 `now`/今天剩下的時段/未來幾天。欄位名稱取自
     /// 任何一個已經抓到真正資料的地點（各地點理論上算出來的欄位都一樣，因為都
     /// 是用同一個「現在」去篩今天剩下哪些時段）；還在抓取中或抓失敗的地點，
@@ -449,7 +430,7 @@ impl WeatherPlugin {
     /// 哪些時段已經過去。wttr.in 的回應裡查得到的時間欄位（`observation_time`）
     /// 實際上是 UTC，不是查詢地點的當地時間，而且回應裡也沒有任何時區資訊可以
     /// 換算——所以退而求其次用這台機器自己的本地時間當「現在」：對 auto-detect
-    /// （依來源 IP 定位，通常就是這台機器所在地）會很準，對用 `location add`
+    /// （依來源 IP 定位，通常就是這台機器所在地）會很準，對用 `add`
     /// 手動加的其他城市則只是近似值（可能跟當地實際時間差到時差那麼多）。
     fn now_minutes() -> Option<u32> {
         let output = Command::new("date").arg("+%H%M").output().ok()?;
@@ -463,19 +444,24 @@ impl WeatherPlugin {
 
 impl Plugin for WeatherPlugin {
     fn commands(&self) -> &'static [&'static str] {
-        &["show", "location add <city>", "location remove <city>"]
+        &["show", "add <city>", "remove <city>"]
     }
 
     fn dispatch(&mut self, cmd: &str, args: &[String], out: &OutputBuffer) -> Result<()> {
         match cmd {
             "show" => self.show(out),
-            "location" => self.location(args, out),
+            "add" => self.add(args, out),
+            "remove" => self.remove(args, out),
             other => bail!("weather 不認得指令: {other}"),
         }
     }
 
     fn panel_text(&self) -> Option<String> {
         Some(self.text())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {

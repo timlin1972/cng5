@@ -26,6 +26,27 @@ const TAILSCALE_TTL: Duration = Duration::from_secs(10);
 /// 「多久算離線」需要跟這個回報間隔保持倍數關係，避免各自寫死不同步。
 pub(crate) const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
+/// `manual` 指令的說明。
+const MANUAL_TEXT: &str = "\
+system：這台機器自己的資訊（ip/tailscale/開機時間/版本），以及 standalone/
+client/server 三種模式怎麼串起多台機器互相回報狀態（device plugin 顯示的清單）。
+
+範例：
+  status                查這台機器目前的 id/ip/tailscale/mode/server/uptime
+  version               編譯時間版本號
+  mode standalone       只回報自己（寫進本機的 device registry），不推播、
+                        不拉別人的清單
+  mode server           開放讓 client 推播進來，device list 看得到所有推播過
+                        的機器
+  mode client           定期把自己的資訊推播給 server（用 server <ip> 設定的
+                        目標），同時拉一份完整清單回來合併
+  server <ip>           設定 client 模式要推播/拉清單的目標；不管目前是哪個
+                        mode 都可以先設好，等切成 client 才會真的用到
+
+不管哪個 mode，這台機器自己的資訊都會固定每 5 秒（REPORT_INTERVAL）寫進本機的
+device registry，所以 standalone 模式下 device list 也看得到自己這一列。
+";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SystemMode {
     Standalone,
@@ -324,6 +345,10 @@ impl Plugin for SystemPlugin {
             sysinfo::format_uptime(sysinfo::app_uptime_secs()),
             env!("CNG5_BUILD_TIMESTAMP")
         ))
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
