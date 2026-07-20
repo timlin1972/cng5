@@ -121,3 +121,34 @@ pub fn fetch_tailscale_ip() -> Option<String> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
+
+/// 目前系統 ARP 快取裡看得到的 mac 位址（小寫、`:` 分隔），拿來判斷「最近有
+/// 沒有在這個網段活動過」（見 `plugins::wol::WolPlugin::status`）。只讀本地
+/// 核心/系統既有的 ARP 表，不會主動送任何封包，所以查不到不代表真的沒開機，
+/// 只是最近沒跟這台機器通訊過、ARP 項目過期了。
+#[cfg(not(windows))]
+pub fn arp_table() -> Vec<String> {
+    std::fs::read_to_string("/proc/net/arp")
+        .unwrap_or_default()
+        .lines()
+        .skip(1) // 第一行是欄位標題（IP address / HW type / Flags / HW address / ...）。
+        .filter_map(|line| line.split_whitespace().nth(3))
+        .filter(|mac| *mac != "00:00:00:00:00:00")
+        .map(str::to_lowercase)
+        .collect()
+}
+
+#[cfg(windows)]
+pub fn arp_table() -> Vec<String> {
+    let Ok(output) = Command::new("arp").arg("-a").output() else { return Vec::new() };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            // Windows 的 `arp -a` 輸出裡 mac 位址用 `-` 分隔（例如
+            // `aa-bb-cc-dd-ee-ff`），找這一行裡符合這個外形的欄位。
+            line.split_whitespace()
+                .find(|token| token.len() == 17 && token.matches('-').count() == 5)
+        })
+        .map(|mac| mac.replace('-', ":").to_lowercase())
+        .collect()
+}
