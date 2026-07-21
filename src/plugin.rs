@@ -39,6 +39,29 @@ pub struct DeviceEntry {
     pub last_seen: Instant,
 }
 
+/// `global` plugin registry 裡的一筆，多了 `domain`——同一個 `bridge-id` 底下
+/// 可能有好幾個 domain，各自的 server 都在回報，`id` 只在同一個 domain 內保證
+/// 不重複（不同 domain 剛好取到同名 hostname 也不奇怪），所以 key 要是
+/// `"<domain>/<id>"` 而不能只用 `id`，見 `global_registry_key`。
+pub struct GlobalRegistryEntry {
+    pub domain: String,
+    pub report: DeviceReport,
+    pub last_seen: Instant,
+}
+
+/// `GET /api/global/list` 的一筆回應（可序列化版本），client 端的 `global`
+/// plugin 拉回去合併用，跟 `DeviceListItem`/`system::pull_peers` 是同一個套路。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct GlobalListItem {
+    pub domain: String,
+    pub report: DeviceReport,
+    pub age_secs: f64,
+}
+
+pub fn global_registry_key(domain: &str, id: &str) -> String {
+    format!("{domain}/{id}")
+}
+
 /// 各 plugin 之後要共用的資源放這裡。
 #[derive(Default)]
 pub struct ContextInner {
@@ -50,6 +73,49 @@ pub struct ContextInner {
     /// 的 web UI 網址」QR code，兩個 plugin 都要碰得到，符合 `ContextInner`
     /// 本來就是「各 plugin 共用資源」的定位。
     pub server_addr: Option<String>,
+    /// 這台機器目前是不是 `system` plugin 的 server mode（`SystemPlugin::set_mode`
+    /// 寫入）。`global` plugin 用這個決定要不要真的連 MQTT——`domain`/`bridge`
+    /// 設定只有 server 才有意義，client 角色改成跟自己的 server 要現成的
+    /// `/api/global/list`（見 `merged_global_view`）。
+    pub is_server: bool,
+    /// `global` plugin 的 `domain <name>` 設定。放在這裡（而不是 `GlobalPlugin`
+    /// 私有欄位）是因為 `web::global_list` 組回應時也需要知道「這台 server 自己
+    /// 的 domain 叫什麼」，才能把 `devices` 標成正確的 domain 一併回傳。
+    pub domain_name: Option<String>,
+    /// 透過 MQTT 從其他 domain 收到的裝置資料（server 角色才會真的收到），
+    /// key 用 `global_registry_key`。client 角色則是從自己的 server 拉
+    /// `/api/global/list` 填進來，跟 server 角色收到 MQTT 訊息填進來的邏輯
+    /// 分開但存進同一個地方，`global` plugin 顯示時不用區分來源。
+    pub global: HashMap<String, GlobalRegistryEntry>,
+}
+
+/// `global` plugin 的 panel/`list` 指令跟 `web::global_list` 共用的內容：本機
+/// 自己這個 domain 的裝置（來自 `devices`，標上 `domain_name`）+ 透過 MQTT/HTTP
+/// 收到的其他 domain 的裝置（`global`）。本機這個 domain 的部分故意不從
+/// `global`（它也收得到自己發布出去、又訂閱回來的 echo）取用，而是直接讀
+/// `devices` 現算——這樣不用等一輪 MQTT 往返、也不會因為連線暫時斷線就顯示
+/// 過期資料，所以顯示/回應時要排除 `global` 裡 domain 等於自己的部分，避免同一台
+/// 機器出現兩筆（一筆現算的、一筆較舊的 echo）。`domain_name` 沒設定（例如
+/// client 角色，或 server 還沒下 `domain` 指令）就不會有本機這一段。
+pub fn merged_global_view(inner: &ContextInner) -> Vec<GlobalListItem> {
+    let mut items: Vec<GlobalListItem> = inner
+        .global
+        .values()
+        .filter(|entry| Some(&entry.domain) != inner.domain_name.as_ref())
+        .map(|entry| GlobalListItem {
+            domain: entry.domain.clone(),
+            report: entry.report.clone(),
+            age_secs: entry.last_seen.elapsed().as_secs_f64(),
+        })
+        .collect();
+    if let Some(domain) = &inner.domain_name {
+        items.extend(inner.devices.values().map(|entry| GlobalListItem {
+            domain: domain.clone(),
+            report: entry.report.clone(),
+            age_secs: entry.last_seen.elapsed().as_secs_f64(),
+        }));
+    }
+    items
 }
 
 pub type SharedContext = Arc<Mutex<ContextInner>>;

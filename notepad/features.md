@@ -1,1 +1,0 @@
-- Git 倉庫狀態監控:掃你常用的幾個 repo,顯示 uncommitted changes / ahead-behind origin,適合開發機器上用,面板打開就能一眼看到「這台機器有哪些倉庫還沒 commit/push」。

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
-use crate::plugin::{DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
+use crate::plugin::{merged_global_view, DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
 use crate::plugins::{DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
 use crate::shell::{default_shell_program, lock_shell, Shell};
 
@@ -83,6 +83,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/notepad/content", web::post().to(notepad_save_content))
             .route("/api/device/register", web::post().to(device_register))
             .route("/api/device/list", web::get().to(device_list))
+            .route("/api/global/list", web::get().to(global_list))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -109,6 +110,16 @@ async fn device_list(ctx: web::Data<SharedContext>) -> impl Responder {
         .values()
         .map(|entry| DeviceListItem { report: entry.report.clone(), age_secs: entry.last_seen.elapsed().as_secs_f64() })
         .collect();
+    HttpResponse::Ok().json(items)
+}
+
+/// `GET /api/global/list`：client 端的 `global` plugin 定期打這個，跟自己的
+/// server 要一份「目前看得到的所有 domain 裝置清單」（本機這個 domain 的 +
+/// MQTT 收到的其他 domain 的，見 `merged_global_view`）拉回去合併進自己的
+/// registry，不需要 client 自己連 MQTT——只有 server 才會真的連上
+/// `broker.emqx.io`。
+async fn global_list(ctx: web::Data<SharedContext>) -> impl Responder {
+    let items = merged_global_view(&ctx.lock().unwrap());
     HttpResponse::Ok().json(items)
 }
 

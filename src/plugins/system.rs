@@ -276,6 +276,9 @@ impl SystemPlugin {
         let target = args.first().context("mode 需要接 server/client/standalone")?;
         let resolved = Self::resolve_mode(target)?;
         *self.mode.lock().unwrap() = resolved;
+        // `global` plugin 讀這個決定要不要連 MQTT（見 `ContextInner::is_server`
+        // 的說明），跟 `mode` 指令同步寫，不需要另外輪詢。
+        self.ctx.lock().unwrap().is_server = resolved == SystemMode::Server;
         out.push(&format!("system mode 設定為 {}\n", resolved.as_str()));
         Ok(())
     }

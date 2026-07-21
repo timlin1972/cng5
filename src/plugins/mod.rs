@@ -1,5 +1,6 @@
 mod device;
 mod gitrepo;
+mod global;
 mod music;
 mod notepad;
 mod output;
@@ -10,6 +11,7 @@ mod wol;
 
 pub use device::DevicePlugin;
 pub use gitrepo::GitRepoPlugin;
+pub use global::GlobalPlugin;
 pub(crate) use music::{MUSIC_DIR, SUBTITLE_LANG_PRIORITY};
 pub use music::MusicPlugin;
 pub(crate) use notepad::{DEFAULT_NOTEPAD_FILE, NOTEPAD_DIR};
