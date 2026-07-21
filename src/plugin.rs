@@ -87,6 +87,10 @@ pub struct ContextInner {
     /// `/api/global/list` 填進來，跟 server 角色收到 MQTT 訊息填進來的邏輯
     /// 分開但存進同一個地方，`global` plugin 顯示時不用區分來源。
     pub global: HashMap<String, GlobalRegistryEntry>,
+    /// `remote` plugin 的 `connect <id>` 設定的目前連線目標 `(id, ip)`。放在這裡
+    /// （而不是 `RemotePlugin` 私有欄位）是因為 `RemoteOutputPlugin` 的背景執行緒
+    /// 也需要知道「現在該對誰開 SSE 串流」，兩個 plugin 都要碰得到。
+    pub remote_target: Option<(String, String)>,
 }
 
 /// `global` plugin 的 panel/`list` 指令跟 `web::global_list` 共用的內容：本機

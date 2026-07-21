@@ -1100,7 +1100,16 @@ fn run_loop(
                         let body_height = inner.height.saturating_sub(1);
                         let hint_area = Rect { x: inner.x, y: inner.y + body_height, width: inner.width, height: 1 };
                         let body_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: body_height };
-                        frame.render_widget(Paragraph::new(text), body_area);
+                        // `Paragraph`沒有 `.scroll()` 的話一律從第一行開始畫，超過
+                        // `body_area` 高度的部分不會自動捲到最後幾行——跟 `output`
+                        // panel 那個分支一樣，只取「最後塞得進去的那幾行」畫，不然
+                        // 內容一多（例如 remote-output 鏡射的是別台機器整段
+                        // scrollback），新內容一直被卡在畫面看不到的下面，
+                        // 畫面看起來像是「沒有更新」。
+                        let lines: Vec<&str> = text.lines().collect();
+                        let start = lines.len().saturating_sub(body_area.height as usize);
+                        let visible: Vec<Line> = lines[start..].iter().map(|l| Line::raw(*l)).collect();
+                        frame.render_widget(Paragraph::new(visible), body_area);
                         let hint_style = Style::default().fg(Color::DarkGray);
                         frame.render_widget(Paragraph::new(PANEL_HINT).style(hint_style), hint_area);
                     }

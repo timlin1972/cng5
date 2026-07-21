@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::process::Command;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 
 use anyhow::{bail, Context, Result};
 
@@ -62,6 +65,127 @@ pub enum Mode {
     Root,
     InPlugin(String),
     InPanel(String),
+    Remote(RemoteSession),
+}
+
+/// `Mode::Remote` 底下的連線狀態。`remote_prompt` 是目前已知的遠端 prompt 字串
+/// （例如 `"cng5> "`、`"cng5(wol)> "`），每次轉發一行、拿到遠端回應後更新，本機
+/// 的 `Shell::prompt` 拿它組成 `"<id>::<remote_prompt>"`，感覺像真的在遠端那台
+/// 機器前面打字。用 `Arc<Mutex<_>>` 而不是普通欄位，是因為實際轉發（`remote_exec`）
+/// 透過 `curl` 打 HTTP、最壞情況要等到 `--max-time` 的上限，不能卡在
+/// `execute_line` 裡——那是在持有共用的 `Shell` 鎖的情況下呼叫的，卡住的話 GUI
+/// 重繪、web 的其他請求全部都會跟著卡住等鎖。轉發改成丟進 `sender` 這個佇列，
+/// 背景的 `spawn_remote_worker` 執行緒依序（一次一個，不會並行送出多個請求打亂
+/// 順序）真正呼叫 `remote_exec`，完成後直接更新這個 `Arc`，不需要重新拿
+/// `Shell` 自己的鎖。
+pub struct RemoteSession {
+    pub id: String,
+    pub ip: String,
+    remote_prompt: Arc<Mutex<String>>,
+    sender: mpsc::Sender<String>,
+}
+
+impl RemoteSession {
+    /// 遠端目前是不是在它自己的 root——本機打 `exit`/`quit` 要不要被攔截當成
+    /// 「斷線回本機」就是靠這個判斷（見 `Shell::execute_remote_line`）：現有
+    /// `execute_line` 對 `(Mode::Root, "exit"|"quit")` 是真的把那個行程關掉，
+    /// 如果不攔截、原封不動轉發，會在遠端不是自己想斷線的情況下把對方那台機器
+    /// 的 cng5 關掉。
+    fn at_root(&self) -> bool {
+        *self.remote_prompt.lock().unwrap() == "cng5> "
+    }
+}
+
+/// `connect` 呼叫這個開一個背景執行緒，專門負責這個連線的所有網路呼叫：
+/// 1. 一開始先查一次遠端目前的 prompt（可能不是 root，例如上次連線沒有乾淨地
+///    離開），更新 `remote_prompt`——這一步以前是在 `connect` 當下同步做的，
+///    會卡住 `Shell` 的鎖，現在搬進背景執行緒，`connect` 本身立刻回傳。
+/// 2. 依序處理 `receiver` 收到的每一行（`execute_remote_line` 只是 `send`
+///    進來，不等結果），呼叫 `remote_exec` 轉發、更新 `remote_prompt`／把
+///    錯誤訊息 push 進 `output`。
+/// 3. `sender`（`RemoteSession` 那一份）被丟掉（斷線、`Mode` 換掉）時，
+///    `receiver` 的疊代會自然結束，這個執行緒跟著結束，不需要額外的收尾訊號。
+fn spawn_remote_worker(
+    ip: String,
+    receiver: mpsc::Receiver<String>,
+    remote_prompt: Arc<Mutex<String>>,
+    output: Arc<OutputBuffer>,
+) {
+    thread::spawn(move || {
+        if let Some(prompt) = fetch_remote_prompt(&ip) {
+            *remote_prompt.lock().unwrap() = prompt;
+        }
+        for line in receiver {
+            match remote_exec(&ip, &line) {
+                Ok((prompt, error)) => {
+                    *remote_prompt.lock().unwrap() = prompt;
+                    if let Some(msg) = error {
+                        output.push(&format!("錯誤: {msg}\n"));
+                    }
+                }
+                Err(err) => {
+                    output.push(&format!("連線失敗: {err:#}\n"));
+                }
+            }
+        }
+    });
+}
+
+/// `connect`/每一行轉發呼叫的既有端點（`web.rs` 的 `/api/prompt`/`/api/exec`，
+/// 本來是給 web 前端用的），解析出來的回應形狀。
+#[derive(serde::Deserialize)]
+struct RemotePromptResponse {
+    prompt: String,
+}
+
+#[derive(serde::Deserialize)]
+struct RemoteExecResponse {
+    prompt: String,
+    error: Option<String>,
+}
+
+/// `connect` 剛連上時查一次遠端目前的 prompt，這樣本機的顯示（`Shell::prompt`）
+/// 才能從一開始就正確反映遠端當下的狀態（可能不是 root，例如上次連線沒有乾淨地
+/// 離開）。查不到（連不上）就回傳 `None`，呼叫端會先假設在 root，之後每次轉發
+/// 指令都會再更新。
+fn fetch_remote_prompt(ip: &str) -> Option<String> {
+    let url = format!("http://{ip}:9759/api/prompt");
+    let output = Command::new("curl").args(["--silent", "--max-time", "5", &url]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let body = String::from_utf8(output.stdout).ok()?;
+    serde_json::from_str::<RemotePromptResponse>(&body).ok().map(|r| r.prompt)
+}
+
+/// 把 `line` POST 給 `ip` 這台機器既有的 `/api/exec`（web UI 輸入框用的那個
+/// 端點），回傳 `(遠端執行完的新 prompt, 錯誤訊息)`。跟 `global.rs` 的
+/// `pull_global_from_server` 一樣透過 `curl` 子行程打 HTTP，不額外引入 HTTP
+/// client crate。
+fn remote_exec(ip: &str, line: &str) -> Result<(String, Option<String>)> {
+    let body = serde_json::json!({ "line": line }).to_string();
+    let url = format!("http://{ip}:9759/api/exec");
+    let output = Command::new("curl")
+        .args([
+            "--silent",
+            "--max-time",
+            "5",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            &url,
+        ])
+        .output()
+        .context("執行 curl 失敗")?;
+    if !output.status.success() {
+        bail!("連不上 {ip}:9759");
+    }
+    let body = String::from_utf8(output.stdout).context("回應不是合法的 UTF-8")?;
+    let resp: RemoteExecResponse = serde_json::from_str(&body).context("回應格式不對")?;
+    Ok((resp.prompt, resp.error))
 }
 
 /// 每個 plugin 的 panel 位置/大小（`rect` 設定，單位是佔整個畫面的百分比 0-100）
@@ -150,6 +274,11 @@ pub struct Shell {
     maximized: HashMap<String, PanelState>,
     output: Arc<OutputBuffer>,
     history: Vec<String>,
+    /// `remote` plugin 的 `connect <id>` 要查 `ctx.devices` 找目標的 ip，
+    /// `Mode::Remote` 斷線時要清掉 `ctx.remote_target`——這是目前唯一需要
+    /// `Shell` 自己持有 `ctx` 的地方，其餘 plugin 邏輯都是透過各自建構時拿到的
+    /// 那一份存取，不需要 `Shell` 插手。
+    ctx: SharedContext,
 }
 
 impl Shell {
@@ -175,6 +304,7 @@ impl Shell {
             maximized: HashMap::new(),
             output,
             history: Vec::new(),
+            ctx,
         }
     }
 
@@ -263,6 +393,7 @@ impl Shell {
             Mode::Root => "cng5> ".to_string(),
             Mode::InPlugin(name) => format!("cng5({name})> "),
             Mode::InPanel(name) => format!("cng5({name}/panel)> "),
+            Mode::Remote(session) => format!("{}::{}", session.id, session.remote_prompt.lock().unwrap()),
         }
     }
 
@@ -279,6 +410,12 @@ impl Shell {
             };
         }
         self.history.push(line.to_string());
+        // `Mode::Remote` 不走底下這一套本地縮寫比對——遠端的指令集本機不知道，
+        // 沒有候選清單可以比對，而且要轉發的是使用者輸入的原始文字，不能被
+        // `shell_words::split` 重新斷詞/跳脫。
+        if matches!(self.mode, Mode::Remote(_)) {
+            return self.execute_remote_line(line);
+        }
         let tokens = shell_words::split(line).context("指令解析失敗")?;
         let (cmd, args) = tokens.split_first().expect("已檢查過非空行");
 
@@ -339,6 +476,30 @@ impl Shell {
             // 當 current_ui 是 Gui 的時候，見 usage_lines；CLI 模式下打這個字
             // 在 resolve 那一步就已經被當成不認得的指令擋掉了，不會走到這裡。
             (Mode::InPlugin(name), "panel") => self.mode = Mode::InPanel(name.clone()),
+            // `connect <id>` 只有在 `remote` plugin 裡才有意義：跟 `panel` 一樣是
+            // `Shell` 自己攔截處理、不透過 `dispatch()`——因為這個指令需要「切換
+            // mode」，`Plugin::dispatch` 的簽名做不到這件事（只能回傳
+            // `Result<()>`），所以不能讓 `remote` plugin 自己處理 `connect`。
+            (Mode::InPlugin(name), "connect") if name == "remote" => {
+                let target = args.first().context("connect 需要接目標機器的 id")?;
+                let ip = self
+                    .ctx
+                    .lock()
+                    .unwrap()
+                    .devices
+                    .get(target)
+                    .map(|entry| entry.report.ip.clone())
+                    .with_context(|| format!("沒有這個裝置: {target}（用 device list 查詢目前看得到的機器）"))?;
+                // 先假設遠端在 root，真正的初始 prompt 由 `spawn_remote_worker`
+                // 背景查詢、查到後更新——不在這裡同步等待（見 `RemoteSession`
+                // 的說明），`connect` 才能立刻回傳、不卡住共用的 `Shell` 鎖。
+                let remote_prompt = Arc::new(Mutex::new("cng5> ".to_string()));
+                let (sender, receiver) = mpsc::channel();
+                spawn_remote_worker(ip.clone(), receiver, remote_prompt.clone(), self.output.clone());
+                self.ctx.lock().unwrap().remote_target = Some((target.clone(), ip.clone()));
+                self.output.push(&format!("已連線到 {target} ({ip})\n"));
+                self.mode = Mode::Remote(RemoteSession { id: target.clone(), ip, remote_prompt, sender });
+            }
             // `..`：往上一層，這一層底下只有 root，跟 `exit`/`quit` 是同一件事。
             (Mode::InPlugin(_), "exit" | "quit" | "..") => self.mode = Mode::Root,
             // `~`/`...`：不管巢狀多深都直接跳回 root，跟逐層 `exit`/`..` 不同——
@@ -373,6 +534,34 @@ impl Shell {
             // 這一層，兩者才會不一樣。
             (Mode::InPanel(_), "~" | "...") => self.mode = Mode::Root,
             (Mode::InPanel(_), _) => unreachable!("resolve 只會回傳 usage_lines 裡的字"),
+            // `Mode::Remote` 在到達這裡之前，`execute_line` 開頭就已經提早攔截
+            // 轉去 `execute_remote_line` 處理了（見上面那段 `matches!` 判斷），
+            // 這個分支只是為了讓 `match` 窮舉 `Mode` 的所有變體，實際不會被執行到。
+            (Mode::Remote(_), _) => unreachable!("Mode::Remote 應該已經在 execute_line 開頭被攔截"),
+        }
+        Ok(())
+    }
+
+    /// `Mode::Remote` 底下每一行的處理：攔截在本機處理，或整行原封不動丟進轉發
+    /// 佇列（見 `spawn_remote_worker`）。`line` 已經是 `execute_line` 開頭
+    /// `strip_comment`/`trim` 過的。這裡不會等轉發真的執行完才回傳——真正的
+    /// `remote_exec` HTTP 呼叫在背景執行緒做，`execute_line` 呼叫這裡的時候
+    /// 持有共用的 `Shell` 鎖，等網路回應會卡住 GUI 重繪跟 web 的其他請求。
+    fn execute_remote_line(&mut self, line: &str) -> Result<()> {
+        let Mode::Remote(session) = &self.mode else {
+            unreachable!("呼叫端（execute_line）已經確認 self.mode 是 Remote");
+        };
+        let first_word = line.split_whitespace().next().unwrap_or("");
+        if (first_word == "exit" || first_word == "quit") && session.at_root() {
+            self.ctx.lock().unwrap().remote_target = None;
+            self.mode = Mode::InPlugin("remote".to_string());
+            self.output.push("已離線，回到 remote plugin\n");
+            return Ok(());
+        }
+        // 送不出去（worker 執行緒已經結束，理論上不會發生，`sender`/`receiver`
+        // 是這個 session 一起建立、一起結束的）就當作連線失敗處理。
+        if session.sender.send(line.to_string()).is_err() {
+            self.output.push("連線失敗: 背景轉發執行緒已經結束\n");
         }
         Ok(())
     }
@@ -435,7 +624,19 @@ impl Shell {
             Mode::Root => self.root_help_text(),
             Mode::InPlugin(name) => self.plugin_help_text(name),
             Mode::InPanel(name) => self.panel_help_text(name),
+            Mode::Remote(session) => Self::remote_help_text(session),
         }
+    }
+
+    fn remote_help_text(session: &RemoteSession) -> String {
+        format!(
+            "目前連線到 {}（{}）：打的每一行都會原封不動轉發過去執行，不是本機的\n\
+             指令，本機也不知道遠端有哪些指令可以打。\n\
+             在遠端的 root 下 exit/quit 會離開這個連線、回到本機的 remote plugin；\n\
+             其餘情況下 exit/quit/~/../... 都是在遠端那邊生效（跳回遠端自己的上一層），\n\
+             不會離開這個連線。\n",
+            session.id, session.ip
+        )
     }
 
     /// 目前 mode 底下所有指令的用法字串（第一個字是指令名稱）。
@@ -486,6 +687,11 @@ impl Shell {
                 "..",
                 "...",
             ],
+            // `Mode::Remote` 底下實際打的每一行都轉發給遠端（見
+            // `execute_remote_line`），遠端有哪些指令本機並不知道、沒辦法窮舉，
+            // 這裡只列出本機真的會攔截處理的保留字，給 `?`/`context_help_text`
+            // 一個提示用，不是完整的候選清單。
+            Mode::Remote(_) => vec!["exit", "quit"],
         }
     }
 
