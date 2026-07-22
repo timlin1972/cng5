@@ -1281,7 +1281,7 @@ fn run_loop(
                     // 做行編輯/echo。
                     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
                     terminal.show_cursor()?;
-                    run_remote_shell(&ip, &output);
+                    run_remote_shell(&ip, output);
                     execute!(terminal.backend_mut(), EnterAlternateScreen)?;
                     // 見下面 shell_passthrough 分支裡同樣一行的說明。
                     *terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;

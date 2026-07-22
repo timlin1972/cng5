@@ -859,9 +859,6 @@ impl Shell {
             (Mode::Root, "shell") => self.requested_shell_passthrough = true,
             (Mode::Root, "upgrade") => self.requested_upgrade = true,
             (Mode::Root, "exit" | "quit") => self.should_exit = true,
-            // 已經在 root，`~`/`..`/`...` 都沒事做，但仍然是合法指令（跟其他
-            // mode 底下的行為一致，不管在哪一層打都不會被當成「不認得的指令」）。
-            (Mode::Root, "~" | ".." | "...") => {}
             (Mode::Root, _) => unreachable!("resolve 只會回傳 top_level 裡的字"),
             (Mode::InPlugin(_), "help") => self.print_help(),
             (Mode::InPlugin(name), "manual") => {
@@ -1116,9 +1113,6 @@ impl Shell {
                 "upgrade",
                 "exit",
                 "quit",
-                "~",
-                "..",
-                "...",
             ],
             Mode::InPlugin(name) => {
                 let plugin = self
@@ -1222,9 +1216,6 @@ impl Shell {
         s.push_str("  upgrade              git fetch/reset + 重新編譯，成功才重啟（manual 有完整說明）\n");
         s.push_str("  exit                 離開程式\n");
         s.push_str("  quit                 跟 exit 一樣，離開程式\n");
-        s.push_str("  ~                    跳回 root（不管在哪一層都直接回來）\n");
-        s.push_str("  ..                   往上一層（已經在 root，沒事做）\n");
-        s.push_str("  ...                  往上兩層（已經在 root，沒事做）\n");
         s.push_str(&self.plugin_list_text());
         s
     }
