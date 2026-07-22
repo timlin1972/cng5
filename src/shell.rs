@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use tungstenite::{Message, WebSocket};
 
 use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
@@ -188,6 +192,100 @@ fn remote_exec(ip: &str, line: &str) -> Result<(String, Option<String>)> {
     Ok((resp.prompt, resp.error))
 }
 
+/// `remote` 連線裡打 `shell`：不像其他指令轉發成一行文字給遠端執行，而是直接借用
+/// 遠端既有的 `/api/shell/ws`（web 前端 xterm.js 面板用的同一個端點，見 `web.rs`
+/// 的 `shell_ws`）在遠端開一個真正的 host shell，把目前這個終端機整個接上那個
+/// PTY，效果跟 ssh 過去一樣：本地打的每個位元組原封不動送過去，遠端印出來的每個
+/// 位元組原封不動印在本地——遠端 PTY 自己會處理 echo/行編輯，本地不能重複做，
+/// 也不能用一行一行轉發（vim/top 這類全螢幕程式需要即時的位元組級輸出入）。
+/// 呼叫端（CLI/GUI）要先自己把終端機切到 raw mode 才呼叫這個，結束後恢復；GUI
+/// 另外要離開 alternate screen（讓遠端的畫面用一般的、可以捲動回看的螢幕，跟
+/// 本地 `shell` passthrough 一樣），這兩件事都跟終端機物件（`Terminal`）綁在一起，
+/// 這裡不知道那個型別，交給呼叫端做。連線失敗（連不上、握手失敗）就把錯誤訊息
+/// push 進 `output`，跟本地 `run_host_shell` 失敗時「當作使用者按一下就離開」
+/// 不同——遠端連線失敗比較可能發生也比較需要讓使用者知道原因。
+pub fn run_remote_shell(ip: &str, output: &OutputBuffer) {
+    if let Err(err) = remote_shell_session(ip) {
+        output.push(&format!("連線失敗: {err:#}\n"));
+    }
+}
+
+/// 把 `resize` 訊息編碼成 `web.rs` `shell_ws` 認得的格式（跟 `frontend.html` 那個
+/// xterm.js 面板送出去的一樣），送不出去（例如連線已經斷了）就放棄，下一輪迴圈
+/// 自然會因為讀取失敗結束整個 session，不需要在這裡額外處理。
+fn send_resize(socket: &mut WebSocket<TcpStream>, cols: u16, rows: u16) {
+    let msg = serde_json::json!({ "resize": { "cols": cols, "rows": rows } }).to_string();
+    let _ = socket.send(Message::from(msg));
+}
+
+/// `run_remote_shell` 實際做事的地方，拆出來單純是為了能用 `?` 提早回傳。
+fn remote_shell_session(ip: &str) -> Result<()> {
+    let stream = TcpStream::connect((ip, 9759)).with_context(|| format!("連不上 {ip}:9759"))?;
+    let _ = stream.set_nodelay(true);
+    // 握手（讀 HTTP 回應）要能一次讀到完整回應，不能在這裡就設定短逾時——
+    // `tungstenite::client` 不會自己重試被逾時中斷的讀取。逾時留到握手成功、
+    // 進入下面互動迴圈才設定（見下方 `set_read_timeout`）。
+    let url = format!("ws://{ip}:9759/api/shell/ws");
+    let (mut socket, _response) =
+        tungstenite::client(url, stream).map_err(|err| anyhow::anyhow!("WebSocket 握手失敗: {err}"))?;
+    // 進入互動迴圈之後，同一個執行緒要輪流檢查「遠端有沒有新輸出」跟「本地鍵盤
+    // 有沒有新輸入」，讀取不能一直卡住，所以設一個短逾時；逾時傳回的
+    // `ErrorKind` 依平台不同（Unix 是 `WouldBlock`，Windows 是 `TimedOut`），
+    // 下面兩種都當作「這次沒有新資料」處理。
+    socket.get_ref().set_read_timeout(Some(Duration::from_millis(20)))?;
+
+    // 鍵盤輸入沒辦法非阻塞地讀，改用獨立執行緒阻塞讀 stdin，讀到的位元組透過
+    // channel 轉給下面的主迴圈。這個執行緒在使用者離開遠端 shell 之後可能還卡在
+    // 讀 stdin 上，理論上要下一次按鍵、送進已經沒人收的 channel 失敗了才會結束
+    // ——如果使用者在那之前又立刻進了另一個 remote shell，這個還沒死透的舊執行緒
+    // 有機會搶走第一個按鍵。這是刻意接受的邊角案例，不為了它另外實作可以中斷的
+    // stdin 讀取。
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) if tx.send(buf[..n].to_vec()).is_err() => break,
+                Ok(_) => {}
+            }
+        }
+    });
+
+    let mut stdout = std::io::stdout();
+    let mut last_size = crossterm::terminal::size().ok();
+    if let Some((cols, rows)) = last_size {
+        send_resize(&mut socket, cols, rows);
+    }
+    loop {
+        for bytes in rx.try_iter() {
+            socket.send(Message::from(bytes)).context("送出鍵盤輸入失敗")?;
+        }
+        // 順便看一下終端機大小有沒有變，變了就通知遠端調整 PTY 大小，不然遠端
+        // 那邊全螢幕的程式（例如 vim/top）畫面會跟本地視窗大小對不起來。
+        if let Ok(size) = crossterm::terminal::size()
+            && Some(size) != last_size
+        {
+            last_size = Some(size);
+            send_resize(&mut socket, size.0, size.1);
+        }
+        match socket.read() {
+            Ok(Message::Binary(data)) => {
+                stdout.write_all(&data)?;
+                stdout.flush()?;
+            }
+            Ok(Message::Close(_)) => break,
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(err))
+                if err.kind() == std::io::ErrorKind::WouldBlock || err.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => break,
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
+}
+
 /// 每個 plugin 的 panel 位置/大小（`rect` 設定，單位是佔整個畫面的百分比 0-100）
 /// 跟顯示與否（`show`/`hidden`），GUI 畫面依這個狀態把 panel 畫出來。
 #[derive(Clone, Copy)]
@@ -258,6 +356,13 @@ pub struct Shell {
     /// `requested_ui` 一樣不能直接在這裡跑（`execute_line` 呼叫時鎖還握著，
     /// 互動 shell 可能跑很久，會卡住其他共用同一個 `Shell` 的執行緒，例如 web）。
     requested_shell_passthrough: bool,
+    /// `Mode::Remote` 底下執行過 `shell` 之後設成連線目標的 ip，呼叫端（CLI/GUI
+    /// 迴圈）應該在放開 `Shell` 的鎖、把終端機切到 raw mode 之後呼叫
+    /// `run_remote_shell` 把終端機接上遠端的 host shell（見
+    /// `take_pending_remote_shell`）。跟 `requested_shell_passthrough` 是分開的
+    /// 兩個旗標，因為兩者呼叫端要做的收尾動作不一樣（這個不能整個切回 cooked
+    /// mode——需要維持 raw mode 才能逐位元組轉送）。
+    requested_remote_shell: Option<String>,
     /// 目前實際顯示中的 UI（跟 `requested_ui` 不同：那個是「待切換」，這個是
     /// 「現在畫面就是這個」），`panel` 指令要不要出現在候選清單裡靠這個判斷。
     current_ui: UiMode,
@@ -298,6 +403,7 @@ impl Shell {
             should_exit: false,
             requested_ui: None,
             requested_shell_passthrough: false,
+            requested_remote_shell: None,
             current_ui: UiMode::Cli,
             panels: HashMap::new(),
             panel_order: Vec::new(),
@@ -386,6 +492,12 @@ impl Shell {
     /// 這裡回傳 true，呼叫端應該在放開鎖之後把終端機借給一個真正的 host shell 用。
     pub fn take_pending_shell_passthrough(&mut self) -> bool {
         std::mem::take(&mut self.requested_shell_passthrough)
+    }
+
+    /// 取出並清除待執行的 remote shell 旗標：`Mode::Remote` 底下執行過 `shell`
+    /// 之後這裡回傳連線目標的 ip，呼叫端應該在放開鎖之後呼叫 `run_remote_shell`。
+    pub fn take_pending_remote_shell(&mut self) -> Option<String> {
+        self.requested_remote_shell.take()
     }
 
     pub fn prompt(&self) -> String {
@@ -556,6 +668,14 @@ impl Shell {
             self.ctx.lock().unwrap().remote_target = None;
             self.mode = Mode::InPlugin("remote".to_string());
             self.output.push("已離線，回到 remote plugin\n");
+            return Ok(());
+        }
+        // `shell`：本機攔截處理，不透過 `sender`/`remote_exec` 轉發成一行文字
+        // 指令——那個管道對應的是遠端「自己的 Shell/Mode」，跟 `shell` 真正要做的
+        // 事（借一整個終端機給遠端的 host shell 用）是兩回事，見
+        // `run_remote_shell` 的說明。
+        if first_word == "shell" {
+            self.requested_remote_shell = Some(session.ip.clone());
             return Ok(());
         }
         // 送不出去（worker 執行緒已經結束，理論上不會發生，`sender`/`receiver`

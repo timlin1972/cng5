@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
 use crate::plugins::{NotepadPlugin, QrPlugin};
-use crate::shell::{lock_shell, run_host_shell, PanelState, Shell};
+use crate::shell::{lock_shell, run_host_shell, run_remote_shell, PanelState, Shell};
 
 /// 借出 `notepad` plugin 的具體型別可變參考執行 `f`：`Shell::plugin_mut` 只給
 /// `&mut Box<dyn Plugin>`，這裡用 `Plugin::as_any_mut` 向下轉型成
@@ -1267,7 +1267,21 @@ fn run_loop(
                 output.push(&format!("{}\n", sh.prompt()));
                 let done = sh.should_exit() || sh.has_pending_mode_switch();
                 let shell_passthrough = sh.take_pending_shell_passthrough();
+                let remote_shell_ip = sh.take_pending_remote_shell();
                 drop(sh);
+                if let Some(ip) = remote_shell_ip {
+                    // 跟本地 `shell` passthrough 一樣先離開 alternate screen，讓
+                    // 遠端的畫面用一般的、可以捲動回看的螢幕；但不能跟本地那邊
+                    // 一樣 disable_raw_mode——`run_remote_shell` 要靠 raw mode
+                    // 才能逐位元組把鍵盤輸入轉送給遠端，不能讓本地終端機自己先
+                    // 做行編輯/echo。
+                    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+                    terminal.show_cursor()?;
+                    run_remote_shell(&ip, &output);
+                    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+                    // 見下面 shell_passthrough 分支裡同樣一行的說明。
+                    *terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
+                }
                 if shell_passthrough {
                     // 把終端機借給真正的 host shell 用之前，先跟 `run()` 結尾的
                     // 收尾動作一樣把畫面還原成一般終端機模式，不然子行程會直接

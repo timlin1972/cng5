@@ -13,6 +13,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::Result;
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use rustyline::error::ReadlineError;
 use rustyline::{
     Cmd, ConditionalEventHandler, DefaultEditor, Event, EventContext, EventHandler,
@@ -25,7 +26,7 @@ use plugins::{
     DevicePlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin,
     RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
 };
-use shell::{lock_shell, run_host_shell, PluginFactory, Shell, UiMode};
+use shell::{lock_shell, run_host_shell, run_remote_shell, PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
     let ctx = Arc::new(Mutex::new(ContextInner::default()));
@@ -223,10 +224,16 @@ fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &m
                 }
                 let done = sh.should_exit() || sh.has_pending_mode_switch();
                 let shell_passthrough = sh.take_pending_shell_passthrough();
+                let remote_shell_ip = sh.take_pending_remote_shell();
                 drop(sh);
                 flush_new_lines(output, printed);
                 if shell_passthrough {
                     run_host_shell();
+                }
+                if let Some(ip) = remote_shell_ip {
+                    enable_raw_mode()?;
+                    run_remote_shell(&ip, output);
+                    disable_raw_mode()?;
                 }
                 if done {
                     break;

@@ -63,7 +63,7 @@ dependencies = [
  "foldhash",
  "futures-core",
  "h2",
- "http",
+ "http 0.2.12",
  "httparse",
  "httpdate",
  "itoa",
@@ -99,7 +99,7 @@ checksum = "14f8c75c51892f18d9c46150c5ac7beb81c95f78c8b83a634d49f4ca32551fe7"
 dependencies = [
  "bytestring",
  "cfg-if",
- "http",
+ "http 0.2.12",
  "regex",
  "regex-lite",
  "serde",
@@ -502,6 +502,7 @@ dependencies = [
  "serde_json",
  "shell-words",
  "tokio",
+ "tungstenite",
  "unicode-width",
 ]
 
@@ -667,6 +668,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "data-encoding"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4ae5f15dda3c708c0ade84bfee31ccab44a3da4f88015ed22f63732abe300c8"
 
 [[package]]
 name = "deltae"
@@ -976,7 +983,7 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
- "http",
+ "http 0.2.12",
  "indexmap",
  "slab",
  "tokio",
@@ -1035,6 +1042,16 @@ checksum = "601cbb57e577e2f5ef5be8e7b83f0f63994f25aa94d673e54a92d5c516d101f1"
 dependencies = [
  "bytes",
  "fnv",
+ "itoa",
+]
+
+[[package]]
+name = "http"
+version = "1.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6970f50e31d6fc17d3fa27329444bfa74e196cf62e95052a3f6fee181dba6425"
+dependencies = [
+ "bytes",
  "itoa",
 ]
 
@@ -2550,6 +2567,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "db97caf9d906fbde555dd62fa95ddba9eecfd14cb388e4f491a66d74cd5fb79a"
 dependencies = [
  "once_cell",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.2",
+ "httparse",
+ "log",
+ "rand 0.10.2",
+ "sha1",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
