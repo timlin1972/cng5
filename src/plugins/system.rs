@@ -28,11 +28,11 @@ pub(crate) const REPORT_INTERVAL: Duration = Duration::from_secs(5);
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
-system：這台機器自己的資訊（ip/tailscale/開機時間/版本），以及 standalone/
+system：這台機器自己的資訊（ip/os/tailscale/開機時間/版本），以及 standalone/
 client/server 三種模式怎麼串起多台機器互相回報狀態（device plugin 顯示的清單）。
 
 範例：
-  status                查這台機器目前的 id/ip/tailscale/mode/server/uptime
+  status                查這台機器目前的 id/ip/os/tailscale/mode/server/uptime
   version               編譯時間版本號
   mode standalone       只回報自己（寫進本機的 device registry），不推播、
                         不拉別人的清單
@@ -172,6 +172,7 @@ impl SystemPlugin {
         DeviceReport {
             id: id.to_string(),
             ip,
+            os: sysinfo::os().to_string(),
             tailscale: tailscale_ip.is_some(),
             mode: mode.as_str().to_string(),
             device_uptime_secs: sysinfo::device_uptime_secs(),
@@ -253,9 +254,10 @@ impl SystemPlugin {
 
     fn status(&mut self, out: &OutputBuffer) -> Result<()> {
         out.push(&format!(
-            "id: {}\nip: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\n",
+            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\n",
             self.id,
             self.ip(),
+            sysinfo::os(),
             self.tailscale_flag(),
             self.mode_str(),
             self.server_text(),
@@ -338,9 +340,10 @@ impl Plugin for SystemPlugin {
 
     fn panel_text(&self) -> Option<String> {
         Some(format!(
-            "id: {}\nip: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\nbuild: {}",
+            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\nbuild: {}",
             self.id,
             self.ip(),
+            sysinfo::os(),
             self.tailscale_flag(),
             self.mode_str(),
             self.server_text(),

@@ -14,10 +14,21 @@ use crate::output::OutputBuffer;
 pub struct DeviceReport {
     pub id: String,
     pub ip: String,
+    /// 舊版（還沒有這個欄位）的機器傳過來的 JSON 不會有 `os` 這個 key，
+    /// `#[serde(default)]` 讓這種情況解析成 `"N/A"` 而不是讓整筆（甚至整份
+    /// 清單，視收到的是 `/api/device/register` 單筆還是 `/api/device/list`/
+    /// `/api/global/list` 陣列而定）因為缺欄位解析失敗被整個丟掉——新增欄位
+    /// 不該讓還沒升級的裝置從清單上消失。
+    #[serde(default = "default_os")]
+    pub os: String,
     pub tailscale: bool,
     pub mode: String,
     pub device_uptime_secs: u64,
     pub app_uptime_secs: u64,
+}
+
+fn default_os() -> String {
+    "N/A".to_string()
 }
 
 /// `GET /api/device/list` 的一筆回應：`age_secs` 是伺服器收到這筆回報後過了

@@ -107,6 +107,13 @@ pub fn hostname() -> String {
     }
 }
 
+/// 這台機器的作業系統（`linux`/`windows`/`macos`...），拿來給 device/global
+/// registry 顯示用。`std::env::consts::OS` 是編譯期常數（編出來給哪個平台跑，
+/// 就是哪個值），不需要另外查系統 API 或開子行程。
+pub fn os() -> &'static str {
+    std::env::consts::OS
+}
+
 /// 執行 `tailscale ip -4` 取得目前的 tailscale IPv4 位址；沒安裝、沒登入或
 /// 沒有位址（指令失敗或沒輸出）都算沒有，回傳 `None`。這是會真的開子行程的
 /// 呼叫，呼叫端（見 `plugins::system::TailscaleCache`）要自己做快取，不要在

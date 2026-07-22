@@ -16,10 +16,10 @@ const ALIVE_TTL: Duration = Duration::from_secs(REPORT_INTERVAL.as_secs() * 3);
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
 device：顯示這台機器跟其他回報過的機器（見 system plugin 的 mode client/server）
-目前的狀態——ip、有沒有 tailscale、mode、開機/程式執行多久、還在不在線上。
+目前的狀態——ip、os、有沒有 tailscale、mode、開機/程式執行多久、還在不在線上。
 
 範例：
-  list                查表格：每台裝置的 id/ip/tailscale/mode/uptime/alive
+  list                查表格：每台裝置的 id/ip/os/tailscale/mode/uptime/alive
   status              簡短摘要：裝置總數、目前上線幾台
 
 alive 是「多久沒回報就視為離線」（回報間隔的 3 倍），不是真的把資料刪掉，離線
@@ -35,7 +35,7 @@ impl DevicePlugin {
         Self { ctx }
     }
 
-    /// 把目前 registry 裡的每一筆組成一個文字表格：id/ip/tailscale/mode/
+    /// 把目前 registry 裡的每一筆組成一個文字表格：id/ip/os/tailscale/mode/
     /// device uptime/app uptime/alive。是不是自己不再獨立成一欄，而是拿這一
     /// 列的 id 跟本機的 `sysinfo::hostname()` 比對，是自己就在 id 前面加上
     /// `* `，不是就補兩個空白，讓每一列的 id 都對齊——不管這筆資料是本機自己寫進 registry
@@ -52,8 +52,8 @@ impl DevicePlugin {
         let mut ids: Vec<&String> = inner.devices.keys().collect();
         ids.sort();
 
-        let headers = ["  id", "ip", "tailscale", "mode", "device uptime", "app uptime", "alive"];
-        let rows: Vec<[String; 7]> = ids
+        let headers = ["  id", "ip", "os", "tailscale", "mode", "device uptime", "app uptime", "alive"];
+        let rows: Vec<[String; 8]> = ids
             .into_iter()
             .map(|id| {
                 let entry = &inner.devices[id];
@@ -66,6 +66,7 @@ impl DevicePlugin {
                 [
                     id_cell,
                     entry.report.ip.clone(),
+                    entry.report.os.clone(),
                     yes_no(entry.report.tailscale),
                     entry.report.mode.clone(),
                     sysinfo::format_uptime(entry.report.device_uptime_secs),
@@ -101,7 +102,7 @@ fn yes_no(b: bool) -> String {
 /// 定，用 `UnicodeWidthStr` 對齊。跟 `WeatherPlugin` 的 `render_table`/`pad`
 /// 是同一個理由，但這裡的每個儲存格都只有單行內容，不需要它處理多行儲存格
 /// 那一層複雜度，所以另外寫一份精簡版而不是共用。
-fn render_table(headers: &[&str], rows: &[[String; 7]]) -> String {
+fn render_table(headers: &[&str], rows: &[[String; 8]]) -> String {
     let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(*h)).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {
