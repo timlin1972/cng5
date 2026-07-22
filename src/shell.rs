@@ -51,6 +51,94 @@ pub fn run_host_shell() {
     let _ = std::process::Command::new(default_shell_program()).status();
 }
 
+/// `upgrade` 指令：依序 `git fetch --all`、`git reset --hard origin/main`、
+/// `cargo build`，全部在背景執行緒做——服務不中斷（舊的還在跑），只有編譯
+/// 成功才會觸發重啟；任何一步失敗就把錯誤訊息 push 進 `output`、直接中止，
+/// 程式維持原樣繼續運作，不會變成「已經把自己關掉、但新版本編譯失敗」這種
+/// 兩邊都沒有東西在跑的狀態。
+///
+/// 真的要重啟的最後一步（編譯成功之後）沒辦法讓現在這個行程自己做——它要先
+/// 完全結束、放開 port 9759，新編出來的執行檔才能重新 bind 上去。做法是拿
+/// 現在這個行程的 pid，重新呼叫自己一份（同一個執行檔）帶上
+/// `--respawn-after=<pid>`（見 `main.rs`）：那個小助手會先等這個 pid 真的
+/// 消失，才啟動新編好的執行檔；本機這邊接著呼叫 `request_exit()` 走既有的
+/// 正常關閉流程（GUI 收尾 raw mode/alternate screen、CLI 靠
+/// `spawn_exit_watcher`），不是 `std::process::exit` 硬中斷。
+///
+/// 跟 `exit`/`shell` 一樣是透過 `execute_line` 處理，不管是本機終端機、GUI，
+/// 還是透過 `remote` plugin 轉發過去的 `/api/exec`，都會走到同一個地方——
+/// 這也是為什麼透過 remote 連線到別台機器之後打 `upgrade`，更新的是遠端那台
+/// 機器，不是本機。
+///
+/// 設定這個環境變數（隨便什麼值，只看有沒有設）就會跳過自己重啟那一步
+/// （`--respawn-after`），編譯成功後只呼叫 `request_exit()`——用在外層已經有
+/// 別的機制會在這個行程結束後重新啟動的情境（例如 `utils/daemon.sh` 那種
+/// `while true; do cargo run; done`）：如果兩邊都會在行程結束後各自啟動一個
+/// 新的，會搶著 bind port 9759，其中一個會失敗、變成一個沒有 web server 的
+/// 多餘 process。設了這個之後兩邊就不會打架，交給外層負責重啟即可。
+pub const EXTERNAL_RESTART_ENV: &str = "CNG5_EXTERNAL_RESTART";
+
+pub fn run_upgrade(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>) {
+    thread::spawn(move || {
+        // 一定要在 `cargo build` 之前先拿到目前執行檔的路徑：Linux 上
+        // `env::current_exe()` 是即時查 `/proc/self/exe`，`cargo build` 完成
+        // 後會把 `target/debug/cng5` 這個路徑換成新編出來的檔案（unlink 掉
+        // 這個還在跑的行程原本用的那個 inode），這時候才查會拿到一個帶著
+        // 「(deleted)」字尾、實際上不存在的路徑（因為這個行程本身還在用
+        //「已經被換掉」的那個舊檔案），拿去 spawn 一定是 `No such file or
+        // directory`。這裡先存成一般的路徑字串，跟哪個 inode 無關，之後
+        // （新檔案已經編譯完成、真的存在那個路徑上）拿去 spawn 就沒問題。
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(err) => {
+                output.push(&format!("upgrade 失敗（找不到目前的執行檔路徑）: {err:#}\n"));
+                return;
+            }
+        };
+        output.push("upgrade: git fetch --all\n");
+        if let Err(err) = run_logged_command("git", &["fetch", "--all"]) {
+            output.push(&format!("upgrade 失敗（git fetch）: {err:#}\n"));
+            return;
+        }
+        output.push("upgrade: git reset --hard origin/main\n");
+        if let Err(err) = run_logged_command("git", &["reset", "--hard", "origin/main"]) {
+            output.push(&format!("upgrade 失敗（git reset）: {err:#}\n"));
+            return;
+        }
+        output.push("upgrade: cargo build（背景編譯，服務不會中斷，可能要一兩分鐘）\n");
+        if let Err(err) = run_logged_command("cargo", &["build"]) {
+            output.push(&format!("upgrade 失敗（編譯錯誤，程式維持原樣繼續運作）: {err:#}\n"));
+            return;
+        }
+        output.push("upgrade: 編譯成功，準備重啟...\n");
+        if std::env::var_os(EXTERNAL_RESTART_ENV).is_some() {
+            output.push(&format!(
+                "偵測到環境變數 {EXTERNAL_RESTART_ENV}，交給外層的重啟機制處理（例如 daemon.sh），這裡不自己啟動新的執行檔\n"
+            ));
+            lock_shell(&shell).request_exit();
+            return;
+        }
+        let pid = std::process::id();
+        if let Err(err) = Command::new(&exe).arg(format!("--respawn-after={pid}")).spawn() {
+            output.push(&format!("upgrade 失敗（無法啟動重啟程序，本次更新中止）: {err:#}\n"));
+            return;
+        }
+        lock_shell(&shell).request_exit();
+    });
+}
+
+/// 跑一個子行程，失敗（指令本身跑不起來，或跑起來但結束碼非 0）都回傳
+/// `Err`，錯誤訊息帶 stderr 的內容方便診斷（`git`/`cargo` 的錯誤通常都印在
+/// stderr）。
+fn run_logged_command(program: &str, args: &[&str]) -> Result<()> {
+    let output = Command::new(program).args(args).output().with_context(|| format!("執行 {program} 失敗"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("{program} {} 失敗: {}", args.join(" "), stderr.trim());
+    }
+    Ok(())
+}
+
 /// 把一行指令裡 `#` 之後的內容當成註解砍掉，讓 `script.cli`（或 CLI/GUI 手動輸入）
 /// 可以在指令後面加註解，例如 `panel show # 打開音樂面板`。只有沒被單引號/雙引號
 /// 包住的 `#` 才算註解開頭——被引號包住的 `#`（例如某個參數本身就含 `#`）不受影響，
@@ -477,6 +565,7 @@ cng5 把各種小工具包成一個個 plugin，root 負責在它們之間切換
   mode gui              切換成上下可以開好幾個 panel 的 GUI 畫面
   mode cli              切換回一般的命令列畫面
   shell                 借用目前終端機開一個真正的 host shell，exit 就會回來
+  upgrade               更新這台機器的 cng5（見下面的說明）
   history               列出之前執行過的指令
   !3                    重新執行 history 裡第 3 筆指令
 
@@ -486,6 +575,20 @@ cng5 把各種小工具包成一個個 plugin，root 負責在它們之間切換
   panel                 （只有 GUI 畫面才有）進去設定這個 plugin 的 panel
                         位置/大小/顯示與否
   ~                     不管在哪一層都直接跳回 root
+
+upgrade：
+  依序做 git fetch --all、git reset --hard origin/main、cargo build——編譯
+  期間服務不中斷（舊的還在跑），只有編譯成功才會重啟成新版本；編譯失敗會把
+  錯誤訊息印出來，程式維持原樣繼續運作，不會變成什麼都沒在跑。整個過程都在
+  背景執行緒做，這裡打完 upgrade 立刻就能繼續下別的指令。
+  因為跟 exit/shell 一樣是透過 execute_line 處理，透過 remote plugin 連線到
+  別台機器之後打 upgrade，就是在遠端那台機器上做更新，不是本機。
+
+  重啟的最後一步：編譯成功後會自己重新呼叫執行檔，等舊行程真的結束、放開
+  port 9759 才啟動新的（見 --respawn-after）。如果外層已經有別的機制會在
+  這個行程結束後自動重啟（例如 utils/daemon.sh 那種 while true 迴圈），設定
+  環境變數 CNG5_EXTERNAL_RESTART（值隨便，只看有沒有設）讓 upgrade 編譯成功
+  後只結束自己、不要自己重啟，避免兩邊同時搶著啟動下一個、搶 bind port。
 ";
 
 impl Default for PanelState {
@@ -522,6 +625,13 @@ pub struct Shell {
     /// 兩個旗標，因為兩者呼叫端要做的收尾動作不一樣（這個不能整個切回 cooked
     /// mode——需要維持 raw mode 才能逐位元組轉送）。
     requested_remote_shell: Option<String>,
+    /// root mode 執行過 `upgrade` 之後設成 true，呼叫端（CLI/GUI/web 三個
+    /// 呼叫 `execute_line` 的地方都要各自檢查）應該在放開 `Shell` 的鎖之後
+    /// 呼叫 `run_upgrade`。跟 `requested_shell_passthrough` 不一樣的是這個不
+    /// 需要借用終端機——`git fetch`/`cargo build` 全部在背景執行緒做，服務
+    /// 不中斷，只有編譯成功、真的要重啟那一刻才會觸發 `should_exit`（見
+    /// `run_upgrade`/`request_exit`）。
+    requested_upgrade: bool,
     /// 目前實際顯示中的 UI（跟 `requested_ui` 不同：那個是「待切換」，這個是
     /// 「現在畫面就是這個」），`panel` 指令要不要出現在候選清單裡靠這個判斷。
     current_ui: UiMode,
@@ -563,6 +673,7 @@ impl Shell {
             requested_ui: None,
             requested_shell_passthrough: false,
             requested_remote_shell: None,
+            requested_upgrade: false,
             current_ui: UiMode::Cli,
             panels: HashMap::new(),
             panel_order: Vec::new(),
@@ -659,6 +770,20 @@ impl Shell {
         self.requested_remote_shell.take()
     }
 
+    /// 取出並清除待執行的 upgrade 旗標：root mode 執行過 `upgrade` 之後這裡
+    /// 回傳 true，呼叫端應該在放開鎖之後呼叫 `run_upgrade`。
+    pub fn take_pending_upgrade(&mut self) -> bool {
+        std::mem::take(&mut self.requested_upgrade)
+    }
+
+    /// `run_upgrade` 背景執行緒編譯成功、真的要重啟時呼叫這個觸發跟 `exit`/
+    /// `quit` 同一套的正常關閉流程——不是直接 `std::process::exit`，讓 GUI
+    /// 有機會照原本的路徑收尾（離開 raw mode/alternate screen），CLI 也還是
+    /// 靠既有的 `spawn_exit_watcher` 機制收掉卡住的 `readline()`。
+    pub fn request_exit(&mut self) {
+        self.should_exit = true;
+    }
+
     pub fn prompt(&self) -> String {
         match &self.mode {
             Mode::Root => "cng5> ".to_string(),
@@ -732,6 +857,7 @@ impl Shell {
                 self.current_ui = target;
             }
             (Mode::Root, "shell") => self.requested_shell_passthrough = true,
+            (Mode::Root, "upgrade") => self.requested_upgrade = true,
             (Mode::Root, "exit" | "quit") => self.should_exit = true,
             // 已經在 root，`~`/`..`/`...` 都沒事做，但仍然是合法指令（跟其他
             // mode 底下的行為一致，不管在哪一層打都不會被當成「不認得的指令」）。
@@ -857,6 +983,26 @@ impl Shell {
             self.output.push("已離線，回到 remote plugin\n");
             return Ok(());
         }
+        // `upgrade`：一樣透過 `sender` 佇列轉發給遠端執行（worker 執行緒已經
+        // 收到這筆，就算本機接下來馬上斷線，還是會把它送完，不會漏掉），但
+        // 本機這邊主動斷線回到 remote plugin——遠端接下來會重啟（建置成功
+        // 後自己重啟，或交給 daemon.sh 之類的外層機制），繼續留在
+        // `<id>::...` 這個 prompt 會讓人誤以為還連得上，之後打的指令很可能
+        // 送到還在重啟中途、還沒起來的目標，先斷線比較不會誤會。
+        if first_word == "upgrade" {
+            if session.sender.send(line.to_string()).is_err() {
+                self.output.push("連線失敗: 背景轉發執行緒已經結束\n");
+            }
+            let id = session.id.clone();
+            {
+                let mut inner = self.ctx.lock().unwrap();
+                inner.remote_target = None;
+                inner.cross_domain_remote_target = None;
+            }
+            self.mode = Mode::InPlugin("remote".to_string());
+            self.output.push(&format!("已送出 upgrade 給 {id}，該裝置即將重啟，已斷線回到 remote plugin\n"));
+            return Ok(());
+        }
         // `shell`：本機攔截處理，不透過 `sender`/`remote_exec` 轉發成一行文字
         // 指令——那個管道對應的是遠端「自己的 Shell/Mode」，跟 `shell` 真正要做的
         // 事（借一整個終端機給遠端的 host shell 用）是兩回事，見
@@ -967,6 +1113,7 @@ impl Shell {
                 "mode cli",
                 "mode gui",
                 "shell",
+                "upgrade",
                 "exit",
                 "quit",
                 "~",
@@ -1072,6 +1219,7 @@ impl Shell {
         s.push_str("  mode cli             切換成一般的命令列畫面\n");
         s.push_str("  mode gui             切換成上下兩個 panel 的畫面\n");
         s.push_str("  shell                借用目前終端機開一個真正的 host shell，exit 就會回來\n");
+        s.push_str("  upgrade              git fetch/reset + 重新編譯，成功才重啟（manual 有完整說明）\n");
         s.push_str("  exit                 離開程式\n");
         s.push_str("  quit                 跟 exit 一樣，離開程式\n");
         s.push_str("  ~                    跳回 root（不管在哪一層都直接回來）\n");
@@ -1312,5 +1460,26 @@ impl Shell {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_logged_command_succeeds() {
+        // `git --version` 不會動到任何檔案，純粹確認「指令執行成功」這條路徑。
+        assert!(run_logged_command("git", &["--version"]).is_ok());
+    }
+
+    #[test]
+    fn run_logged_command_reports_nonzero_exit() {
+        assert!(run_logged_command("git", &["this-is-not-a-real-subcommand"]).is_err());
+    }
+
+    #[test]
+    fn run_logged_command_reports_missing_program() {
+        assert!(run_logged_command("cng5-definitely-not-a-real-binary", &[]).is_err());
     }
 }

@@ -8,12 +8,14 @@ mod sysinfo;
 mod web;
 
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use rustyline::error::ReadlineError;
 use rustyline::{
@@ -27,9 +29,22 @@ use plugins::{
     DevicePlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin,
     RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
 };
-use shell::{lock_shell, run_host_shell, run_remote_shell, PluginFactory, Shell, UiMode};
+use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
 fn main() -> Result<()> {
+    // `upgrade` 指令編譯成功之後，重新呼叫自己一份帶這個旗標——這個小助手不
+    // 進入平常的 Shell/plugin/web server 啟動流程，只單純負責「等舊行程真的
+    // 結束、放開 port 9759，才啟動新編出來的執行檔」，見 `respawn_after` 的
+    // 說明。要搶在下面 `script_path` 那段（把 argv[1] 當成 script 路徑）之前
+    // 攔截，不然會被誤判成一個不存在的 script 檔案名稱直接忽略、繼續走正常
+    // 啟動流程。
+    if let Some(pid) = env::args()
+        .nth(1)
+        .and_then(|arg| arg.strip_prefix("--respawn-after=").and_then(|s| s.parse::<u32>().ok()))
+    {
+        return respawn_after(pid);
+    }
+
     let ctx = Arc::new(Mutex::new(ContextInner::default()));
     let output = Arc::new(OutputBuffer::new());
 
@@ -107,6 +122,20 @@ fn main() -> Result<()> {
         ui = requested;
     }
 
+    // 不是目前終端機的 foreground process group（`upgrade` 重新呼叫自己那個
+    // 新 process 就是典型例子：原本的 shell 在中間那段 process 結束的瞬間就把
+    // 終端機控制權收回去了），CLI/GUI 需要的 raw mode 這類操作會直接撞上
+    // `Input/output error`——這種情況下不啟動 CLI/GUI 迴圈，改成 headless
+    // 模式（見 `run_headless`），至少讓 web server／背景回報（`system`/
+    // `global` 的背景執行緒，已經在上面 `web::spawn` 那一步一起啟動了）繼續
+    // 正常運作，不要讓整個 process 跟著 CLI/GUI 一起死掉。
+    if !sysinfo::is_foreground_tty() {
+        output.push("目前不是終端機的 foreground process（例如透過 upgrade 重新啟動），改成 headless 模式：不會有 CLI/GUI 畫面，但 web server／背景回報照常運作，可以用 web UI 或 remote 操作\n");
+        flush_new_lines(&output, &mut printed);
+        run_headless(&shell);
+        return Ok(());
+    }
+
     loop {
         if lock_shell(&shell).should_exit() {
             break;
@@ -125,6 +154,82 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `--respawn-after=<pid>` 模式：等 `old_pid`（呼叫 `upgrade` 的那個舊行程）
+/// 真的結束、放開 port 9759 之後，才啟動新編出來的執行檔（跟自己是同一個
+/// 路徑，`cargo build` 已經覆蓋成新版本）。一個行程沒辦法在自己完全結束
+/// 之後還繼續做事，所以需要這個獨立重新呼叫的小助手，不能讓舊行程自己做到
+/// 底。到這裡之前 git/cargo 那些步驟已經在舊行程裡確認成功過了，這裡完全
+/// 不重做，只單純負責「等待 -> 啟動新的」；等超過 30 秒還沒等到（理論上不
+/// 會發生）就放棄，避免真的出狀況時卡死在這裡——這裡沒有終端機/`OutputBuffer`
+/// 可以回報，只能寫 stderr。
+/// `respawn_after` 是獨立的另一個 process，它的 stdout/stderr 不會出現在
+/// `OutputBuffer` 裡（那是同一個 process 內共用的狀態）——如果是透過 `remote`
+/// 連線觸發 `upgrade`，使用者能看到的只有原本那個行程結束前 push 進
+/// `OutputBuffer` 的內容，這個小助手自己之後成功/失敗完全沒有地方看得到。
+/// 寫一份簡單的 log 檔案，至少事後能上去查發生了什麼事。時間戳用 unix 秒數
+/// （不是好看的日期時間），單純為了不想為了格式化日期另外引入一個 crate。
+const RESPAWN_LOG: &str = "upgrade-respawn.log";
+
+fn log_respawn(line: &str) {
+    let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(RESPAWN_LOG) {
+        let _ = writeln!(file, "[{ts}] {line}");
+    }
+}
+
+fn respawn_after(old_pid: u32) -> Result<()> {
+    log_respawn(&format!("啟動，等待舊行程（pid {old_pid}）結束"));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while sysinfo::pid_alive(old_pid) {
+        if Instant::now() >= deadline {
+            log_respawn(&format!("等待舊行程（pid {old_pid}）結束逾時，放棄重啟"));
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    log_respawn(&format!("舊行程（pid {old_pid}）已結束"));
+    // 舊行程剛消失那一瞬間，它繼承的終端機/pty（例如透過 `cargo run` 啟動時）
+    // 可能還在收尾，緊接著就去動同一個終端機有機會撞上暫時的狀態、拿到
+    // `Input/output error` 這種跟「新執行檔本身」完全無關的錯誤。多等一點
+    // 緩衝時間再動手，避免搶在那個空檔。
+    thread::sleep(Duration::from_millis(500));
+    let exe = match env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            log_respawn(&format!("找不到目前執行檔的路徑: {err:#}"));
+            return Err(err).context("respawn-after: 找不到目前執行檔的路徑");
+        }
+    };
+    log_respawn(&format!("準備啟動: {}", exe.display()));
+    match std::process::Command::new(&exe).spawn() {
+        Ok(child) => {
+            log_respawn(&format!("已啟動新執行檔（pid {}）", child.id()));
+            Ok(())
+        }
+        Err(err) => {
+            log_respawn(&format!("啟動 {} 失敗: {err:#}", exe.display()));
+            Err(err).with_context(|| format!("respawn-after: 啟動 {} 失敗", exe.display()))
+        }
+    }
+}
+
+/// 沒有終端機控制權時的執行模式（見 `sysinfo::is_foreground_tty`）：不啟動
+/// CLI/GUI 迴圈——那些都需要真正能拿到控制權的終端機，硬要跑會撞上
+/// `enable_raw_mode` 之類操作回傳 `Input/output error`。`web::spawn` 開的
+/// web server、`system`/`global` plugin 自己的背景回報執行緒都已經在這之前
+/// 啟動、不需要 CLI/GUI 迴圈才能運作，這裡只需要讓這個 process 保持活著、
+/// 定期檢查 `should_exit`（例如透過 web 的 `/api/exec` 打 `exit`，或
+/// `remote` 連線轉發過來的 `exit`）就好——不需要 `spawn_exit_watcher` 那套
+/// 硬中斷機制，這裡的迴圈本來就沒有阻塞在任何需要被打斷的呼叫上。
+fn run_headless(shell: &Arc<Mutex<Shell>>) {
+    loop {
+        if lock_shell(shell).should_exit() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// 從 web（`/api/exec` 執行 `exit`）觸發的離開只會設定 `Shell` 的 `should_exit`
@@ -226,6 +331,7 @@ fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &m
                 let done = sh.should_exit() || sh.has_pending_mode_switch();
                 let shell_passthrough = sh.take_pending_shell_passthrough();
                 let remote_shell_ip = sh.take_pending_remote_shell();
+                let upgrade_requested = sh.take_pending_upgrade();
                 drop(sh);
                 flush_new_lines(output, printed);
                 if shell_passthrough {
@@ -235,6 +341,9 @@ fn run_cli_ui(shell: &Arc<Mutex<Shell>>, output: &Arc<OutputBuffer>, printed: &m
                     enable_raw_mode()?;
                     run_remote_shell(&ip, output);
                     disable_raw_mode()?;
+                }
+                if upgrade_requested {
+                    run_upgrade(shell.clone(), output.clone());
                 }
                 if done {
                     break;

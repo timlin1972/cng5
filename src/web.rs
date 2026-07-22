@@ -15,7 +15,7 @@ use tokio::sync::broadcast;
 use crate::output::OutputBuffer;
 use crate::plugin::{merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
 use crate::plugins::{DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
-use crate::shell::{default_shell_program, lock_shell, send_cross_domain_request, Shell};
+use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
 
@@ -260,22 +260,32 @@ async fn exec(
     output: web::Data<Arc<OutputBuffer>>,
 ) -> impl Responder {
     let line = body.line.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let mut sh = lock_shell(&shell);
+    let shell_for_blocking = shell.get_ref().clone();
+    let output_for_blocking = output.get_ref().clone();
+    let (result, upgrade_requested) = tokio::task::spawn_blocking(move || {
+        let mut sh = lock_shell(&shell_for_blocking);
         let trimmed = line.trim();
         if !trimmed.is_empty() && !trimmed.starts_with('#') && !trimmed.starts_with('!') {
-            output.push(&format!("{}{}\n", sh.prompt(), trimmed));
+            output_for_blocking.push(&format!("{}{}\n", sh.prompt(), trimmed));
         }
         let error = sh.execute_line(&line).err().map(|err| format!("{err:#}"));
         if let Some(msg) = &error {
-            output.push(&format!("錯誤: {msg}\n"));
+            output_for_blocking.push(&format!("錯誤: {msg}\n"));
         }
         let prompt = sh.prompt();
-        output.push(&format!("{prompt}\n"));
-        ExecResponse { prompt, error }
+        output_for_blocking.push(&format!("{prompt}\n"));
+        // `upgrade`（見 `shell::run_upgrade`）跟 `exit` 一樣是透過
+        // `execute_line` 處理的旗標，這裡也要跟 CLI/GUI 一樣接住——這正是
+        // 「透過 remote plugin 轉發到別台機器的 /api/exec 觸發 upgrade」這個
+        // 使用情境實際會走到的地方。
+        let upgrade_requested = sh.take_pending_upgrade();
+        (ExecResponse { prompt, error }, upgrade_requested)
     })
     .await
-    .unwrap_or_else(|_| ExecResponse { prompt: String::new(), error: Some("內部錯誤".to_string()) });
+    .unwrap_or_else(|_| (ExecResponse { prompt: String::new(), error: Some("內部錯誤".to_string()) }, false));
+    if upgrade_requested {
+        run_upgrade(shell.get_ref().clone(), output.get_ref().clone());
+    }
     HttpResponse::Ok().json(result)
 }
 

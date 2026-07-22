@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
 use crate::plugins::{NotepadPlugin, QrPlugin};
-use crate::shell::{lock_shell, run_host_shell, run_remote_shell, PanelState, Shell};
+use crate::shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PanelState, Shell};
 
 /// 借出 `notepad` plugin 的具體型別可變參考執行 `f`：`Shell::plugin_mut` 只給
 /// `&mut Box<dyn Plugin>`，這裡用 `Plugin::as_any_mut` 向下轉型成
@@ -1268,7 +1268,11 @@ fn run_loop(
                 let done = sh.should_exit() || sh.has_pending_mode_switch();
                 let shell_passthrough = sh.take_pending_shell_passthrough();
                 let remote_shell_ip = sh.take_pending_remote_shell();
+                let upgrade_requested = sh.take_pending_upgrade();
                 drop(sh);
+                if upgrade_requested {
+                    run_upgrade(shell.clone(), output.clone());
+                }
                 if let Some(ip) = remote_shell_ip {
                     // 跟本地 `shell` passthrough 一樣先離開 alternate screen，讓
                     // 遠端的畫面用一般的、可以捲動回看的螢幕；但不能跟本地那邊

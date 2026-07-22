@@ -34,9 +34,11 @@ remote：像 ssh 一樣連到另一台機器，直接對它下指令，同網域
   - shell 會把目前這個終端機整個接上遠端的 host shell（跟 ssh 過去一樣真的
     互動，vim/top 這類全螢幕程式都能用），不是轉發成一行指令給遠端的 cng5
     執行。用遠端 shell 裡的 exit 離開，回到這個連線。
+  - upgrade 會轉發給遠端執行（觸發那台機器的 upgrade 流程），但本機這邊會
+    主動斷線回到 remote plugin，不會留在 <id>::... 這個 prompt——遠端接下來
+    會重啟，繼續連著容易誤以為還連得上，之後打的指令送過去大概率失敗。
 
-只能連同網域內、本機 device list 已經看得到的機器（同網域機器互相本來就連得
-到，用的是既有的 /api/exec、/api/prompt 端點）。跨網域的版本之後再另外規劃。
+同網域用的是既有的 /api/exec、/api/prompt 端點。
 搭配 remote-output plugin 使用：/api/exec 的回應只有 prompt/錯誤訊息，不含
 指令實際印出來的內容，要看遠端指令印出了什麼，開 remote-output 的 panel（預設
 鏡射遠端的 output panel）。

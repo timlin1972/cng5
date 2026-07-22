@@ -13,6 +13,16 @@ unsafe extern "system" {
     /// `lpnSize` 進去時是緩衝區大小、回來時是實際寫入的字元數（不含結尾的
     /// null）；失敗（例如緩衝區太小）回傳 0。
     fn GetComputerNameW(lpBuffer: *mut u16, lpnSize: *mut u32) -> i32;
+
+    /// `pid_alive` 用：開一個能查詢（但不需要完整控制權限）目標行程的
+    /// handle，開不起來（行程不存在/沒權限）回傳 null。
+    fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut std::os::raw::c_void;
+
+    /// 查 `OpenProcess` 開到的行程目前的結束代碼；還在跑的話會是 `STILL_ACTIVE`
+    /// （259）。
+    fn GetExitCodeProcess(hProcess: *mut std::os::raw::c_void, lpExitCode: *mut u32) -> i32;
+
+    fn CloseHandle(hObject: *mut std::os::raw::c_void) -> i32;
 }
 
 #[cfg(not(windows))]
@@ -20,6 +30,17 @@ unsafe extern "C" {
     /// 取得主機名稱（libc），標準函式庫沒有直接包這個所以用 FFI 呼叫，不
     /// 需要額外的 crate。
     fn gethostname(name: *mut std::os::raw::c_char, len: usize) -> i32;
+
+    /// `pid_alive` 用：`kill(pid, 0)` 不會真的送訊號，只檢查行程存不存在/
+    /// 有沒有權限送訊號給它，成功（回傳 0）就代表還活著。
+    fn kill(pid: i32, sig: i32) -> i32;
+
+    /// `is_foreground_tty` 用：查 `fd` 這個終端機目前的 foreground process
+    /// group 是誰。不是終端機（例如純管線）或查詢失敗都回傳 -1。
+    fn tcgetpgrp(fd: i32) -> i32;
+
+    /// `is_foreground_tty` 用：查這個行程自己的 process group id。
+    fn getpgrp() -> i32;
 }
 
 /// 這個程式行程真正啟動的時間點，第一次被讀到的當下算（`LazyLock` 保證只
@@ -107,6 +128,58 @@ pub fn hostname() -> String {
     }
 }
 
+/// 檢查 `pid` 這個行程是不是還在跑。給 `upgrade` 指令的重啟流程用（見
+/// `shell::run_upgrade`/`main.rs` 的 `--respawn-after`）：舊行程要真的完全
+/// 結束、放開 port 9759 之後，才能啟動新編出來的執行檔，不能只靠猜一個固定
+/// 時間就當作「應該結束了」。
+#[cfg(windows)]
+pub fn pid_alive(pid: u32) -> bool {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return false;
+        }
+        let mut exit_code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        ok != 0 && exit_code == STILL_ACTIVE
+    }
+}
+
+#[cfg(not(windows))]
+pub fn pid_alive(pid: u32) -> bool {
+    unsafe { kill(pid as i32, 0) == 0 }
+}
+
+/// 這個行程現在是不是 stdin 那個終端機的 foreground process group——不是單純
+/// 「stdin 是不是 tty」：像 `upgrade` 重新呼叫自己那種情境，新行程的 stdin
+/// 繼承自原本那個終端機，`isatty()` 檢查會過，但這個新行程已經不在那個終端機
+/// 目前的 foreground process group 裡了（原本的 shell 在中間那段 process 結束
+/// 的瞬間就把控制權收回去）。這種狀態下對終端機做需要控制權的操作（例如
+/// crossterm/rustyline 的 raw mode）會撞上 Unix 對 background process group
+/// 動終端機的行為，回傳 `Input/output error`，不是單純「沒有 tty」那種可以
+/// 忽略的情況。`main.rs` 用這個判斷要不要走 headless 模式（見
+/// `main::run_headless`），不是只看 stdin 是不是 tty。
+///
+/// `tcgetpgrp` 查不到（不是 tty，或這個行程沒有 controlling terminal）都回傳
+/// -1，跟 `getpgrp()` 不會相等，一併視為「不是 foreground」，不需要另外判斷
+/// 是不是 tty。Windows 沒有這套 Unix session/job control 的概念，永遠當作
+/// foreground（GUI/CLI 在 Windows 上不會遇到這個問題）。
+#[cfg(windows)]
+pub fn is_foreground_tty() -> bool {
+    true
+}
+
+#[cfg(not(windows))]
+pub fn is_foreground_tty() -> bool {
+    unsafe {
+        let pgrp = tcgetpgrp(0);
+        pgrp >= 0 && pgrp == getpgrp()
+    }
+}
+
 /// 這台機器的作業系統（`linux`/`windows`/`macos`...），拿來給 device/global
 /// registry 顯示用。`std::env::consts::OS` 是編譯期常數（編出來給哪個平台跑，
 /// 就是哪個值），不需要另外查系統 API 或開子行程。
@@ -158,4 +231,42 @@ pub fn arp_table() -> Vec<String> {
         })
         .map(|mac| mac.replace('-', ":").to_lowercase())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::time::Duration;
+
+    #[test]
+    fn pid_alive_reflects_process_lifetime() {
+        let mut child = if cfg!(windows) {
+            Command::new("cmd").args(["/c", "timeout /t 5"]).spawn().expect("spawn timeout")
+        } else {
+            Command::new("sleep").arg("5").spawn().expect("spawn sleep")
+        };
+        let pid = child.id();
+        assert!(pid_alive(pid), "剛 spawn 的子行程應該還活著");
+        child.kill().expect("kill child");
+        child.wait().expect("wait for child");
+        // 送出結束訊號跟核心真的回收行程之間可能有極短暫的延遲，重試幾次
+        // 避免測試偶爾閃燁失敗。
+        let mut still_alive = pid_alive(pid);
+        for _ in 0..20 {
+            if !still_alive {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            still_alive = pid_alive(pid);
+        }
+        assert!(!still_alive, "kill + wait 之後應該回報已經不在了");
+    }
+
+    #[test]
+    fn pid_alive_false_for_bogus_pid() {
+        // 挑一個幾乎不可能存在的超大 pid，確認查不到的情況回傳 false 而不是
+        // panic（`OpenProcess`/`kill` 對不存在的 pid 都應該乾淨地失敗）。
+        assert!(!pid_alive(u32::MAX - 1));
+    }
 }
