@@ -300,14 +300,22 @@
     padding: 16px;
     overflow: hidden;
   }
-  .player-cover {
+  /* 封面/歌詞/頻譜圖三個共用同一塊位置、大小完全一樣，一次只顯示一個，點一下
+     依序循環 封面 -> 歌詞 -> 頻譜 -> 封面（見 `openPanel` 裡 `cycleCoverView`
+     的邏輯）。三個的 `display` 完全交給 JS 控制（初始值也是 JS 設的，見
+     `showCoverView`），這裡不寫死任何一個的預設 `display`，避免 CSS 預設值
+     跟 JS 的顯示/隱藏邏輯兩邊各管一半、互相打架。 */
+  .player-cover-slot {
     width: 100%;
     max-width: 220px;
     aspect-ratio: 1 / 1;
-    object-fit: cover;
     background: #0d0f13;
     border: 1px solid #3a4150;
     border-radius: 4px;
+    cursor: pointer;
+  }
+  .player-cover {
+    object-fit: cover;
   }
   /* 進度條＋右邊的時間顯示（"1:20/3:30"）放同一排，時間文字寬度固定
      （`.player-time`），進度條吃掉剩下的寬度。 */
@@ -342,14 +350,10 @@
     text-align: center;
   }
   /* 歌詞來自 `download` 順便抓的 YouTube 字幕（真人上傳的才抓，見
-     `MusicPlugin::download` 的說明），不是每首歌都有；`min-height: 0` 是讓
-     這塊在 flex column 裡真的能收縮並且自己捲動，不然子元素會把 `player-right`
-     撐開，反而讓封面/按鈕被擠出可視範圍。 */
+     `MusicPlugin::download` 的說明），不是每首歌都有。跟封面共用同一塊固定
+     大小的位置（`.player-cover-slot`），這裡只補歌詞本身需要的樣式：可以
+     捲動、文字置中。 */
   .player-lyrics {
-    flex: 1;
-    min-height: 0;
-    width: 100%;
-    max-width: 260px;
     overflow: auto;
     text-align: center;
     color: #6a7383;
@@ -914,7 +918,10 @@
     const entry = open.get(name);
     if (!entry) return;
     if (entry.es) entry.es.close();
-    if (entry.musicUi) entry.musicUi.stopPolling();
+    if (entry.musicUi) {
+      entry.musicUi.stopPolling();
+      entry.musicUi.stopVisualizers();
+    }
     if (entry.shellUi) {
       entry.shellUi.resizeObserver.disconnect();
       entry.shellUi.ws.close();
@@ -1049,6 +1056,19 @@
   // 「目前唱到哪一句」＝開始時間不超過目前播放進度的最後一句；每次 `timeupdate`
   // 都會呼叫，用 `lyricsActiveIndex` 記住上一次反白的是哪一句，沒變就不用重新
   // 操作 DOM（`timeupdate` 一秒觸發好幾次，沒必要每次都全部重畫）。
+  // 把目前反白的那一句捲到看得見的地方。拆成獨立函式是因為歌詞現在藏在
+  // 封面循環的其中一格（見 `openPanel` 的 `cycleCoverView`），使用者切到歌詞
+  // 畫面那一刻也要捲一次——不能只靠 `updateLyricsHighlight` 的
+  // `timeupdate` 呼叫，那邊在「反白的句子沒變」時會提早 return，如果切換
+  // 畫面之前反白的句子早就定住不動了，會一直看不到捲動生效。
+  function scrollActiveLyricIntoView(musicUi) {
+    const rows = musicUi.lyricsEl.children;
+    const idx = musicUi.lyricsActiveIndex;
+    if (idx >= 0 && rows[idx]) {
+      rows[idx].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
   function updateLyricsHighlight(musicUi) {
     const lines = musicUi.lyricsLines;
     if (!musicUi.lyricsEl || !lines || lines.length === 0) return;
@@ -1064,9 +1084,7 @@
     for (let i = 0; i < rows.length; i++) {
       rows[i].classList.toggle("active", i === idx);
     }
-    if (idx >= 0 && rows[idx]) {
-      rows[idx].scrollIntoView({ block: "center", behavior: "smooth" });
-    }
+    scrollActiveLyricIntoView(musicUi);
   }
 
   // `delta` 是 +1（下一首）或 -1（上一首）；找不到目前這首（例如已經被刪除）
@@ -1612,12 +1630,29 @@
 
       const right = document.createElement("div");
       right.className = "player-right";
+      // 封面/歌詞/頻譜圖/放射狀頻譜四個共用同一塊位置，點一下依序循環：封面
+      // -> 歌詞 -> 頻譜 -> 放射狀頻譜 -> 封面（見下面 `cycleCoverView`），
+      // 一次只顯示其中一個。
       const cover = document.createElement("img");
-      cover.className = "player-cover";
+      cover.className = "player-cover-slot player-cover";
       cover.alt = "";
+      cover.title = "點一下切換：封面 → 歌詞 → 頻譜 → 放射狀頻譜";
       // 這首歌沒有封面（`404`）就讓圖片直接空著，不要顯示瀏覽器預設的
       // 破圖示。
       cover.addEventListener("error", () => cover.removeAttribute("src"));
+      const lyricsEl = document.createElement("div");
+      lyricsEl.className = "player-cover-slot player-lyrics";
+      lyricsEl.title = cover.title;
+      const spectrum = document.createElement("canvas");
+      spectrum.className = "player-cover-slot player-spectrum";
+      spectrum.width = 220;
+      spectrum.height = 220;
+      spectrum.title = cover.title;
+      const radial = document.createElement("canvas");
+      radial.className = "player-cover-slot player-radial";
+      radial.width = 220;
+      radial.height = 220;
+      radial.title = cover.title;
       const seekRow = document.createElement("div");
       seekRow.className = "player-seek-row";
       const seekBar = document.createElement("input");
@@ -1635,8 +1670,6 @@
       const trackName = document.createElement("div");
       trackName.className = "player-track-name";
       trackName.textContent = "(尚未播放)";
-      const lyricsEl = document.createElement("div");
-      lyricsEl.className = "player-lyrics";
       const rightControls = document.createElement("div");
       rightControls.className = "player-controls";
       // 播放模式按鈕：依序播放 -> 隨機播放 -> 播放單首，循環切換，只影響
@@ -1701,9 +1734,11 @@
       rightControls.appendChild(modeBtn);
       rightControls.appendChild(transport);
       right.appendChild(cover);
+      right.appendChild(lyricsEl);
+      right.appendChild(spectrum);
+      right.appendChild(radial);
       right.appendChild(seekRow);
       right.appendChild(trackName);
-      right.appendChild(lyricsEl);
       right.appendChild(rightControls);
 
       container.appendChild(left);
@@ -1728,7 +1763,246 @@
         currentName: null,
         playMode: PLAY_MODES[0].mode,
         stopPolling: () => {},
+        stopVisualizers: () => {},
       };
+
+      // 點封面依序循環：封面 -> 歌詞 -> 頻譜 -> 放射狀頻譜 -> 封面。
+      // `AudioContext`/`MediaElementAudioSourceNode` 只能在第一次真的要畫
+      // 視覺化效果的時候才建立（`createMediaElementSource` 對同一個
+      // `<audio>` 元素只能呼叫一次，而且瀏覽器的自動播放政策要求在使用者
+      // 手勢——這裡就是這次點擊——的呼叫堆疊裡才能建立/恢復），建過一次之後
+      // 同一個 panel 生命週期內重複使用，頻譜圖跟放射狀頻譜共用同一個
+      // `AnalyserNode`（都是讀頻域資料，只是畫法不同）。`source` 建好之後
+      // 一定要接回 `audioCtx.destination`，不然會變成截斷音訊圖，喇叭反而
+      // 聽不到聲音。
+      let audioCtx = null;
+      let analyser = null;
+      let freqData = null;
+      let spectrumRafId = null;
+      let radialRafId = null;
+      const spectrumCtx = spectrum.getContext("2d");
+      const radialCtx = radial.getContext("2d");
+
+      function ensureAnalyser() {
+        if (audioCtx) return;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = audioCtx.createMediaElementSource(player);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 128;
+        source.connect(analyser);
+        analyser.connect(audioCtx.destination);
+        freqData = new Uint8Array(analyser.frequencyBinCount);
+      }
+
+      // 每一條柱子不是一整條實心長方形，是固定一排小方格疊起來（格數不會隨
+      // 音量增減，只有底下幾格會「亮」、其餘維持「暗」），格子之間留
+      // `SPECTRUM_GAP` 的細縫分開，做出復古 LED 電平表的顆粒感。格子刻意
+      // 做成扁的（寬 > 高）而不是正方形，是常見類比電平表的長相。
+      const SPECTRUM_CELL_W = 8;
+      const SPECTRUM_CELL_H = 4;
+      const SPECTRUM_GAP = 2;
+      const SPECTRUM_PITCH_X = SPECTRUM_CELL_W + SPECTRUM_GAP;
+      const SPECTRUM_PITCH_Y = SPECTRUM_CELL_H + SPECTRUM_GAP;
+      const spectrumColumns = Math.max(1, Math.floor(spectrum.width / SPECTRUM_PITCH_X));
+      const spectrumRows = Math.max(1, Math.floor(spectrum.height / SPECTRUM_PITCH_Y));
+      // 每一「列」（不是每一格亮不亮）固定對應一個顏色，由下到上綠 -> 黃 ->
+      // 紅，跟類比電平表一樣——顏色只跟這一列在柱子裡的高度位置有關，跟目前
+      // 音量無關（音量只決定亮到第幾列，不影響每列原本該是什麼顏色）。畫布
+      // 大小固定不會變，這份顏色表只需要算一次，不用放進每一幀的迴圈裡重算。
+      const spectrumRowColors = Array.from({ length: spectrumRows }, (_, row) => {
+        const t = spectrumRows === 1 ? 0 : row / (spectrumRows - 1);
+        const r = t < 0.5 ? Math.round(255 * (t / 0.5)) : 255;
+        const g = t < 0.5 ? 255 : Math.round(255 * (1 - (t - 0.5) / 0.5));
+        return {
+          on: `rgb(${r}, ${g}, 0)`,
+          // 暗格用同一列顏色的低透明度版本，而不是另外挑一個灰色——這樣
+          // 亮/暗看起來是同一顆 LED 的兩種狀態，不是兩種不同顏色的方塊。
+          off: `rgba(${r}, ${g}, 0, 0.15)`,
+        };
+      });
+      function drawSpectrum() {
+        spectrumRafId = requestAnimationFrame(drawSpectrum);
+        analyser.getByteFrequencyData(freqData);
+        const h = spectrum.height;
+        spectrumCtx.clearRect(0, 0, spectrum.width, h);
+        // 原始頻率 bin 數（`freqData.length`）通常比欄數多很多，好幾個 bin
+        // 平均成一欄，欄才夠寬、畫得出清楚的小方格，而不是每欄窄到只剩
+        // 一兩個像素。
+        const binsPerColumn = freqData.length / spectrumColumns;
+        for (let col = 0; col < spectrumColumns; col++) {
+          const from = Math.floor(col * binsPerColumn);
+          const to = Math.max(from + 1, Math.floor((col + 1) * binsPerColumn));
+          let sum = 0;
+          for (let i = from; i < to; i++) sum += freqData[i];
+          const value = sum / (to - from) / 255;
+          const lit = Math.round(value * spectrumRows);
+          const x = col * SPECTRUM_PITCH_X;
+          for (let row = 0; row < spectrumRows; row++) {
+            const y = h - (row + 1) * SPECTRUM_PITCH_Y;
+            const colors = spectrumRowColors[row];
+            spectrumCtx.fillStyle = row < lit ? colors.on : colors.off;
+            spectrumCtx.fillRect(x, y, SPECTRUM_CELL_W, SPECTRUM_CELL_H);
+          }
+        }
+      }
+
+      // 中間一個圓形（裡面印目前播放到幾分幾秒，外面繞一圈播放進度環），圓周
+      // 外圈放射狀伸出去的柱子，長度隨頻率強度變化——跟 `drawSpectrum` 同一份
+      // `freqData`，只是排列成一圈而不是一排。
+      const RADIAL_BAR_COUNT = 48;
+      const RADIAL_INNER_RADIUS = 40;
+      const RADIAL_MAX_LEN = 55;
+      const RADIAL_CX = radial.width / 2;
+      const RADIAL_CY = radial.height / 2;
+      // 柱子的顏色由下面這個徑向漸層決定，錨點固定在圓心、半徑對應柱子的
+      // 內外範圍（`RADIAL_INNER_RADIUS` ~ `RADIAL_INNER_RADIUS + RADIAL_MAX_LEN`），
+      // 跟畫布大小一樣不會變，只需要建一次、每一幀重複使用。顏色只跟柱子上
+      // 那一點離圓心多遠有關（靠近圓心綠、離圓心遠變紅），跟目前音量無關
+      // ——音量只決定柱子多長，短柱子只會露出漸層裡靠圓心的綠色那一段，跟
+      // `spectrumRowColors` 那套「格子固定顏色、音量決定亮到哪」是同一個
+      // 概念，只是這裡用 canvas 內建的漸層物件實作，不用自己切格子。
+      const radialBarGradient = radialCtx.createRadialGradient(
+        RADIAL_CX,
+        RADIAL_CY,
+        RADIAL_INNER_RADIUS,
+        RADIAL_CX,
+        RADIAL_CY,
+        RADIAL_INNER_RADIUS + RADIAL_MAX_LEN,
+      );
+      radialBarGradient.addColorStop(0, "rgb(0, 255, 0)");
+      radialBarGradient.addColorStop(0.5, "rgb(255, 255, 0)");
+      radialBarGradient.addColorStop(1, "rgb(255, 0, 0)");
+      // 播放進度環畫在哪個半徑上；`RADIAL_INNER_RADIUS - 8` 是中間填色圓形
+      // 的半徑，環夾在填色圓形跟柱子起點（`RADIAL_INNER_RADIUS`）之間。
+      const RADIAL_RING_RADIUS = RADIAL_INNER_RADIUS - 4;
+      function drawRadial() {
+        radialRafId = requestAnimationFrame(drawRadial);
+        analyser.getByteFrequencyData(freqData);
+        radialCtx.clearRect(0, 0, radial.width, radial.height);
+
+        const binsPerBar = freqData.length / RADIAL_BAR_COUNT;
+        radialCtx.strokeStyle = radialBarGradient;
+        radialCtx.lineWidth = 3;
+        radialCtx.lineCap = "round";
+        for (let i = 0; i < RADIAL_BAR_COUNT; i++) {
+          const from = Math.floor(i * binsPerBar);
+          const to = Math.max(from + 1, Math.floor((i + 1) * binsPerBar));
+          let sum = 0;
+          for (let b = from; b < to; b++) sum += freqData[b];
+          const value = sum / (to - from) / 255;
+          // 從正上方（12 點鐘方向）開始，順時針繞一圈。
+          const angle = (i / RADIAL_BAR_COUNT) * Math.PI * 2 - Math.PI / 2;
+          const len = value * RADIAL_MAX_LEN;
+          const cosA = Math.cos(angle);
+          const sinA = Math.sin(angle);
+          radialCtx.beginPath();
+          radialCtx.moveTo(RADIAL_CX + cosA * RADIAL_INNER_RADIUS, RADIAL_CY + sinA * RADIAL_INNER_RADIUS);
+          radialCtx.lineTo(
+            RADIAL_CX + cosA * (RADIAL_INNER_RADIUS + len),
+            RADIAL_CY + sinA * (RADIAL_INNER_RADIUS + len),
+          );
+          radialCtx.stroke();
+        }
+
+        // 中間的圓形背景蓋掉柱子靠圓心那一端的接縫，看起來像柱子從圓周長出
+        // 來，而不是每一條線從圓心穿出去。
+        radialCtx.beginPath();
+        radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_INNER_RADIUS - 8, 0, Math.PI * 2);
+        radialCtx.fillStyle = "#0d0f13";
+        radialCtx.fill();
+
+        // 播放進度環：底下先畫一圈暗色的「軌道」，再從 12 點鐘方向順時針疊上
+        // 一段亮色的「已播放」弧——播到一半，亮弧從 12 點鐘畫到 6 點鐘，正好
+        // 是右半圈；播到底，亮弧繞滿一整圈。
+        radialCtx.lineWidth = 3;
+        radialCtx.strokeStyle = "#3a4150";
+        radialCtx.beginPath();
+        radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, 0, Math.PI * 2);
+        radialCtx.stroke();
+        const duration = player.duration;
+        const progress =
+          Number.isFinite(duration) && duration > 0 ? Math.min(1, Math.max(0, player.currentTime / duration)) : 0;
+        if (progress > 0) {
+          radialCtx.strokeStyle = "#6f9dff";
+          radialCtx.beginPath();
+          radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+          radialCtx.stroke();
+        }
+
+        radialCtx.fillStyle = "#d8dee9";
+        radialCtx.font = "16px sans-serif";
+        radialCtx.textAlign = "center";
+        radialCtx.textBaseline = "middle";
+        radialCtx.fillText(formatTime(player.currentTime), RADIAL_CX, RADIAL_CY);
+      }
+
+      function stopSpectrumAnim() {
+        if (spectrumRafId !== null) {
+          cancelAnimationFrame(spectrumRafId);
+          spectrumRafId = null;
+        }
+      }
+
+      function stopRadialAnim() {
+        if (radialRafId !== null) {
+          cancelAnimationFrame(radialRafId);
+          radialRafId = null;
+        }
+      }
+
+      musicUi.stopVisualizers = () => {
+        stopSpectrumAnim();
+        stopRadialAnim();
+        if (audioCtx) {
+          audioCtx.close();
+          audioCtx = null;
+        }
+      };
+
+      // 四格依序循環的畫面，各自的 `el`、切進來那一刻（`onShow`）跟離開那一刻
+      // （`onHide`）要做的事。封面/歌詞不需要收尾，頻譜/放射狀頻譜離開時要
+      // 停掉自己的動畫迴圈——不然兩個同時掛著跑，浪費效能而且沒有畫面在用。
+      const coverViews = [
+        { el: cover, onShow: () => {}, onHide: () => {} },
+        { el: lyricsEl, onShow: () => scrollActiveLyricIntoView(musicUi), onHide: () => {} },
+        {
+          el: spectrum,
+          onShow: () => {
+            ensureAnalyser();
+            audioCtx.resume();
+            drawSpectrum();
+          },
+          onHide: stopSpectrumAnim,
+        },
+        {
+          el: radial,
+          onShow: () => {
+            ensureAnalyser();
+            audioCtx.resume();
+            drawRadial();
+          },
+          onHide: stopRadialAnim,
+        },
+      ];
+      let coverViewIndex = 0;
+      // 一開始只顯示封面，其餘先藏起來（`.player-cover-slot` 共用的 CSS
+      // 沒有寫死任何一個的 `display`，初始狀態完全由這裡決定）。
+      coverViews.forEach((v, i) => {
+        v.el.style.display = i === 0 ? "" : "none";
+      });
+
+      function cycleCoverView() {
+        coverViews[coverViewIndex].onHide();
+        coverViewIndex = (coverViewIndex + 1) % coverViews.length;
+        coverViews.forEach((v, i) => {
+          v.el.style.display = i === coverViewIndex ? "" : "none";
+        });
+        coverViews[coverViewIndex].onShow();
+      }
+      cover.addEventListener("click", cycleCoverView);
+      lyricsEl.addEventListener("click", cycleCoverView);
+      spectrum.addEventListener("click", cycleCoverView);
+      radial.addEventListener("click", cycleCoverView);
 
       // 上一首永遠照清單順序走（隨機播放模式下沒有「上一首」的歷史紀錄可以
       // 回溯，照順序走是最直覺的退回方式）；下一首在隨機播放模式下則是真的
