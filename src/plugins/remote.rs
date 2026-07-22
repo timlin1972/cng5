@@ -5,13 +5,23 @@ use crate::plugin::{Plugin, SharedContext};
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
-remote：像 ssh 一樣連到同網域內的另一台機器，直接對它下指令。
+remote：像 ssh 一樣連到另一台機器，直接對它下指令，同網域跟跨 domain 都支援。
 
 範例：
-  connect <id>   連到 device list 看得到的某一台機器（用它的 id/hostname），
-                 連上之後 prompt 會變成 <id>::<遠端目前的 prompt>，接下來打的
-                 每一行都會原封不動轉發給那台機器執行，不用再包一層 cmd <cmd>
-  status         查目前有沒有連線中的目標
+  connect <id>          連到同網域 device list 看得到的某一台機器（用它的
+                        id/hostname），連上之後 prompt 會變成
+                        <id>::<遠端目前的 prompt>，接下來打的每一行都會原封
+                        不動轉發給那台機器執行，不用再包一層 cmd <cmd>
+  connect <domain>/<id> 連到跨 domain 的機器（用 global list 看得到的
+                        <domain>/<id>）。這條路徑透過 global plugin 的 MQTT
+                        session 加密中繼（見 crypto 模組），需要：
+                          - 所有機器的 remote-key 檔案內容要一樣（跨 domain
+                            加解密用的共用金鑰，手動放檔案，不進版控）
+                          - 本機是 system server 且已連上 MQTT，或本機的
+                            server <ip> 有設定（會透過那台伺服器中繼）
+                        跨 domain 連線不支援 shell（沒有直接可達的 ip 可以開
+                        WebSocket）
+  status                查目前有沒有連線中的目標
 
 連線期間（prompt 顯示 <id>::...）：
   - 在遠端的 root 下 exit/quit 會離開這個連線，回到本機的 remote plugin。
@@ -42,10 +52,14 @@ impl RemotePlugin {
     }
 
     fn status_text(&self) -> String {
-        match &self.ctx.lock().unwrap().remote_target {
-            Some((id, ip)) => format!("連線中: {id} ({ip})\n"),
-            None => "目前沒有連線\n".to_string(),
+        let inner = self.ctx.lock().unwrap();
+        if let Some((id, ip)) = &inner.remote_target {
+            return format!("連線中: {id} ({ip})\n");
         }
+        if let Some((domain, id)) = &inner.cross_domain_remote_target {
+            return format!("連線中（跨 domain）: {domain}/{id}\n");
+        }
+        "目前沒有連線\n".to_string()
     }
 
     fn status(&mut self, out: &OutputBuffer) -> Result<()> {
@@ -60,7 +74,7 @@ impl Plugin for RemotePlugin {
     // `shell.rs` 裡 `(Mode::InPlugin(name), "connect") if name == "remote"`
     // 那個分支），這裡列出來只是為了讓它出現在 `help`/tab 補全的候選清單裡。
     fn commands(&self) -> &'static [&'static str] {
-        &["connect <id>", "status"]
+        &["connect <id>", "connect <domain>/<id>", "status"]
     }
 
     fn dispatch(&mut self, cmd: &str, _args: &[String], out: &OutputBuffer) -> Result<()> {

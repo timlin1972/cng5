@@ -7,7 +7,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 
 use crate::output::OutputBuffer;
-use crate::plugin::{Plugin, SharedContext};
+use crate::plugin::{CrossDomainAsk, Plugin, RemoteReply, SharedContext};
+use crate::shell::send_cross_domain_request;
 
 /// 還沒下過 `show` 之前，預設鏡射遠端的 `output` panel——那是「所有指令執行
 /// 結果」的彙總捲動紀錄，多數情況下鏡射這個就夠用；真的想看遠端某個 plugin
@@ -36,11 +37,22 @@ remote-output：把 remote plugin 目前連線目標的某一個 panel 即時鏡
 
 沒有透過 remote plugin 連線中的時候，這裡不會有任何內容；連線目標/panel 換掉
 的時候，畫面會先清空、重新訂閱新的來源。
+
+跨 domain 連線（`connect <domain>/<id>`）鏡射的方式不一樣：沒有直接可達的 ip
+可以開 SSE 長連線，改成每 POLL_INTERVAL 送一次加密的一次性查詢（透過跟
+remote 指令轉發共用的 `send_cross_domain_request`），實際更新頻率會隨這個
+請求本身要多久有落差（正常應該是一瞬間，MQTT/中繼逾時的話最多會慢個幾秒）。
 ";
 
-/// 目前正在鏡射的來源：(遠端 id, 遠端 ip, panel 名稱)，這三者有任何一個變了
-/// 就代表要停掉舊的 curl 訂閱、換一個新的。
-type MirrorKey = (String, String, String);
+/// 目前正在鏡射的來源。同網域（`Http`）用持續訂閱 SSE 的 curl 子行程；跨
+/// domain（`Cross`）沒有這種長連線可用，靠背景迴圈每輪重新送一次性查詢，見
+/// `spawn_supervisor`。
+#[derive(Clone, PartialEq)]
+enum Wanted {
+    None,
+    Http { id: String, ip: String, panel: String },
+    Cross { domain: String, target_id: String, panel: String },
+}
 
 pub struct RemoteOutputPlugin {
     ctx: SharedContext,
@@ -65,25 +77,51 @@ impl RemoteOutputPlugin {
     }
 
     /// 背景監督執行緒，整個程式活著期間持續跑：每 `POLL_INTERVAL` 檢查一次目前
-    /// 該鏡射誰（`ctx.remote_target` + `panel_name`），跟上一輪不一樣就把舊的
-    /// curl 子行程殺掉、清空畫面、視情況訂閱新的來源。
+    /// 該鏡射誰（`ctx.remote_target`/`ctx.cross_domain_remote_target` +
+    /// `panel_name`），跟上一輪不一樣就把舊的 curl 子行程殺掉（同網域）、清空
+    /// 畫面、視情況訂閱新的來源；目標是跨 domain 的話，每一輪都額外送一次性的
+    /// `Panel` 查詢更新畫面（沒有 SSE 長連線可以持續訂閱，見 `Wanted::Cross`
+    /// 的說明）。
     fn spawn_supervisor(ctx: SharedContext, panel_name: Arc<Mutex<String>>, buffer: Arc<Mutex<Option<String>>>) {
         thread::spawn(move || {
-            let mut current: Option<MirrorKey> = None;
+            let mut current = Wanted::None;
             let mut child: Option<Child> = None;
             loop {
-                let target = ctx.lock().unwrap().remote_target.clone();
-                let wanted: Option<MirrorKey> =
-                    target.map(|(id, ip)| (id, ip, panel_name.lock().unwrap().clone()));
+                let panel = panel_name.lock().unwrap().clone();
+                let (remote_target, cross_target) = {
+                    let inner = ctx.lock().unwrap();
+                    (inner.remote_target.clone(), inner.cross_domain_remote_target.clone())
+                };
+                let wanted = match (remote_target, cross_target) {
+                    (Some((id, ip)), _) => Wanted::Http { id, ip, panel },
+                    (None, Some((domain, target_id))) => Wanted::Cross { domain, target_id, panel },
+                    (None, None) => Wanted::None,
+                };
+
                 if wanted != current {
                     if let Some(mut old) = child.take() {
                         let _ = old.kill();
                         let _ = old.wait();
                     }
                     *buffer.lock().unwrap() = None;
-                    child = wanted.as_ref().and_then(|(_, ip, name)| spawn_stream(ip, name, buffer.clone()));
+                    child = match &wanted {
+                        Wanted::Http { ip, panel, .. } => spawn_stream(ip, panel, buffer.clone()),
+                        Wanted::Cross { .. } | Wanted::None => None,
+                    };
                     current = wanted;
                 }
+
+                // 跨 domain 沒有持續訂閱的長連線，每一輪都要重新查一次；请求
+                // 本身可能要等到 `send_cross_domain_request` 的逾時上限
+                // （MQTT 直發 5 秒／經自己 server 中繼最多 10 秒），失敗/逾時
+                // 就維持畫面上一輪的內容，不要讓它整個清空閃爍，等下一輪再試。
+                if let Wanted::Cross { domain, target_id, panel } = &current {
+                    let ask = CrossDomainAsk::Panel { target_id: target_id.clone(), panel_name: panel.clone() };
+                    if let Ok(RemoteReply::Panel { text, .. }) = send_cross_domain_request(&ctx, domain, ask) {
+                        *buffer.lock().unwrap() = Some(text.unwrap_or_default());
+                    }
+                }
+
                 thread::sleep(POLL_INTERVAL);
             }
         });
@@ -95,9 +133,21 @@ impl RemoteOutputPlugin {
         Ok(())
     }
 
+    /// `render`/`panel_text` 顯示用的「目前連線目標」簡短描述，同網域顯示 id，
+    /// 跨 domain 顯示 `<domain>/<id>`。
+    fn target_label(&self) -> Option<String> {
+        let inner = self.ctx.lock().unwrap();
+        if let Some((id, _ip)) = &inner.remote_target {
+            return Some(id.clone());
+        }
+        if let Some((domain, target_id)) = &inner.cross_domain_remote_target {
+            return Some(format!("{domain}/{target_id}"));
+        }
+        None
+    }
+
     fn render(&self) -> String {
-        let target = self.ctx.lock().unwrap().remote_target.clone();
-        let Some((id, _ip)) = target else {
+        let Some(id) = self.target_label() else {
             return "(目前沒有連線，先用 remote plugin 的 connect <id> 連線)".to_string();
         };
         let panel_name = self.panel_name.lock().unwrap().clone();

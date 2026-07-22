@@ -13,9 +13,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
-use crate::plugin::{merged_global_view, DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
+use crate::plugin::{merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
 use crate::plugins::{DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
-use crate::shell::{default_shell_program, lock_shell, Shell};
+use crate::shell::{default_shell_program, lock_shell, send_cross_domain_request, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
 
@@ -84,6 +84,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/device/register", web::post().to(device_register))
             .route("/api/device/list", web::get().to(device_list))
             .route("/api/global/list", web::get().to(global_list))
+            .route("/api/remote/cross-relay", web::post().to(remote_cross_relay))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -121,6 +122,36 @@ async fn device_list(ctx: web::Data<SharedContext>) -> impl Responder {
 async fn global_list(ctx: web::Data<SharedContext>) -> impl Responder {
     let items = merged_global_view(&ctx.lock().unwrap());
     HttpResponse::Ok().json(items)
+}
+
+#[derive(Deserialize)]
+struct CrossRelayRequest {
+    domain: String,
+    ask: CrossDomainAsk,
+}
+
+/// `POST /api/remote/cross-relay`：同網域內、client 角色的機器（`system` 沒
+/// 設成 server，沒有自己連 MQTT）發起跨 domain remote 時，打這個給自己的
+/// `server <ip>` 中繼——實際加密/發布到 MQTT 的邏輯完全共用
+/// `shell::send_cross_domain_request`（見該函式的說明），這裡只是它對外的
+/// HTTP 入口。限定呼叫這個端點的機器自己必須真的是 server：不然
+/// `send_cross_domain_request` 判斷「不是 server」又會想去中繼給*它自己*設定
+/// 的 `server_addr`，變成沒有意義的一直往下轉——這裡直接擋掉，只允許中繼
+/// 這一跳，不是無限鏈。
+async fn remote_cross_relay(body: web::Json<CrossRelayRequest>, ctx: web::Data<SharedContext>) -> impl Responder {
+    let is_server = ctx.lock().unwrap().is_server;
+    if !is_server {
+        return HttpResponse::BadRequest().body("這台機器不是 system server，沒辦法中繼跨 domain 請求");
+    }
+    let CrossRelayRequest { domain, ask } = body.into_inner();
+    let ctx = ctx.get_ref().clone();
+    let result = tokio::task::spawn_blocking(move || send_cross_domain_request(&ctx, &domain, ask))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("內部錯誤")));
+    match result {
+        Ok(reply) => HttpResponse::Ok().json(reply),
+        Err(err) => HttpResponse::InternalServerError().body(format!("{err:#}")),
+    }
 }
 
 /// 每 `TICK` 算一次每個 panel 目前該顯示的文字，跟快取裡上一次的比對，只有變了

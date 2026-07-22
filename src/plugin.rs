@@ -1,8 +1,10 @@
 use std::collections::HashMap;
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use anyhow::Result;
+use rumqttc::Client;
 use serde::{Deserialize, Serialize};
 
 use crate::output::OutputBuffer;
@@ -73,6 +75,64 @@ pub fn global_registry_key(domain: &str, id: &str) -> String {
     format!("{domain}/{id}")
 }
 
+/// `shell::send_cross_domain_request` 要送出的內容，不含 `request_id`/
+/// `source_domain`——這兩個要等真正發布出去那一刻才由該函式填上（見它的
+/// 說明），呼叫端（`shell.rs`/`plugins::remote_output`）不用、也不應該自己
+/// 決定這兩個值。同時也是 `web.rs` 的 `/api/remote/cross-relay` 端點收 client
+/// 中繼請求時的 body 格式。
+#[derive(Clone, Serialize, Deserialize)]
+pub enum CrossDomainAsk {
+    Exec { target_id: String, line: String },
+    Panel { target_id: String, panel_name: String },
+}
+
+/// 跨 domain remote 的請求——透過 `global` plugin 既有的 MQTT session 加密
+/// 發布到 `<bridge-id>/<target-domain>/remote/request`（見 `crypto::seal`/
+/// `open`，這裡的型別是加密前/解密後的內容，不是 wire bytes 本身）。收到的
+/// 那一方（`target_domain` 的 server）查自己的 `ctx.devices[target_id]` 找到
+/// 對應 ip 之後，`Exec` 轉呼叫既有的 `shell::remote_exec`、`Panel` 則是查一次
+/// 那台裝置目前某個 panel 的內容，結果包成 `RemoteReply` 加密回覆到
+/// `<bridge-id>/<source_domain>/remote/reply`。
+///
+/// `request_id` 是發起端產生的關聯 id（不需要密碼學等級的隨機性，只要在
+/// 「這個 process 目前還沒處理完的請求」裡不重複即可），讓 `RemoteReply` 送
+/// 回來的時候，發起端能配對到當初是哪一個呼叫在等——同一時間可能有好幾個
+/// 跨 domain 請求在飛（例如 `remote` 的指令轉發跟 `remote-output` 的輪詢同時
+/// 進行），不能只憑 topic 判斷。
+#[derive(Clone, Serialize, Deserialize)]
+pub enum RemoteRequest {
+    Exec { request_id: String, source_domain: String, target_id: String, line: String },
+    Panel { request_id: String, source_domain: String, target_id: String, panel_name: String },
+}
+
+impl RemoteRequest {
+    pub fn source_domain(&self) -> &str {
+        match self {
+            RemoteRequest::Exec { source_domain, .. } | RemoteRequest::Panel { source_domain, .. } => source_domain,
+        }
+    }
+}
+
+/// `RemoteRequest` 的回覆。`Error` 涵蓋所有處理失敗的情況（`target_id` 在
+/// 目標 domain 裡查不到、轉發本身失敗……），讓發起端能看到明確的錯誤訊息，
+/// 而不是讓請求默默逾時、搞不清楚是網路問題還是目標真的不存在。
+#[derive(Clone, Serialize, Deserialize)]
+pub enum RemoteReply {
+    Exec { request_id: String, prompt: String, error: Option<String> },
+    Panel { request_id: String, text: Option<String> },
+    Error { request_id: String, message: String },
+}
+
+impl RemoteReply {
+    pub fn request_id(&self) -> &str {
+        match self {
+            RemoteReply::Exec { request_id, .. }
+            | RemoteReply::Panel { request_id, .. }
+            | RemoteReply::Error { request_id, .. } => request_id,
+        }
+    }
+}
+
 /// 各 plugin 之後要共用的資源放這裡。
 #[derive(Default)]
 pub struct ContextInner {
@@ -102,6 +162,23 @@ pub struct ContextInner {
     /// （而不是 `RemotePlugin` 私有欄位）是因為 `RemoteOutputPlugin` 的背景執行緒
     /// 也需要知道「現在該對誰開 SSE 串流」，兩個 plugin 都要碰得到。
     pub remote_target: Option<(String, String)>,
+    /// `remote` plugin 的 `connect <domain>/<id>` 設定的目前跨 domain 連線目標
+    /// `(domain, id)`，跟 `remote_target`（同網域用）並列、互斥——`Mode::Remote`
+    /// 連線時只會設定其中一個。`RemoteOutputPlugin` 兩個都檢查，決定要用既有
+    /// 的 SSE 訂閱、還是輪詢式的加密請求/回應（見 `plugins::remote_output`）。
+    pub cross_domain_remote_target: Option<(String, String)>,
+    /// 目前活著的 MQTT client 跟它用的 bridge-id（`plugins::global::run_mqtt_session`
+    /// 連上時設定、session 結束前清成 `None`）。兩者綁在同一個 `Option` 裡一起
+    /// 設定/清除，避免各自存一份、讀取時兩邊剛好不同步（例如 client 已經是新的
+    /// 一輪連線、bridge-id 還是舊的）。`shell.rs`/`web.rs` 要發跨 domain請求時
+    /// 借用這個直接 publish（topic 需要 bridge-id 組），不用自己另外開一條
+    /// MQTT 連線——本機同一時間只需要（也只應該有）一條 MQTT 連線。
+    pub mqtt_client: Arc<Mutex<Option<(String, Client)>>>,
+    /// 跨 domain 請求的關聯表：`request_id -> 一次性 channel`。發出請求的一方
+    /// （`shell.rs`/`web.rs`）先在這裡登記一個 channel 再 publish，`global.rs`
+    /// 的 MQTT session 收到對應的 `RemoteReply` 時查表把解密後的內容送過去；
+    /// 找不到表示呼叫端已經逾時放棄，直接丟棄即可。
+    pub cross_domain_pending: Arc<Mutex<HashMap<String, mpsc::Sender<RemoteReply>>>>,
 }
 
 /// `global` plugin 的 panel/`list` 指令跟 `web::global_list` 共用的內容：本機

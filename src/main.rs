@@ -1,3 +1,4 @@
+mod crypto;
 mod gui;
 mod output;
 mod plugin;

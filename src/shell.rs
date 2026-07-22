@@ -3,16 +3,20 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use rumqttc::{Client, QoS};
 use tungstenite::{Message, WebSocket};
 
+use crate::crypto;
 use crate::output::OutputBuffer;
-use crate::plugin::{Plugin, SharedContext};
+use crate::plugin::{CrossDomainAsk, Plugin, RemoteReply, RemoteRequest, SharedContext};
+use crate::sysinfo;
 
 /// 現在終端機（CLI/GUI）跟背景的 web server（見 `web::spawn`）共用同一個
 /// `Arc<Mutex<Shell>>`，如果任何一個執行緒在持有這把鎖的時候 panic，鎖會被標記
@@ -72,19 +76,41 @@ pub enum Mode {
     Remote(RemoteSession),
 }
 
+/// `connect` 連線的目標：同網域可以直接用 ip 打既有的 HTTP `/api/exec`
+/// （`Http`）；跨 domain 沒有直接可達的 ip，要透過 `global` plugin 的 MQTT
+/// session 加密中繼（`CrossDomain`，見 `send_cross_domain_request`）。`shell`
+/// 指令（借一整個終端機給遠端的 host shell，見 `run_remote_shell`）只有
+/// `Http` 這邊有意義——跨 domain 那端沒有 WebSocket 可以直接連，`execute_remote_line`
+/// 攔截 `shell` 時會依這個回報錯誤。
+#[derive(Clone)]
+enum RemoteTarget {
+    Http { ip: String },
+    CrossDomain { domain: String, target_id: String },
+}
+
+impl RemoteTarget {
+    /// `remote_help_text` 顯示用的簡短描述。
+    fn display(&self) -> String {
+        match self {
+            RemoteTarget::Http { ip } => ip.clone(),
+            RemoteTarget::CrossDomain { domain, .. } => format!("跨 domain: {domain}"),
+        }
+    }
+}
+
 /// `Mode::Remote` 底下的連線狀態。`remote_prompt` 是目前已知的遠端 prompt 字串
 /// （例如 `"cng5> "`、`"cng5(wol)> "`），每次轉發一行、拿到遠端回應後更新，本機
 /// 的 `Shell::prompt` 拿它組成 `"<id>::<remote_prompt>"`，感覺像真的在遠端那台
-/// 機器前面打字。用 `Arc<Mutex<_>>` 而不是普通欄位，是因為實際轉發（`remote_exec`）
-/// 透過 `curl` 打 HTTP、最壞情況要等到 `--max-time` 的上限，不能卡在
-/// `execute_line` 裡——那是在持有共用的 `Shell` 鎖的情況下呼叫的，卡住的話 GUI
-/// 重繪、web 的其他請求全部都會跟著卡住等鎖。轉發改成丟進 `sender` 這個佇列，
-/// 背景的 `spawn_remote_worker` 執行緒依序（一次一個，不會並行送出多個請求打亂
-/// 順序）真正呼叫 `remote_exec`，完成後直接更新這個 `Arc`，不需要重新拿
-/// `Shell` 自己的鎖。
+/// 機器前面打字。用 `Arc<Mutex<_>>` 而不是普通欄位，是因為實際轉發（`remote_exec`
+/// 或跨 domain 的 `send_cross_domain_request`）可能要等到好幾秒的逾時上限，
+/// 不能卡在 `execute_line` 裡——那是在持有共用的 `Shell` 鎖的情況下呼叫的，
+/// 卡住的話 GUI 重繪、web 的其他請求全部都會跟著卡住等鎖。轉發改成丟進
+/// `sender` 這個佇列，背景的 `spawn_remote_worker` 執行緒依序（一次一個，
+/// 不會並行送出多個請求打亂順序）真正處理，完成後直接更新這個 `Arc`，不需要
+/// 重新拿 `Shell` 自己的鎖。
 pub struct RemoteSession {
     pub id: String,
-    pub ip: String,
+    target: RemoteTarget,
     remote_prompt: Arc<Mutex<String>>,
     sender: mpsc::Sender<String>,
 }
@@ -103,24 +129,41 @@ impl RemoteSession {
 /// `connect` 呼叫這個開一個背景執行緒，專門負責這個連線的所有網路呼叫：
 /// 1. 一開始先查一次遠端目前的 prompt（可能不是 root，例如上次連線沒有乾淨地
 ///    離開），更新 `remote_prompt`——這一步以前是在 `connect` 當下同步做的，
-///    會卡住 `Shell` 的鎖，現在搬進背景執行緒，`connect` 本身立刻回傳。
+///    會卡住 `Shell` 的鎖，現在搬進背景執行緒，`connect` 本身立刻回傳。跨
+///    domain 沒有這種查詢方式（沒有直接可達的 ip 打 `/api/prompt`），先假設
+///    在 root，之後跟同網域一樣靠每次轉發的回應更新。
 /// 2. 依序處理 `receiver` 收到的每一行（`execute_remote_line` 只是 `send`
-///    進來，不等結果），呼叫 `remote_exec` 轉發、更新 `remote_prompt`／把
-///    錯誤訊息 push 進 `output`。
+///    進來，不等結果），依 `target` 是 `Http` 還是 `CrossDomain` 轉發、更新
+///    `remote_prompt`／把錯誤訊息 push 進 `output`。
 /// 3. `sender`（`RemoteSession` 那一份）被丟掉（斷線、`Mode` 換掉）時，
 ///    `receiver` 的疊代會自然結束，這個執行緒跟著結束，不需要額外的收尾訊號。
 fn spawn_remote_worker(
-    ip: String,
+    target: RemoteTarget,
     receiver: mpsc::Receiver<String>,
     remote_prompt: Arc<Mutex<String>>,
     output: Arc<OutputBuffer>,
+    ctx: SharedContext,
 ) {
     thread::spawn(move || {
-        if let Some(prompt) = fetch_remote_prompt(&ip) {
+        if let RemoteTarget::Http { ip } = &target
+            && let Some(prompt) = fetch_remote_prompt(ip)
+        {
             *remote_prompt.lock().unwrap() = prompt;
         }
         for line in receiver {
-            match remote_exec(&ip, &line) {
+            let result = match &target {
+                RemoteTarget::Http { ip } => remote_exec(ip, &line),
+                RemoteTarget::CrossDomain { domain, target_id } => {
+                    let ask = CrossDomainAsk::Exec { target_id: target_id.clone(), line: line.clone() };
+                    match send_cross_domain_request(&ctx, domain, ask) {
+                        Ok(RemoteReply::Exec { prompt, error, .. }) => Ok((prompt, error)),
+                        Ok(RemoteReply::Error { message, .. }) => Err(anyhow::anyhow!(message)),
+                        Ok(_) => Err(anyhow::anyhow!("收到不符預期的回覆型別")),
+                        Err(err) => Err(err),
+                    }
+                }
+            };
+            match result {
                 Ok((prompt, error)) => {
                     *remote_prompt.lock().unwrap() = prompt;
                     if let Some(msg) = error {
@@ -165,8 +208,10 @@ fn fetch_remote_prompt(ip: &str) -> Option<String> {
 /// 把 `line` POST 給 `ip` 這台機器既有的 `/api/exec`（web UI 輸入框用的那個
 /// 端點），回傳 `(遠端執行完的新 prompt, 錯誤訊息)`。跟 `global.rs` 的
 /// `pull_global_from_server` 一樣透過 `curl` 子行程打 HTTP，不額外引入 HTTP
-/// client crate。
-fn remote_exec(ip: &str, line: &str) -> Result<(String, Option<String>)> {
+/// client crate。`pub(crate)` 是因為 `global.rs` 的跨 domain remote 請求處理
+/// （收到 `RemoteRequest::Exec` 之後）也要呼叫這個轉發到同網域內實際的目標
+/// 裝置，不想為了同一件事重寫一份。
+pub(crate) fn remote_exec(ip: &str, line: &str) -> Result<(String, Option<String>)> {
     let body = serde_json::json!({ "line": line }).to_string();
     let url = format!("http://{ip}:9759/api/exec");
     let output = Command::new("curl")
@@ -190,6 +235,120 @@ fn remote_exec(ip: &str, line: &str) -> Result<(String, Option<String>)> {
     let body = String::from_utf8(output.stdout).context("回應不是合法的 UTF-8")?;
     let resp: RemoteExecResponse = serde_json::from_str(&body).context("回應格式不對")?;
     Ok((resp.prompt, resp.error))
+}
+
+/// 產生跨 domain 請求的關聯 id：不需要密碼學等級的隨機性，只要在「這個
+/// process 目前還沒處理完的請求」裡不重複即可（見 `plugin::RemoteRequest`
+/// 的說明），用 hostname + pid + 行程內遞增計數器組出來就夠。
+fn new_request_id() -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}-{}-{n}", sysinfo::hostname(), std::process::id())
+}
+
+/// 跨 domain remote 的核心送出邏輯，`remote` 指令轉發（`spawn_remote_worker`
+/// 的 `CrossDomain` 分支）跟 `remote-output` 的跨 domain 輪詢（見
+/// `plugins::remote_output`）共用同一份：
+/// - 本機本身是 server 且 MQTT 已連上（`ctx.mqtt_client` 有值）：直接呼叫
+///   `send_via_mqtt` 把請求加密發布出去。
+/// - 其餘情況（不是 server，或是 server 但 MQTT 還沒連上）：改成呼叫自己
+///   `system` 的 `server <ip>`（`ctx.server_addr`）新增的
+///   `/api/remote/cross-relay` 端點，把同一份 `ask` 交給它代為送出——那台
+///   機器收到之後會再呼叫這同一個函式（這次換它符合「是 server 且 MQTT 已
+///   連上」），實際做事的邏輯只有一份，不因為是「直接發」還是「中繼」而各自
+///   重寫一次。只有離開這個 domain、上公開 broker 那一段才需要 AEAD 加密，
+///   這裡到自己 server 之間走既有同網域信任範圍的明文 HTTP，跟 `remote_exec`
+///   是一樣的做法。
+pub(crate) fn send_cross_domain_request(ctx: &SharedContext, target_domain: &str, ask: CrossDomainAsk) -> Result<RemoteReply> {
+    let (is_server, mqtt_client, server_addr) = {
+        let inner = ctx.lock().unwrap();
+        (inner.is_server, inner.mqtt_client.clone(), inner.server_addr.clone())
+    };
+    if is_server {
+        let (bridge_id, client) = mqtt_client
+            .lock()
+            .unwrap()
+            .clone()
+            .context("目前沒有連上 MQTT（跨 domain remote 需要 global 的 bridge 有設定且連線成功）")?;
+        send_via_mqtt(ctx, &bridge_id, &client, target_domain, ask)
+    } else {
+        let addr = server_addr.context("跨 domain remote 需要先用 system 的 server <ip> 設定要中繼的伺服器")?;
+        send_via_relay(&addr, target_domain, ask)
+    }
+}
+
+/// 直接把 `ask` 包成 `RemoteRequest`（`request_id`/`source_domain` 在這裡才
+/// 填上——`source_domain` 一定要是「真正發布出去那一刻」這台機器自己的
+/// `domain_name`，不能讓呼叫端自己填，中繼過來的請求才會用中繼那台機器的
+/// domain，而不是原始發起端的），加密發布到 `<bridge-id>/<target-domain>/remote/request`，
+/// 在 `ctx.cross_domain_pending` 登記一個 channel，等 `global.rs` 的 MQTT
+/// session 收到對應的 `RemoteReply` 送過來（逾時 5 秒，跟 `remote_exec` 的
+/// `--max-time 5` 是同一個量級）。不管成功/失敗/逾時，最後都要把登記的
+/// channel 從表裡清掉，不然逾時放棄的請求會一直留著佔位置。
+fn send_via_mqtt(
+    ctx: &SharedContext,
+    bridge_id: &str,
+    client: &Client,
+    target_domain: &str,
+    ask: CrossDomainAsk,
+) -> Result<RemoteReply> {
+    let source_domain = ctx
+        .lock()
+        .unwrap()
+        .domain_name
+        .clone()
+        .context("跨 domain remote 需要先用 global 的 domain <name> 設定自己的 domain 名稱")?;
+    let request_id = new_request_id();
+    let request = match ask {
+        CrossDomainAsk::Exec { target_id, line } => {
+            RemoteRequest::Exec { request_id: request_id.clone(), source_domain, target_id, line }
+        }
+        CrossDomainAsk::Panel { target_id, panel_name } => {
+            RemoteRequest::Panel { request_id: request_id.clone(), source_domain, target_id, panel_name }
+        }
+    };
+
+    let pending = ctx.lock().unwrap().cross_domain_pending.clone();
+    let (tx, rx) = mpsc::channel();
+    pending.lock().unwrap().insert(request_id.clone(), tx);
+
+    let result = (|| -> Result<RemoteReply> {
+        let sealed = crypto::seal(&request)?;
+        let topic = format!("{bridge_id}/{target_domain}/remote/request");
+        client.publish(topic, QoS::AtMostOnce, false, sealed).map_err(|err| anyhow::anyhow!("MQTT publish 失敗: {err}"))?;
+        rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("等待跨 domain 回覆逾時（5 秒）"))
+    })();
+
+    pending.lock().unwrap().remove(&request_id);
+    result
+}
+
+/// 中繼一次跨 domain 請求給 `addr`（自己的 system server）新增的
+/// `/api/remote/cross-relay` 端點。`--max-time` 抓 10 秒，比 `send_via_mqtt`
+/// 本身的 5 秒逾時再多一點餘裕，蓋掉這段 HTTP 呼叫本身的往返時間。
+fn send_via_relay(addr: &str, target_domain: &str, ask: CrossDomainAsk) -> Result<RemoteReply> {
+    let body = serde_json::json!({ "domain": target_domain, "ask": ask }).to_string();
+    let url = format!("http://{addr}:9759/api/remote/cross-relay");
+    let output = Command::new("curl")
+        .args([
+            "--silent",
+            "--max-time",
+            "10",
+            "-X",
+            "POST",
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body,
+            &url,
+        ])
+        .output()
+        .context("執行 curl 失敗")?;
+    if !output.status.success() {
+        bail!("連不上 {addr}:9759");
+    }
+    let body = String::from_utf8(output.stdout).context("回應不是合法的 UTF-8")?;
+    serde_json::from_str::<RemoteReply>(&body).context("回應格式不對")
 }
 
 /// `remote` 連線裡打 `shell`：不像其他指令轉發成一行文字給遠端執行，而是直接借用
@@ -593,24 +752,48 @@ impl Shell {
             // mode」，`Plugin::dispatch` 的簽名做不到這件事（只能回傳
             // `Result<()>`），所以不能讓 `remote` plugin 自己處理 `connect`。
             (Mode::InPlugin(name), "connect") if name == "remote" => {
-                let target = args.first().context("connect 需要接目標機器的 id")?;
-                let ip = self
-                    .ctx
-                    .lock()
-                    .unwrap()
-                    .devices
-                    .get(target)
-                    .map(|entry| entry.report.ip.clone())
-                    .with_context(|| format!("沒有這個裝置: {target}（用 device list 查詢目前看得到的機器）"))?;
+                let target = args.first().context("connect 需要接目標機器的 id，跨 domain 用 <domain>/<id>")?;
+                // 含 `/` 就當成跨 domain 的 `<domain>/<id>`，否則維持原本查
+                // 同網域 `ctx.devices` 的邏輯——這是刻意選的、向後相容的語法
+                // 擴充，`global_registry_key` 本來就是這個 `"<domain>/<id>"`
+                // 的格式，這裡沿用同一個約定。
+                let (id, remote_target) = if let Some((domain, device_id)) = target.split_once('/') {
+                    if !self.ctx.lock().unwrap().global.contains_key(target) {
+                        bail!("沒有這個跨 domain 裝置: {target}（用 global list 查詢目前看得到的裝置）");
+                    }
+                    (
+                        device_id.to_string(),
+                        RemoteTarget::CrossDomain { domain: domain.to_string(), target_id: device_id.to_string() },
+                    )
+                } else {
+                    let ip = self
+                        .ctx
+                        .lock()
+                        .unwrap()
+                        .devices
+                        .get(target)
+                        .map(|entry| entry.report.ip.clone())
+                        .with_context(|| format!("沒有這個裝置: {target}（用 device list 查詢目前看得到的機器）"))?;
+                    (target.clone(), RemoteTarget::Http { ip })
+                };
                 // 先假設遠端在 root，真正的初始 prompt 由 `spawn_remote_worker`
-                // 背景查詢、查到後更新——不在這裡同步等待（見 `RemoteSession`
-                // 的說明），`connect` 才能立刻回傳、不卡住共用的 `Shell` 鎖。
+                // 背景查詢、查到後更新（跨 domain 沒有這種查詢方式，見
+                // `spawn_remote_worker` 的說明）——不在這裡同步等待，`connect`
+                // 才能立刻回傳、不卡住共用的 `Shell` 鎖。
                 let remote_prompt = Arc::new(Mutex::new("cng5> ".to_string()));
                 let (sender, receiver) = mpsc::channel();
-                spawn_remote_worker(ip.clone(), receiver, remote_prompt.clone(), self.output.clone());
-                self.ctx.lock().unwrap().remote_target = Some((target.clone(), ip.clone()));
-                self.output.push(&format!("已連線到 {target} ({ip})\n"));
-                self.mode = Mode::Remote(RemoteSession { id: target.clone(), ip, remote_prompt, sender });
+                spawn_remote_worker(remote_target.clone(), receiver, remote_prompt.clone(), self.output.clone(), self.ctx.clone());
+                {
+                    let mut inner = self.ctx.lock().unwrap();
+                    match &remote_target {
+                        RemoteTarget::Http { ip } => inner.remote_target = Some((id.clone(), ip.clone())),
+                        RemoteTarget::CrossDomain { domain, target_id } => {
+                            inner.cross_domain_remote_target = Some((domain.clone(), target_id.clone()))
+                        }
+                    }
+                }
+                self.output.push(&format!("已連線到 {target}\n"));
+                self.mode = Mode::Remote(RemoteSession { id, target: remote_target, remote_prompt, sender });
             }
             // `..`：往上一層，這一層底下只有 root，跟 `exit`/`quit` 是同一件事。
             (Mode::InPlugin(_), "exit" | "quit" | "..") => self.mode = Mode::Root,
@@ -665,7 +848,11 @@ impl Shell {
         };
         let first_word = line.split_whitespace().next().unwrap_or("");
         if (first_word == "exit" || first_word == "quit") && session.at_root() {
-            self.ctx.lock().unwrap().remote_target = None;
+            {
+                let mut inner = self.ctx.lock().unwrap();
+                inner.remote_target = None;
+                inner.cross_domain_remote_target = None;
+            }
             self.mode = Mode::InPlugin("remote".to_string());
             self.output.push("已離線，回到 remote plugin\n");
             return Ok(());
@@ -673,9 +860,17 @@ impl Shell {
         // `shell`：本機攔截處理，不透過 `sender`/`remote_exec` 轉發成一行文字
         // 指令——那個管道對應的是遠端「自己的 Shell/Mode」，跟 `shell` 真正要做的
         // 事（借一整個終端機給遠端的 host shell 用）是兩回事，見
-        // `run_remote_shell` 的說明。
+        // `run_remote_shell` 的說明。跨 domain 連線沒有直接可達的 ip，這個
+        // WebSocket 接不上去，直接報錯而不是靜靜地失敗。
         if first_word == "shell" {
-            self.requested_remote_shell = Some(session.ip.clone());
+            match &session.target {
+                RemoteTarget::Http { ip } => {
+                    self.requested_remote_shell = Some(ip.clone());
+                }
+                RemoteTarget::CrossDomain { .. } => {
+                    self.output.push("跨 domain 連線不支援 shell（沒有直接可達的 ip 可以開 WebSocket）\n");
+                }
+            }
             return Ok(());
         }
         // 送不出去（worker 執行緒已經結束，理論上不會發生，`sender`/`receiver`
@@ -755,7 +950,8 @@ impl Shell {
              在遠端的 root 下 exit/quit 會離開這個連線、回到本機的 remote plugin；\n\
              其餘情況下 exit/quit/~/../... 都是在遠端那邊生效（跳回遠端自己的上一層），\n\
              不會離開這個連線。\n",
-            session.id, session.ip
+            session.id,
+            session.target.display()
         )
     }
 

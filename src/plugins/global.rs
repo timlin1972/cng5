@@ -8,9 +8,14 @@ use anyhow::{bail, Context, Result};
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 use unicode_width::UnicodeWidthStr;
 
+use crate::crypto;
 use crate::output::OutputBuffer;
-use crate::plugin::{global_registry_key, merged_global_view, DeviceReport, GlobalListItem, GlobalRegistryEntry, Plugin, SharedContext};
+use crate::plugin::{
+    global_registry_key, merged_global_view, DeviceReport, GlobalListItem, GlobalRegistryEntry, Plugin, RemoteReply,
+    RemoteRequest, SharedContext,
+};
 use crate::plugins::REPORT_INTERVAL;
+use crate::shell;
 use crate::sysinfo;
 use crate::web::PORT;
 
@@ -295,6 +300,16 @@ fn run_mqtt_session(bridge_id: String, ctx: SharedContext, bridge: Arc<Mutex<Opt
     if client.subscribe(&sub_topic, QoS::AtMostOnce).is_err() {
         return;
     }
+    // 跨 domain remote（見 `plugin.rs` 的 `RemoteRequest`/`RemoteReply`）額外
+    // 訂閱的兩個 topic：`request` 是別的 domain 發過來要轉給我們自己裝置執行的
+    // 請求，`reply` 是我們發出去的請求得到的回覆。跟 `device` 一樣訂 `+`
+    // 萬用字元收下所有 domain 的訊息，`handle_incoming_publish` 再依內容裡的
+    // `domain_name` 判斷是不是真的給我們的。
+    if client.subscribe(format!("{bridge_id}/+/remote/request"), QoS::AtMostOnce).is_err()
+        || client.subscribe(format!("{bridge_id}/+/remote/reply"), QoS::AtMostOnce).is_err()
+    {
+        return;
+    }
 
     let publisher_client = client.clone();
     let publisher_ctx = ctx.clone();
@@ -320,34 +335,136 @@ fn run_mqtt_session(bridge_id: String, ctx: SharedContext, bridge: Arc<Mutex<Opt
         let _ = publisher_client.publish(topic, QoS::AtMostOnce, false, payload);
     });
 
+    // 把 `mqtt_client` 這個共用欄位（`Arc<Mutex<Option<(String, Client)>>>`）
+    // 先拿出來，之後設定/清空都只鎖這個小 Mutex，不用每次都重新鎖一次整個 `ctx`。
+    let mqtt_client_slot = ctx.lock().unwrap().mqtt_client.clone();
     for notification in connection.iter() {
         match notification {
             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                 *connected.lock().unwrap() = true;
+                // 真的連上之後才把 client 交給共用狀態，讓 `shell.rs`/`web.rs`
+                // 需要發跨 domain 請求時能借用這個 client publish（連同
+                // bridge_id 一起存，組 topic 要用）——這樣同一時間只會有這一條
+                // MQTT 連線，不用自己另外開一條。
+                *mqtt_client_slot.lock().unwrap() = Some((bridge_id.clone(), client.clone()));
             }
             Ok(Event::Incoming(Packet::Publish(publish))) => {
-                handle_incoming_publish(&publish.topic, &publish.payload, &ctx);
+                handle_incoming_publish(&publish.topic, &publish.payload, &client, &ctx);
             }
             Ok(_) => {}
             Err(_) => break,
         }
     }
     *connected.lock().unwrap() = false;
+    // session 結束（不管什麼原因）就把共用的 client 清掉，不然 `shell.rs`/
+    // `web.rs` 會拿著一個已經斷線、發布也不會有效果的 client 去用。
+    *mqtt_client_slot.lock().unwrap() = None;
 }
 
-/// 收到一筆 MQTT 發布：topic 格式是 `<bridge-id>/<domain-name>/device`，取中間
-/// 那一段當 domain，payload 是這個 domain 目前的裝置清單（JSON 陣列）。格式不對
-/// （不是這個約定的 topic、payload 解不出來）就當作雜訊直接丟掉，不報錯——
-/// 公開 broker 上理論上不會有別人發，但沒有必要因為格式異常就讓整個 session 掛掉。
-fn handle_incoming_publish(topic: &str, payload: &[u8], ctx: &SharedContext) {
-    let mut parts = topic.splitn(3, '/');
-    let _bridge = parts.next();
-    let Some(domain) = parts.next() else { return };
+/// 收到一筆 MQTT 發布，依 topic 的形狀分流成三種：既有的裝置清單廣播、跨
+/// domain remote 的請求、跨 domain remote 的回覆。哪一種都比對不上（不是這
+/// 幾個約定的 topic 形狀）就當作雜訊直接丟掉，不報錯——公開 broker 上理論上
+/// 不會有別人發，但沒有必要因為格式異常就讓整個 session 掛掉。
+fn handle_incoming_publish(topic: &str, payload: &[u8], client: &Client, ctx: &SharedContext) {
+    let parts: Vec<&str> = topic.split('/').collect();
+    match parts.as_slice() {
+        [_bridge, domain, "device"] => handle_device_publish(domain, payload, ctx),
+        [bridge, domain, "remote", "request"] => handle_remote_request(bridge, domain, payload, client, ctx),
+        [_bridge, domain, "remote", "reply"] => handle_remote_reply(domain, payload, ctx),
+        _ => {}
+    }
+}
+
+/// topic 格式是 `<bridge-id>/<domain-name>/device`，`domain` 是發布者自己的
+/// domain，payload 是這個 domain 目前的裝置清單（JSON 陣列）。
+fn handle_device_publish(domain: &str, payload: &[u8], ctx: &SharedContext) {
     let Ok(reports) = serde_json::from_slice::<Vec<DeviceReport>>(payload) else { return };
     let mut inner = ctx.lock().unwrap();
     for report in reports {
         let key = global_registry_key(domain, &report.id);
         inner.global.insert(key, GlobalRegistryEntry { domain: domain.to_string(), report, last_seen: Instant::now() });
+    }
+}
+
+/// topic 格式是 `<bridge-id>/<domain>/remote/request`，這裡的 `domain` 是這則
+/// 請求「要給誰」，不是發起者的 domain（發起者的 domain 在解密後的
+/// `RemoteRequest::source_domain()` 裡，回覆要送到那裡）。因為訂閱時用的是
+/// `+` 萬用字元，會收到所有 domain 的請求，只有 `domain` 等於自己現在設定的
+/// `domain_name` 才需要處理，其餘（別人家的請求）直接忽略。
+fn handle_remote_request(bridge_id: &str, domain: &str, payload: &[u8], client: &Client, ctx: &SharedContext) {
+    let my_domain = ctx.lock().unwrap().domain_name.clone();
+    if my_domain.as_deref() != Some(domain) {
+        return;
+    }
+    let Ok(request) = crypto::open::<RemoteRequest>(payload) else { return };
+    let reply = build_remote_reply(&request, ctx);
+    let Ok(sealed) = crypto::seal(&reply) else { return };
+    let reply_topic = format!("{bridge_id}/{}/remote/reply", request.source_domain());
+    let _ = client.publish(reply_topic, QoS::AtMostOnce, false, sealed);
+}
+
+/// 實際處理一則跨 domain 請求：查自己的 `ctx.devices`（這是「自己這個
+/// domain 裡有哪些裝置」，不是 `ctx.global`）找 `target_id` 對應的 ip，找不到
+/// 就直接回錯誤，不用把「查不到」跟「轉發本身失敗」混在一起讓發起端猜。
+fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteReply {
+    match request {
+        RemoteRequest::Exec { request_id, target_id, line, .. } => {
+            let Some(ip) = target_ip(ctx, target_id) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("目標裝置不存在: {target_id}"),
+                };
+            };
+            match shell::remote_exec(&ip, line) {
+                Ok((prompt, error)) => RemoteReply::Exec { request_id: request_id.clone(), prompt, error },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
+        RemoteRequest::Panel { request_id, target_id, panel_name, .. } => {
+            let Some(ip) = target_ip(ctx, target_id) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("目標裝置不存在: {target_id}"),
+                };
+            };
+            RemoteReply::Panel { request_id: request_id.clone(), text: fetch_panel_text_once(&ip, panel_name) }
+        }
+    }
+}
+
+fn target_ip(ctx: &SharedContext, target_id: &str) -> Option<String> {
+    ctx.lock().unwrap().devices.get(target_id).map(|entry| entry.report.ip.clone())
+}
+
+/// 跟 `remote-output` 的即時鏡射不同，這裡只需要「現在這一刻」的內容一次性
+/// 讀一份，不是持續訂閱——沿用既有的 `/api/panel/{name}/stream` SSE 端點，
+/// 用短逾時的 `curl -N` 連上去，撈到第一個 `data:` frame（`web.rs` 的
+/// `panel_stream` 一訂閱就會先送一次目前快取的內容）就當結果，不用為了這個
+/// 一次性用途另外開一個新端點。逾時或格式不對都當作沒有內容（`None`）。
+fn fetch_panel_text_once(ip: &str, panel_name: &str) -> Option<String> {
+    let url = format!("http://{ip}:9759/api/panel/{panel_name}/stream");
+    let output = Command::new("curl").args(["--silent", "-N", "--max-time", "2", &url]).output().ok()?;
+    let body = String::from_utf8(output.stdout).ok()?;
+    let line = body.lines().find(|line| line.starts_with("data: "))?;
+    serde_json::from_str::<String>(&line["data: ".len()..]).ok()
+}
+
+/// topic 格式是 `<bridge-id>/<domain>/remote/reply`，`domain` 是這則回覆
+/// 「要給誰」（我們發起請求時用的 `source_domain`）。跟 `handle_remote_request`
+/// 一樣先過濾掉不是給自己的，再靠解密後的 `request_id` 到
+/// `ctx.cross_domain_pending` 查表，把結果送給正在等的呼叫端；查無此表（呼叫
+/// 端已經逾時放棄）就直接丟棄。
+fn handle_remote_reply(domain: &str, payload: &[u8], ctx: &SharedContext) {
+    let (my_domain, pending) = {
+        let inner = ctx.lock().unwrap();
+        (inner.domain_name.clone(), inner.cross_domain_pending.clone())
+    };
+    if my_domain.as_deref() != Some(domain) {
+        return;
+    }
+    let Ok(reply) = crypto::open::<RemoteReply>(payload) else { return };
+    if let Some(sender) = pending.lock().unwrap().remove(reply.request_id()) {
+        let _ = sender.send(reply);
     }
 }
 
