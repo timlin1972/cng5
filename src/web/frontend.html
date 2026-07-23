@@ -2423,7 +2423,7 @@
 
   fetch("/api/version")
     .then((r) => r.json())
-    .then((d) => { versionLabel.textContent = d.build; });
+    .then((d) => { versionLabel.textContent = `${d.version} (${d.build})`; });
 
   // 選單裡每一項的統一外形：圖示 + 名字，點下去開對應的 panel（跟以前下拉
   // 選單+「開啟 panel」按鈕、或 player/shell 專屬按鈕，最後都是呼叫同一個

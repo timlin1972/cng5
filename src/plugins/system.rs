@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 
 use crate::output::OutputBuffer;
-use crate::plugin::{DeviceEntry, DeviceListItem, DeviceReport, Plugin, SharedContext};
+use crate::plugin::{APP_VERSION, DeviceEntry, DeviceListItem, DeviceReport, Plugin, SharedContext};
 use crate::sysinfo;
 
 /// tailscale ip 多久重新查一次。過期後不是在呼叫端（`status`/`panel_text()`，
@@ -33,7 +33,7 @@ client/server 三種模式怎麼串起多台機器互相回報狀態（device pl
 
 範例：
   status                查這台機器目前的 id/ip/os/tailscale/mode/server/uptime
-  version               編譯時間版本號
+  version               版本號（寫死在原始碼裡）+ 編譯時間
   mode standalone       只回報自己（寫進本機的 device registry），不推播、
                         不拉別人的清單
   mode server           開放讓 client 推播進來，device list 看得到所有推播過
@@ -173,6 +173,7 @@ impl SystemPlugin {
             id: id.to_string(),
             ip,
             os: sysinfo::os().to_string(),
+            version: APP_VERSION.to_string(),
             tailscale: tailscale_ip.is_some(),
             mode: mode.as_str().to_string(),
             device_uptime_secs: sysinfo::device_uptime_secs(),
@@ -267,10 +268,11 @@ impl SystemPlugin {
         Ok(())
     }
 
-    /// `CNG5_BUILD_TIMESTAMP` 是 `build.rs` 在編譯當下算好塞進來的環境變數
-    /// （build date/time），不是執行當下的時間。
+    /// `version` 是寫死在原始碼裡的常數（`plugin::APP_VERSION`，要發新版本
+    /// 時改那裡），`build` 是 `CNG5_BUILD_TIMESTAMP`——`build.rs` 在編譯當下
+    /// 算好塞進來的環境變數（build date/time），不是執行當下的時間。
     fn version(&self, out: &OutputBuffer) -> Result<()> {
-        out.push(&format!("build: {}\n", env!("CNG5_BUILD_TIMESTAMP")));
+        out.push(&format!("version: {APP_VERSION}\nbuild: {}\n", env!("CNG5_BUILD_TIMESTAMP")));
         Ok(())
     }
 
@@ -340,7 +342,7 @@ impl Plugin for SystemPlugin {
 
     fn panel_text(&self) -> Option<String> {
         Some(format!(
-            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\nbuild: {}",
+            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\nversion: {}\nbuild: {}",
             self.id,
             self.ip(),
             sysinfo::os(),
@@ -349,6 +351,7 @@ impl Plugin for SystemPlugin {
             self.server_text(),
             sysinfo::format_uptime(sysinfo::device_uptime_secs()),
             sysinfo::format_uptime(sysinfo::app_uptime_secs()),
+            APP_VERSION,
             env!("CNG5_BUILD_TIMESTAMP")
         ))
     }

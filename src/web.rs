@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
-use crate::plugin::{merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, FileMeta, SharedContext};
+use crate::plugin::{
+    merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, FileMeta, SharedContext,
+    APP_VERSION,
+};
 use crate::plugins::{safe_file_path, ALLOWED_FOLDERS, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 
@@ -300,14 +303,16 @@ async fn api_plugins(hub: web::Data<Hub>) -> impl Responder {
 
 #[derive(Serialize)]
 struct VersionResponse {
+    version: &'static str,
     build: &'static str,
 }
 
-/// `GET /api/version`：這個 build 的編譯日期/時間（`build.rs` 塞進去的
-/// `CNG5_BUILD_TIMESTAMP`，跟 `system` plugin 的 `version` 指令/panel 是同一份），
-/// 給前端畫面最左上角顯示用。
+/// `GET /api/version`：版本號（`plugin::APP_VERSION`，寫死在原始碼裡）+ 這個
+/// build 的編譯日期/時間（`build.rs` 塞進去的 `CNG5_BUILD_TIMESTAMP`），跟
+/// `system` plugin 的 `version` 指令/panel 是同一份資料，給前端畫面最左上角
+/// 顯示用。
 async fn api_version() -> impl Responder {
-    HttpResponse::Ok().json(VersionResponse { build: env!("CNG5_BUILD_TIMESTAMP") })
+    HttpResponse::Ok().json(VersionResponse { version: APP_VERSION, build: env!("CNG5_BUILD_TIMESTAMP") })
 }
 
 #[derive(Serialize)]

@@ -9,6 +9,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::output::OutputBuffer;
 
+/// app 版本號，寫死在原始碼裡（不是從 `Cargo.toml`/git tag 自動帶，單純一個
+/// 常數）。之後要發新版本時，**只需要改這一行**：`system` plugin 的
+/// `version` 指令/panel、`DeviceReport`（因此 `device`/`global` 的清單也一
+/// 起）、`/api/version` 都是讀這裡，不用到處改。
+pub const APP_VERSION: &str = "1.0.0";
+
 /// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
 /// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
 /// 其他機器回報的，格式都一樣，這樣 `DevicePlugin` 顯示時不用區分來源。
@@ -23,6 +29,10 @@ pub struct DeviceReport {
     /// 不該讓還沒升級的裝置從清單上消失。
     #[serde(default = "default_os")]
     pub os: String,
+    /// 跟 `os` 同一套理由：舊版（還沒有 `version` 這個欄位的 build）傳過來的
+    /// JSON 缺這個 key 時，解析成 `"N/A"`，不會讓整筆資料解析失敗。
+    #[serde(default = "default_version")]
+    pub version: String,
     pub tailscale: bool,
     pub mode: String,
     pub device_uptime_secs: u64,
@@ -30,6 +40,10 @@ pub struct DeviceReport {
 }
 
 fn default_os() -> String {
+    "N/A".to_string()
+}
+
+fn default_version() -> String {
     "N/A".to_string()
 }
 
