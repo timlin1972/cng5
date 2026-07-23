@@ -196,7 +196,9 @@ impl GlobalPlugin {
         out.push(&format!("正在清除 broker 上的殘留: {topic}（背景執行，稍後用 status 查看結果）\n"));
 
         let status = self.clear_status.clone();
+        let ctx = self.ctx.clone();
         thread::spawn(move || {
+            ctx.lock().unwrap().log_activity("mqtt-out", format!("clear (publish empty retained) {topic}"));
             let result = clear_retained_topic(&topic);
             *status.lock().unwrap() = Some(match result {
                 Ok(()) => format!("成功清除 {topic}"),
@@ -334,7 +336,9 @@ fn run_mqtt_session(bridge_id: String, ctx: SharedContext, bridge: Arc<Mutex<Opt
         // 故意不用 retain，見檔案開頭 `MANUAL_TEXT` 的說明——不然一個 domain
         // 下線後，broker 上留著的最後一筆 retained 訊息會在別人重新訂閱時
         // 被重播，讓它看起來像剛剛才有資料一樣「詐屍」。
-        let _ = publisher_client.publish(topic, QoS::AtMostOnce, false, payload);
+        if publisher_client.publish(topic.clone(), QoS::AtMostOnce, false, payload).is_ok() {
+            publisher_ctx.lock().unwrap().log_activity("mqtt-out", format!("publish {topic}"));
+        }
     });
 
     // 把 `mqtt_client` 這個共用欄位（`Arc<Mutex<Option<(String, Client)>>>`）
@@ -368,6 +372,7 @@ fn run_mqtt_session(bridge_id: String, ctx: SharedContext, bridge: Arc<Mutex<Opt
 /// 幾個約定的 topic 形狀）就當作雜訊直接丟掉，不報錯——公開 broker 上理論上
 /// 不會有別人發，但沒有必要因為格式異常就讓整個 session 掛掉。
 fn handle_incoming_publish(topic: &str, payload: &[u8], client: &Client, ctx: &SharedContext) {
+    ctx.lock().unwrap().log_activity("mqtt-in", format!("recv {topic}"));
     let parts: Vec<&str> = topic.split('/').collect();
     match parts.as_slice() {
         [_bridge, domain, "device"] => handle_device_publish(domain, payload, ctx),
@@ -409,6 +414,7 @@ fn handle_remote_request(bridge_id: &str, domain: &str, payload: &[u8], client: 
 /// domain 裡有哪些裝置」，不是 `ctx.global`）找 `target_id` 對應的 ip，找不到
 /// 就直接回錯誤，不用把「查不到」跟「轉發本身失敗」混在一起讓發起端猜。
 fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteReply {
+    ctx.lock().unwrap().log_activity("http-out", format!("relay {} to target device", request_kind(request)));
     match request {
         RemoteRequest::Exec { request_id, target_id, line, .. } => {
             let Some(ip) = target_ip(ctx, target_id) else {
@@ -489,6 +495,16 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
         }
+    }
+}
+
+fn request_kind(request: &RemoteRequest) -> &'static str {
+    match request {
+        RemoteRequest::Exec { .. } => "Exec",
+        RemoteRequest::Panel { .. } => "Panel",
+        RemoteRequest::FileList { .. } => "FileList",
+        RemoteRequest::FilePull { .. } => "FilePull",
+        RemoteRequest::FilePush { .. } => "FilePush",
     }
 }
 
@@ -619,6 +635,7 @@ fn handle_remote_reply(domain: &str, payload: &[u8], ctx: &SharedContext) {
 /// 提早 return、不動本機現有的資料——只有真的成功拿到一份新清單才整批取代。
 fn pull_global_from_server(addr: &str, ctx: &SharedContext) {
     let url = format!("http://{addr}:{PORT}/api/global/list");
+    ctx.lock().unwrap().log_activity("http-out", format!("GET {url}"));
     let Ok(output) = Command::new("curl").args(["--silent", "--max-time", "5", &url]).output() else {
         return;
     };

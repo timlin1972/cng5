@@ -7,13 +7,14 @@ use anyhow::Result;
 use rumqttc::Client;
 use serde::{Deserialize, Serialize};
 
+use crate::activity::ActivityLog;
 use crate::output::OutputBuffer;
 
 /// app 版本號，寫死在原始碼裡（不是從 `Cargo.toml`/git tag 自動帶，單純一個
 /// 常數）。之後要發新版本時，**只需要改這一行**：`system` plugin 的
 /// `version` 指令/panel、`DeviceReport`（因此 `device`/`global` 的清單也一
 /// 起）、`/api/version` 都是讀這裡，不用到處改。
-pub const APP_VERSION: &str = "1.2.0";
+pub const APP_VERSION: &str = "1.3.0";
 
 /// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
 /// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
@@ -262,6 +263,17 @@ pub struct ContextInner {
     /// 的 MQTT session 收到對應的 `RemoteReply` 時查表把解密後的內容送過去；
     /// 找不到表示呼叫端已經逾時放棄，直接丟棄即可。
     pub cross_domain_pending: Arc<Mutex<HashMap<String, mpsc::Sender<RemoteReply>>>>,
+    /// 網路活動流水帳（mqtt/http/外部服務呼叫），給 `activities` plugin 顯示，
+    /// 見 `ContextInner::log_activity`、`src/activity.rs`。
+    pub activities: Arc<ActivityLog>,
+}
+
+impl ContextInner {
+    /// 記一筆網路活動。`kind` 用固定的幾種分類字串（`"mqtt-out"`/`"mqtt-in"`/
+    /// `"http-out"`/`"http-in"`/`"external"`），`detail` 是給人看的一行摘要。
+    pub fn log_activity(&self, kind: &'static str, detail: impl Into<String>) {
+        self.activities.push(kind, detail);
+    }
 }
 
 /// `global` plugin 的 panel/`list` 指令跟 `web::global_list` 共用的內容：本機

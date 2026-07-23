@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use actix_web::dev::Service;
 use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer, Responder};
 use actix_ws::Message;
 use async_stream::stream;
@@ -66,7 +67,12 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
     tokio::spawn(broadcast_ticker(shell.clone(), output.clone(), hub.clone(), names));
 
     HttpServer::new(move || {
+        let activity_ctx = ctx.clone();
         App::new()
+            .wrap_fn(move |req, srv| {
+                activity_ctx.lock().unwrap().log_activity("http-in", format!("{} {}", req.method(), req.path()));
+                srv.call(req)
+            })
             .app_data(web::Data::new(hub.clone()))
             .app_data(web::Data::new(shell.clone()))
             .app_data(web::Data::new(output.clone()))

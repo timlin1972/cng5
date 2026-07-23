@@ -24,7 +24,7 @@ const TAILSCALE_TTL: Duration = Duration::from_secs(10);
 /// device registry，mode 是 client 時額外推播給設定的 server、並拉一次完整
 /// 清單回來合併。`pub(crate)` 給 `DevicePlugin` 算 `ALIVE_TTL` 用，兩邊的
 /// 「多久算離線」需要跟這個回報間隔保持倍數關係，避免各自寫死不同步。
-pub(crate) const REPORT_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
@@ -43,7 +43,7 @@ client/server 三種模式怎麼串起多台機器互相回報狀態（device pl
   server <ip>           設定 client 模式要推播/拉清單的目標；不管目前是哪個
                         mode 都可以先設好，等切成 client 才會真的用到
 
-不管哪個 mode，這台機器自己的資訊都會固定每 5 秒（REPORT_INTERVAL）寫進本機的
+不管哪個 mode，這台機器自己的資訊都會固定每 REPORT_INTERVAL 秒寫進本機的
 device registry，所以 standalone 模式下 device list 也看得到自己這一列。
 ";
 
@@ -159,7 +159,9 @@ impl SystemPlugin {
             if current_mode == SystemMode::Client
                 && let Some(addr) = server_addr
             {
+                ctx.lock().unwrap().log_activity("http-out", format!("POST http://{addr}:9759/api/device/register"));
                 Self::push_report(&addr, &report);
+                ctx.lock().unwrap().log_activity("http-out", format!("GET http://{addr}:9759/api/device/list"));
                 Self::pull_peers(&addr, &ctx, &id);
             }
             thread::sleep(REPORT_INTERVAL);

@@ -367,7 +367,10 @@ fn run_push(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc
     // `run_pull` 開頭就先拿到完整清單是同一個理由，唯一差別是這裡查的是「對方
     // 已經有什麼」而不是「對方有什麼要拉」。
     let remote_files: Vec<FileMeta> = match target {
-        CopyTarget::Http { ip } => list_remote_files_http(ip, folder)?,
+        CopyTarget::Http { ip } => {
+            ctx.lock().unwrap().log_activity("http-out", format!("GET http://{ip}:{PORT}/api/files/{folder}"));
+            list_remote_files_http(ip, folder)?
+        }
         CopyTarget::CrossDomain { domain, target_id } => list_remote_files_mqtt(ctx, domain, target_id, folder)?,
     };
     for name in names {
@@ -381,6 +384,9 @@ fn run_push(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc
         }
         match target {
             CopyTarget::Http { ip } => {
+                ctx.lock()
+                    .unwrap()
+                    .log_activity("http-out", format!("POST http://{ip}:{PORT}/api/files/{folder}/{name}"));
                 push_file_http(ip, folder, &name, &path)?;
                 finish_current_file(status);
             }
@@ -396,7 +402,10 @@ fn run_push(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc
 fn run_pull(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc<Mutex<Option<TransferStatus>>>) -> Result<()> {
     fs::create_dir_all(folder).with_context(|| format!("建立資料夾失敗: {folder}"))?;
     let files: Vec<FileMeta> = match target {
-        CopyTarget::Http { ip } => list_remote_files_http(ip, folder)?,
+        CopyTarget::Http { ip } => {
+            ctx.lock().unwrap().log_activity("http-out", format!("GET http://{ip}:{PORT}/api/files/{folder}"));
+            list_remote_files_http(ip, folder)?
+        }
         CopyTarget::CrossDomain { domain, target_id } => list_remote_files_mqtt(ctx, domain, target_id, folder)?,
     };
     set_total(status, files.len());
@@ -410,6 +419,10 @@ fn run_pull(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc
         }
         match target {
             CopyTarget::Http { ip } => {
+                ctx.lock().unwrap().log_activity(
+                    "http-out",
+                    format!("GET http://{ip}:{PORT}/api/files/{folder}/{}", meta.name),
+                );
                 pull_file_http(ip, folder, &meta.name, &dest)?;
                 finish_current_file(status);
             }

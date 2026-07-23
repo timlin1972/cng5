@@ -186,6 +186,12 @@ impl RemoteTarget {
     }
 }
 
+/// `connect` 最多願意為了拿到正確的初始 prompt 等背景查詢多久（見
+/// `spawn_remote_worker` 的說明）——同網域在區網內通常幾十毫秒就回來，這個
+/// 上限只是避免遠端很慢/連不上時把 `connect`（因此共用的 `Shell` 鎖）卡住
+/// 太久，超過就放棄等待，退回「先假設 root」的舊行為。
+const INITIAL_PROMPT_WAIT: Duration = Duration::from_millis(300);
+
 /// `Mode::Remote` 底下的連線狀態。`remote_prompt` 是目前已知的遠端 prompt 字串
 /// （例如 `"cng5> "`、`"cng5(wol)> "`），每次轉發一行、拿到遠端回應後更新，本機
 /// 的 `Shell::prompt` 拿它組成 `"<id>::<remote_prompt>"`，感覺像真的在遠端那台
@@ -219,7 +225,11 @@ impl RemoteSession {
 ///    離開），更新 `remote_prompt`——這一步以前是在 `connect` 當下同步做的，
 ///    會卡住 `Shell` 的鎖，現在搬進背景執行緒，`connect` 本身立刻回傳。跨
 ///    domain 沒有這種查詢方式（沒有直接可達的 ip 打 `/api/prompt`），先假設
-///    在 root，之後跟同網域一樣靠每次轉發的回應更新。
+///    在 root，之後跟同網域一樣靠每次轉發的回應更新。查完（不管成不成功）都會
+///    往 `initial_prompt_ready` 送一個訊號，`connect` 短暫等一下這個訊號（見
+///    呼叫端），這樣同網域在區網內通常幾十毫秒就查得到的情況下，`connect`
+///    剛回傳、使用者還沒下第一個指令時看到的 prompt 就已經是對的，不用等到
+///    下了第一個指令、轉發回應回來才修正。
 /// 2. 依序處理 `receiver` 收到的每一行（`execute_remote_line` 只是 `send`
 ///    進來，不等結果），依 `target` 是 `Http` 還是 `CrossDomain` 轉發、更新
 ///    `remote_prompt`／把錯誤訊息 push 進 `output`。
@@ -231,16 +241,22 @@ fn spawn_remote_worker(
     remote_prompt: Arc<Mutex<String>>,
     output: Arc<OutputBuffer>,
     ctx: SharedContext,
+    initial_prompt_ready: mpsc::Sender<()>,
 ) {
     thread::spawn(move || {
-        if let RemoteTarget::Http { ip } = &target
-            && let Some(prompt) = fetch_remote_prompt(ip)
-        {
-            *remote_prompt.lock().unwrap() = prompt;
+        if let RemoteTarget::Http { ip } = &target {
+            ctx.lock().unwrap().log_activity("http-out", format!("GET http://{ip}:9759/api/prompt"));
+            if let Some(prompt) = fetch_remote_prompt(ip) {
+                *remote_prompt.lock().unwrap() = prompt;
+            }
         }
+        let _ = initial_prompt_ready.send(());
         for line in receiver {
             let result = match &target {
-                RemoteTarget::Http { ip } => remote_exec(ip, &line),
+                RemoteTarget::Http { ip } => {
+                    ctx.lock().unwrap().log_activity("http-out", format!("POST http://{ip}:9759/api/exec"));
+                    remote_exec(ip, &line)
+                }
                 RemoteTarget::CrossDomain { domain, target_id } => {
                     let ask = CrossDomainAsk::Exec { target_id: target_id.clone(), line: line.clone() };
                     match send_cross_domain_request(&ctx, domain, ask) {
@@ -358,9 +374,11 @@ pub(crate) fn send_cross_domain_request(ctx: &SharedContext, target_domain: &str
             .unwrap()
             .clone()
             .context("目前沒有連上 MQTT（跨 domain remote 需要 global 的 bridge 有設定且連線成功）")?;
+        ctx.lock().unwrap().log_activity("mqtt-out", format!("publish {bridge_id}/{target_domain}/remote/request"));
         send_via_mqtt(ctx, &bridge_id, &client, target_domain, ask)
     } else {
         let addr = server_addr.context("跨 domain remote 需要先用 system 的 server <ip> 設定要中繼的伺服器")?;
+        ctx.lock().unwrap().log_activity("http-out", format!("POST http://{addr}:9759/api/remote/cross-relay"));
         send_via_relay(&addr, target_domain, ask)
     }
 }
@@ -932,11 +950,25 @@ impl Shell {
                 };
                 // 先假設遠端在 root，真正的初始 prompt 由 `spawn_remote_worker`
                 // 背景查詢、查到後更新（跨 domain 沒有這種查詢方式，見
-                // `spawn_remote_worker` 的說明）——不在這裡同步等待，`connect`
-                // 才能立刻回傳、不卡住共用的 `Shell` 鎖。
+                // `spawn_remote_worker` 的說明）。這裡短暫等一下（上限
+                // `INITIAL_PROMPT_WAIT`）背景查詢的結果——同網域在區網內通常
+                // 幾十毫秒就會回來，等得到的話 `connect` 剛回傳時顯示的 prompt
+                // 就已經是對的；等不到（逾時、或跨 domain 本來就不用等）就直接
+                // 放棄繼續，退回原本「先假設 root」的行為，之後第一次轉發指令
+                // 的回應一樣會修正，不會讓 `connect` 卡住太久、影響共用的
+                // `Shell` 鎖。
                 let remote_prompt = Arc::new(Mutex::new("cng5> ".to_string()));
                 let (sender, receiver) = mpsc::channel();
-                spawn_remote_worker(remote_target.clone(), receiver, remote_prompt.clone(), self.output.clone(), self.ctx.clone());
+                let (ready_tx, ready_rx) = mpsc::channel();
+                spawn_remote_worker(
+                    remote_target.clone(),
+                    receiver,
+                    remote_prompt.clone(),
+                    self.output.clone(),
+                    self.ctx.clone(),
+                    ready_tx,
+                );
+                let _ = ready_rx.recv_timeout(INITIAL_PROMPT_WAIT);
                 {
                     let mut inner = self.ctx.lock().unwrap();
                     match &remote_target {

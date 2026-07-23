@@ -232,7 +232,9 @@ impl WeatherPlugin {
         let location = location.to_string();
         let cache = self.cache.clone();
         let pending = self.pending.clone();
+        let ctx = self.ctx.clone();
         thread::spawn(move || {
+            ctx.lock().unwrap().log_activity("external", format!("GET https://wttr.in/{}?format=j1", location.replace(' ', "+")));
             let report = Self::fetch(&location);
             cache.lock().unwrap().insert(location.clone(), CacheEntry { fetched_at: Instant::now(), report });
             pending.lock().unwrap().remove(&location);

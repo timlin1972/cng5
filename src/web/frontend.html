@@ -1785,12 +1785,28 @@
 
       function ensureAnalyser() {
         if (audioCtx) return;
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        // 實測確認：某些 Android 裝置（Redmi Pad 2 9.7" 實測遇到）第一次接上
+        // Web Audio API 之後，喇叭輸出會被錯誤地降混成只剩一個聲道，且回不去
+        // ——這個 `audioCtx` 只建一次，之後即使切回封面畫面也還是沿用同一個
+        // 已經接上 Web Audio 的音訊圖。單純把 `channelCountMode` 釘死成
+        // "explicit" 不夠（實測過），下面兩處才是實測有效的修正：
+        // 1. `latencyHint: "playback"`：換成跟一般 `<audio>` 元素播放比較
+        //    接近的輸出路徑，而不是 `AudioContext` 預設的低延遲路徑。
+        // 2. splitter/merger 硬拆併：見下方。
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
         const source = audioCtx.createMediaElementSource(player);
         analyser = audioCtx.createAnalyser();
         analyser.fftSize = 128;
+        // 把左右聲道拆開再合回去——比單純接 `analyser.connect(destination)`
+        // 更強硬地確保兩個聲道各自獨立傳遞，不给瀏覽器/驅動任何「可以合併
+        // 聲道」的機會。
+        const splitter = audioCtx.createChannelSplitter(2);
+        const merger = audioCtx.createChannelMerger(2);
         source.connect(analyser);
-        analyser.connect(audioCtx.destination);
+        analyser.connect(splitter);
+        splitter.connect(merger, 0, 0);
+        splitter.connect(merger, 1, 1);
+        merger.connect(audioCtx.destination);
         freqData = new Uint8Array(analyser.frequencyBinCount);
       }
 

@@ -1,3 +1,4 @@
+mod activity;
 mod crypto;
 mod gui;
 mod output;
@@ -26,8 +27,8 @@ use rustyline::{
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
 use plugins::{
-    DevicePlugin, FilesPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin, OutputPlugin,
-    QrPlugin, RemoteOutputPlugin, RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
+    ActivitiesPlugin, DevicePlugin, FilesPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin,
+    OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
 };
 use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
@@ -50,6 +51,10 @@ fn main() -> Result<()> {
 
     let factories: Vec<(&'static str, PluginFactory)> = vec![
         ("wol", Box::new(|ctx| Box::new(WolPlugin::new(ctx)) as Box<dyn Plugin>)),
+        (
+            "activities",
+            Box::new(|ctx| Box::new(ActivitiesPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
         (
             "device",
             Box::new(|ctx| Box::new(DevicePlugin::new(ctx)) as Box<dyn Plugin>),

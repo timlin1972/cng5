@@ -23,6 +23,34 @@ unsafe extern "system" {
     fn GetExitCodeProcess(hProcess: *mut std::os::raw::c_void, lpExitCode: *mut u32) -> i32;
 
     fn CloseHandle(hObject: *mut std::os::raw::c_void) -> i32;
+
+    /// `local_hms` 用：把一個 UTC `FILETIME` 轉成本地時區的 `FILETIME`
+    /// （`kernel32.dll`）。
+    fn FileTimeToLocalFileTime(lpFileTime: *const FileTimeRaw, lpLocalFileTime: *mut FileTimeRaw) -> i32;
+
+    /// `local_hms` 用：把 `FILETIME` 拆成年月日時分秒（`kernel32.dll`）。
+    fn FileTimeToSystemTime(lpFileTime: *const FileTimeRaw, lpSystemTime: *mut SystemTimeRaw) -> i32;
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct FileTimeRaw {
+    dw_low_date_time: u32,
+    dw_high_date_time: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct SystemTimeRaw {
+    w_year: u16,
+    w_month: u16,
+    w_day_of_week: u16,
+    w_day: u16,
+    w_hour: u16,
+    w_minute: u16,
+    w_second: u16,
+    w_milliseconds: u16,
 }
 
 #[cfg(not(windows))]
@@ -41,6 +69,30 @@ unsafe extern "C" {
 
     /// `is_foreground_tty` 用：查這個行程自己的 process group id。
     fn getpgrp() -> i32;
+
+    /// `local_hms` 用：把 unix 秒數轉成本地時區的年月日時分秒（libc）。只填
+    /// 我們需要的欄位（`tm_hour`/`tm_min`/`tm_sec`），但 `TmRaw` 完整宣告到
+    /// glibc/BSD 的 `tm_gmtoff`/`tm_zone` 擴充欄位——`localtime_r` 是照系統
+    /// 實際的 `struct tm` 大小寫入，如果我們宣告的型別比實際小，會寫出邊界
+    /// 覆蓋到不屬於這個 struct 的記憶體。
+    fn localtime_r(timep: *const i64, result: *mut TmRaw) -> *mut TmRaw;
+}
+
+#[cfg(not(windows))]
+#[repr(C)]
+#[derive(Default)]
+struct TmRaw {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const std::os::raw::c_char,
 }
 
 /// 這個程式行程真正啟動的時間點，第一次被讀到的當下算（`LazyLock` 保證只
@@ -65,6 +117,48 @@ pub fn format_uptime(secs: u64) -> String {
 /// 這個程式（行程）本身跑了多久，從 `PROCESS_START` 算起。
 pub fn app_uptime_secs() -> u64 {
     PROCESS_START.elapsed().as_secs()
+}
+
+/// 把 unix 秒數格式化成本地時區的 `hh:mm:ss`，給 `activities` plugin 顯示活動
+/// 紀錄的時間戳用——跟 `main::log_respawn` 故意用原始秒數不同（那是寫進 log
+/// 檔案事後查的，不在乎好不好讀），這裡是印在畫面上給人看的，需要看得懂的
+/// 時分秒。查本地時區用系統 API（Windows 的
+/// `FileTimeToLocalFileTime`/`FileTimeToSystemTime`，其他平台的
+/// `localtime_r`），不為了這個引入額外的日期時間 crate。查詢失敗（理論上
+/// 不會發生）就退回顯示 UTC，至少還是看得懂的 `hh:mm:ss`，不是原始秒數。
+#[cfg(windows)]
+pub fn local_hms(ts_secs: u64) -> String {
+    // FILETIME 是從 1601-01-01 起算的 100 奈秒間隔數，跟 unix epoch
+    // （1970-01-01）之間差 116444736000000000 個間隔，這是換算 FILETIME/unix
+    // 時間戳的標準常數。
+    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+    let ticks = ts_secs.saturating_mul(10_000_000).saturating_add(UNIX_EPOCH_AS_FILETIME);
+    let utc = FileTimeRaw { dw_low_date_time: (ticks & 0xFFFF_FFFF) as u32, dw_high_date_time: (ticks >> 32) as u32 };
+    let mut local = FileTimeRaw { dw_low_date_time: 0, dw_high_date_time: 0 };
+    let mut sys = SystemTimeRaw::default();
+    let ok = unsafe {
+        FileTimeToLocalFileTime(&utc, &mut local) != 0 && FileTimeToSystemTime(&local, &mut sys) != 0
+    };
+    if !ok {
+        return utc_hms_fallback(ts_secs);
+    }
+    format!("{:02}:{:02}:{:02}", sys.w_hour, sys.w_minute, sys.w_second)
+}
+
+#[cfg(not(windows))]
+pub fn local_hms(ts_secs: u64) -> String {
+    let ts = ts_secs as i64;
+    let mut tm = TmRaw::default();
+    let ok = unsafe { !localtime_r(&ts, &mut tm).is_null() };
+    if !ok {
+        return utc_hms_fallback(ts_secs);
+    }
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+}
+
+fn utc_hms_fallback(ts_secs: u64) -> String {
+    let secs_of_day = ts_secs % 86400;
+    format!("{:02}:{:02}:{:02}", secs_of_day / 3600, (secs_of_day % 3600) / 60, secs_of_day % 60)
 }
 
 /// 裝置（作業系統）開機多久了，跟程式本身跑了多久（`app_uptime_secs`）是兩
@@ -268,5 +362,33 @@ mod tests {
         // 挑一個幾乎不可能存在的超大 pid，確認查不到的情況回傳 false 而不是
         // panic（`OpenProcess`/`kill` 對不存在的 pid 都應該乾淨地失敗）。
         assert!(!pid_alive(u32::MAX - 1));
+    }
+
+    #[test]
+    fn local_hms_matches_system_clock() {
+        // 跟系統既有的 `date` 指令比對，而不是自己重算一次時區轉換邏輯
+        // （那樣測試只是在驗證「程式碼跟自己一致」，沒有測到真正的時區/FFI
+        // struct layout 對不對）。取兩次 `date` 之間的中間值當「現在」，容忍
+        // 呼叫之間的時間差；`hh:mm:ss` 用字串比較，跨分鐘/跨小時邊界時字串
+        // 前後可能差 1 秒不相等，重試幾次避免這種邊界情況造成偶發失敗。
+        fn now_via_date() -> (u64, String) {
+            let epoch = Command::new("date").arg("+%s").output().expect("date +%s");
+            let epoch: u64 = String::from_utf8_lossy(&epoch.stdout).trim().parse().expect("解析 date +%s 輸出");
+            let hms = Command::new("date").arg("+%H:%M:%S").output().expect("date +%H:%M:%S");
+            let hms = String::from_utf8_lossy(&hms.stdout).trim().to_string();
+            (epoch, hms)
+        }
+
+        for attempt in 0..5 {
+            let (epoch, expected_hms) = now_via_date();
+            let actual_hms = local_hms(epoch);
+            if actual_hms == expected_hms {
+                return;
+            }
+            if attempt == 4 {
+                panic!("local_hms({epoch}) = {actual_hms}，跟系統 date 指令回報的 {expected_hms} 對不起來");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
     }
 }

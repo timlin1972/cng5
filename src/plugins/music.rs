@@ -44,7 +44,6 @@ enum DownloadStatus {
 }
 
 pub struct MusicPlugin {
-    #[allow(dead_code)]
     ctx: SharedContext,
     /// 每個下載目標（YouTube 網址）目前的狀態，背景執行緒（`download` 開的）
     /// 抓完寫回這裡；`download`/`list`/`panel_text` 都只讀，不含任何耗時操作，
@@ -83,7 +82,9 @@ impl MusicPlugin {
 
         let target_owned = target.to_string();
         let downloads = self.downloads.clone();
+        let ctx = self.ctx.clone();
         thread::spawn(move || {
+            ctx.lock().unwrap().log_activity("external", format!("yt-dlp download {target_owned}"));
             let sub_langs = SUBTITLE_LANG_PRIORITY.join(",");
             let status = match Command::new("yt-dlp")
                 .args([
