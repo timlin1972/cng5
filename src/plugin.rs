@@ -75,15 +75,58 @@ pub fn global_registry_key(domain: &str, id: &str) -> String {
     format!("{domain}/{id}")
 }
 
+/// `plugins::files` 一個 chunk 送多少原始位元組（base64 編碼、包上 JSON/AEAD
+/// 之前）。跨 domain 檔案傳輸是一個 chunk 一次 MQTT 請求/回覆的往返（見
+/// `shell::send_cross_domain_request`），不是整個檔案塞進一則訊息——公開
+/// broker 對單則訊息大小有限制。
+///
+/// 這個限制不是憑空猜的：實測過 `broker.emqx.io`，直接發布不同大小的原始
+/// payload，10000 bytes 收得到，11000 bytes 以上完全收不到（既不是連線出錯、
+/// 也不是 publish() 呼叫本身失敗，就是悄悄不見了——broker 端直接丟棄，沒有
+/// 任何錯誤回報）。原本設 16 KiB（base64 編碼後膨脹到約 22 KiB，加密+JSON
+/// 包裝前）遠遠超過這個門檻，導致每個 `FilePull`/`FilePush` 回覆都被
+/// broker 悄悄丟掉，發起端只能眼睜睜等到逾時——這正是曾經發生過的實際 bug
+/// （跨 domain copy 永遠卡在逾時，不管把逾時時間調多長都一樣，因為根本沒有
+/// 回覆會抵達）。4 KiB 原始資料 base64 編碼後約 5.5 KiB，加上 JSON/AEAD 的
+/// 額外開銷，總共送上 broker 的還是遠低於實測的 10 KiB 門檻，留了接近一倍
+/// 的安全餘裕（避免這個未公開文件的限制之後又更嚴格，或不同時間/連線有些
+/// 微差異）。代價是大檔案要傳更多輪、速度更慢——使用者已經預期跨 domain
+/// 檔案傳輸「可能要切檔慢慢傳」，換取「真的傳得成」比「傳快一點」更重要。
+pub const FILE_CHUNK_SIZE: usize = 4 * 1024;
+
+/// 一個檔案的基本資訊，`FileList` 回覆裡每個檔案一筆，`plugins::files` 用來
+/// 算「這次 copy 總共幾個檔案」；也是 `GET /api/files/{folder}` 的 JSON 回應
+/// 形狀，同網域跟跨 domain 兩條路徑共用同一個型別。
+#[derive(Clone, Serialize, Deserialize)]
+pub struct FileMeta {
+    pub name: String,
+    pub size: u64,
+}
+
 /// `shell::send_cross_domain_request` 要送出的內容，不含 `request_id`/
 /// `source_domain`——這兩個要等真正發布出去那一刻才由該函式填上（見它的
-/// 說明），呼叫端（`shell.rs`/`plugins::remote_output`）不用、也不應該自己
-/// 決定這兩個值。同時也是 `web.rs` 的 `/api/remote/cross-relay` 端點收 client
-/// 中繼請求時的 body 格式。
+/// 說明），呼叫端（`shell.rs`/`plugins::remote_output`/`plugins::files`）不用、
+/// 也不應該自己決定這兩個值。同時也是 `web.rs` 的 `/api/remote/cross-relay`
+/// 端點收 client 中繼請求時的 body 格式。
+///
+/// `FileList`/`FilePull`/`FilePush` 是 `plugins::files` 的 `copy` 指令跨
+/// domain 時用的：`FileList` 查目標裝置某個資料夾有哪些檔案（順便拿到每個
+/// 檔案的大小，`plugins::files` 靠這個算「拉到 offset 有沒有超過檔案大小」，
+/// 不需要伺服器另外回報「這是不是最後一塊」），`FilePull` 跟目標要某個檔案
+/// 某個位移開始的一個 chunk（見 `FILE_CHUNK_SIZE`），`FilePush` 反過來把本機
+/// 的一個 chunk 送給目標寫入（是不是最後一塊發送端自己知道——讀本機檔案時
+/// 就知道總長度了，不需要告訴接收端，接收端只需要照 `offset` 寫入）。
+/// `folder` 收到那一端一定要驗證過在允許清單裡（見 `plugins::files::ALLOWED_FOLDERS`），
+/// 不能只因為請求通過了 AEAD 解密就信任內容——加密只保證「這是持有同一把
+/// key 的裝置送的」，不代表內容本身沒有問題（例如打錯字的資料夾名稱，或
+/// 未來版本間協定不一致）。
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CrossDomainAsk {
     Exec { target_id: String, line: String },
     Panel { target_id: String, panel_name: String },
+    FileList { target_id: String, folder: String },
+    FilePull { target_id: String, folder: String, name: String, offset: u64 },
+    FilePush { target_id: String, folder: String, name: String, offset: u64, data: String },
 }
 
 /// 跨 domain remote 的請求——透過 `global` plugin 既有的 MQTT session 加密
@@ -103,12 +146,19 @@ pub enum CrossDomainAsk {
 pub enum RemoteRequest {
     Exec { request_id: String, source_domain: String, target_id: String, line: String },
     Panel { request_id: String, source_domain: String, target_id: String, panel_name: String },
+    FileList { request_id: String, source_domain: String, target_id: String, folder: String },
+    FilePull { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64 },
+    FilePush { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64, data: String },
 }
 
 impl RemoteRequest {
     pub fn source_domain(&self) -> &str {
         match self {
-            RemoteRequest::Exec { source_domain, .. } | RemoteRequest::Panel { source_domain, .. } => source_domain,
+            RemoteRequest::Exec { source_domain, .. }
+            | RemoteRequest::Panel { source_domain, .. }
+            | RemoteRequest::FileList { source_domain, .. }
+            | RemoteRequest::FilePull { source_domain, .. }
+            | RemoteRequest::FilePush { source_domain, .. } => source_domain,
         }
     }
 }
@@ -121,6 +171,9 @@ pub enum RemoteReply {
     Exec { request_id: String, prompt: String, error: Option<String> },
     Panel { request_id: String, text: Option<String> },
     Error { request_id: String, message: String },
+    FileList { request_id: String, files: Vec<FileMeta> },
+    FileChunk { request_id: String, data: String },
+    FilePushAck { request_id: String },
 }
 
 impl RemoteReply {
@@ -128,7 +181,10 @@ impl RemoteReply {
         match self {
             RemoteReply::Exec { request_id, .. }
             | RemoteReply::Panel { request_id, .. }
-            | RemoteReply::Error { request_id, .. } => request_id,
+            | RemoteReply::Error { request_id, .. }
+            | RemoteReply::FileList { request_id, .. }
+            | RemoteReply::FileChunk { request_id, .. }
+            | RemoteReply::FilePushAck { request_id, .. } => request_id,
         }
     }
 }

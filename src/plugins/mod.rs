@@ -1,4 +1,5 @@
 mod device;
+mod files;
 mod gitrepo;
 mod global;
 mod music;
@@ -12,6 +13,8 @@ mod weather;
 mod wol;
 
 pub use device::DevicePlugin;
+pub(crate) use files::{safe_file_path, ALLOWED_FOLDERS};
+pub use files::FilesPlugin;
 pub use gitrepo::GitRepoPlugin;
 pub use global::GlobalPlugin;
 pub(crate) use music::{MUSIC_DIR, SUBTITLE_LANG_PRIORITY};

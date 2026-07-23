@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -13,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
 use crate::output::OutputBuffer;
-use crate::plugin::{merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, SharedContext};
-use crate::plugins::{DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
+use crate::plugin::{merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, FileMeta, SharedContext};
+use crate::plugins::{safe_file_path, ALLOWED_FOLDERS, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
@@ -85,6 +86,9 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/device/list", web::get().to(device_list))
             .route("/api/global/list", web::get().to(global_list))
             .route("/api/remote/cross-relay", web::post().to(remote_cross_relay))
+            .route("/api/files/{folder}", web::get().to(files_list))
+            .route("/api/files/{folder}/{name}", web::get().to(files_download))
+            .route("/api/files/{folder}/{name}", web::post().to(files_upload))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -151,6 +155,86 @@ async fn remote_cross_relay(body: web::Json<CrossRelayRequest>, ctx: web::Data<S
     match result {
         Ok(reply) => HttpResponse::Ok().json(reply),
         Err(err) => HttpResponse::InternalServerError().body(format!("{err:#}")),
+    }
+}
+
+/// `GET /api/files/{folder}`：`plugins::files` 的 `copy ... from <id>` 同網域
+/// 版本用這個查詢目標裝置某個資料夾裡有哪些檔案（連同大小，讓對方能靠已知的
+/// 檔案大小判斷拉到哪裡算拉完，不需要伺服器另外回報「這是不是最後一塊」）。
+/// `folder` 沒過白名單、或資料夾還不存在，都當作空清單，不報錯——跟
+/// `music_files` 判斷資料夾不存在時的容錯邏輯一致。
+async fn files_list(path: web::Path<String>) -> impl Responder {
+    let folder = path.into_inner();
+    if !ALLOWED_FOLDERS.contains(&folder.as_str()) {
+        return HttpResponse::BadRequest().finish();
+    }
+    let files: Vec<FileMeta> = std::fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let size = entry.metadata().ok()?.len();
+                    Some(FileMeta { name, size })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    HttpResponse::Ok().json(files)
+}
+
+/// `GET /api/files/{folder}/{name}`：下載一個檔案的原始位元組。用
+/// `actix_files::NamedFile` 是因為它會自動處理 `Range` 請求（跟
+/// `music_file_audio` 同樣的理由）——跨 domain 中繼（`global.rs` 的
+/// `fetch_file_chunk`）就是靠對這個端點送 `Range` 請求，一次只拿一個 chunk，
+/// 不用整個檔案讀進記憶體再自己切。
+async fn files_download(path: web::Path<(String, String)>, req: HttpRequest) -> HttpResponse {
+    let (folder, name) = path.into_inner();
+    let Some(file_path) = safe_file_path(&folder, &name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match actix_files::NamedFile::open(&file_path) {
+        Ok(file) => file.into_response(&req),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `POST /api/files/{folder}/{name}?offset=<n>`：把 request body 的原始位元組
+/// 寫進檔案的 `offset` 位置。`offset` 沒帶就當 0（同網域直接整檔上傳的簡單
+/// 情境，見 `plugins::files::push_file_http`——一次 POST、body 是整個檔案）；
+/// 跨 domain 中繼（`global.rs` 的 `push_file_chunk`）則是每個 chunk 各自帶自己
+/// 的 `offset`，靠這個組回原本的檔案，不需要另外一個「這是不是最後一塊」的
+/// 參數——`offset == 0` 那一次順便建立/清空檔案（同一個檔案的第一個 chunk
+/// 保證一定是 offset 0，因為 `plugins::files` 是照順序、等前一個 chunk 的
+/// 回應之後才送下一個），之後的 chunk 只要 seek 到對的位置寫入即可。
+#[derive(Deserialize)]
+struct FilesUploadQuery {
+    offset: Option<u64>,
+}
+
+async fn files_upload(
+    path: web::Path<(String, String)>,
+    query: web::Query<FilesUploadQuery>,
+    body: web::Bytes,
+) -> HttpResponse {
+    let (folder, name) = path.into_inner();
+    let Some(file_path) = safe_file_path(&folder, &name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    if std::fs::create_dir_all(&folder).is_err() {
+        return HttpResponse::InternalServerError().finish();
+    }
+    let offset = query.offset.unwrap_or(0);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new().write(true).create(true).truncate(offset == 0).open(&file_path)?;
+        file.seek(SeekFrom::Start(offset))?;
+        file.write_all(&body)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
 

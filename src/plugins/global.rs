@@ -5,16 +5,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use data_encoding::BASE64;
 use rumqttc::{Client, Event, MqttOptions, Packet, QoS};
 use unicode_width::UnicodeWidthStr;
 
 use crate::crypto;
 use crate::output::OutputBuffer;
 use crate::plugin::{
-    global_registry_key, merged_global_view, DeviceReport, GlobalListItem, GlobalRegistryEntry, Plugin, RemoteReply,
-    RemoteRequest, SharedContext,
+    global_registry_key, merged_global_view, DeviceReport, FileMeta, GlobalListItem, GlobalRegistryEntry, Plugin,
+    RemoteReply, RemoteRequest, SharedContext, FILE_CHUNK_SIZE,
 };
-use crate::plugins::REPORT_INTERVAL;
+use crate::plugins::{safe_file_path, ALLOWED_FOLDERS, REPORT_INTERVAL};
 use crate::shell;
 use crate::sysinfo;
 use crate::web::PORT;
@@ -429,11 +430,127 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
             };
             RemoteReply::Panel { request_id: request_id.clone(), text: fetch_panel_text_once(&ip, panel_name) }
         }
+        RemoteRequest::FileList { request_id, target_id, folder, .. } => {
+            let Some(ip) = target_ip(ctx, target_id) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("目標裝置不存在: {target_id}"),
+                };
+            };
+            if !ALLOWED_FOLDERS.contains(&folder.as_str()) {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不支援的資料夾: {folder}"),
+                };
+            }
+            match fetch_remote_file_list(&ip, folder) {
+                Ok(files) => RemoteReply::FileList { request_id: request_id.clone(), files },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
+        RemoteRequest::FilePull { request_id, target_id, folder, name, offset, .. } => {
+            let Some(ip) = target_ip(ctx, target_id) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("目標裝置不存在: {target_id}"),
+                };
+            };
+            if safe_file_path(folder, name).is_none() {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不支援的資料夾或檔名: {folder}/{name}"),
+                };
+            }
+            match fetch_file_chunk(&ip, folder, name, *offset) {
+                Ok(data) => RemoteReply::FileChunk { request_id: request_id.clone(), data },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
+        RemoteRequest::FilePush { request_id, target_id, folder, name, offset, data, .. } => {
+            let Some(ip) = target_ip(ctx, target_id) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("目標裝置不存在: {target_id}"),
+                };
+            };
+            if safe_file_path(folder, name).is_none() {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不支援的資料夾或檔名: {folder}/{name}"),
+                };
+            }
+            match push_file_chunk(&ip, folder, name, *offset, data) {
+                Ok(()) => RemoteReply::FilePushAck { request_id: request_id.clone() },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
     }
 }
 
 fn target_ip(ctx: &SharedContext, target_id: &str) -> Option<String> {
     ctx.lock().unwrap().devices.get(target_id).map(|entry| entry.report.ip.clone())
+}
+
+/// 中繼一次 `FileList` 請求：對 `target_id` 那台裝置既有的 `GET /api/files/{folder}`
+/// 端點查一次，跟 `fetch_panel_text_once` 一樣透過 `curl` 子行程打 HTTP。
+fn fetch_remote_file_list(ip: &str, folder: &str) -> Result<Vec<FileMeta>> {
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}");
+    let output = Command::new("curl")
+        .args(["--silent", "--fail", "--max-time", "10", &url])
+        .output()
+        .context("執行 curl 失敗")?;
+    if !output.status.success() {
+        bail!("查詢檔案清單失敗");
+    }
+    let body = String::from_utf8(output.stdout).context("回應不是合法的 UTF-8")?;
+    serde_json::from_str(&body).context("回應格式不對")
+}
+
+/// 中繼一次 `FilePull` 請求：對 `target_id` 那台裝置既有的
+/// `GET /api/files/{folder}/{name}` 端點送一個 `Range` 請求，只拿 `offset` 開始
+/// 的一個 chunk（見 `plugin::FILE_CHUNK_SIZE`），不用整個檔案讀進記憶體。
+/// `actix_files::NamedFile`（`web.rs` 那個端點的實作）本來就支援 `Range`，一個
+/// 超出檔案實際範圍的 range 會回傳「從 offset 到真正檔尾」那一段（不是錯誤）——
+/// `plugins::files::pull_file_mqtt` 靠事先知道的檔案大小判斷要不要再要下一個
+/// chunk，不會真的送出一個完全落在檔案範圍外的請求，所以這裡不需要特別處理
+/// 416 那種情況。
+fn fetch_file_chunk(ip: &str, folder: &str, name: &str, offset: u64) -> Result<String> {
+    let end = offset + FILE_CHUNK_SIZE as u64 - 1;
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{name}");
+    let output = Command::new("curl")
+        .args(["--silent", "--fail", "--max-time", "10", "--range", &format!("{offset}-{end}"), &url])
+        .output()
+        .context("執行 curl 失敗")?;
+    if !output.status.success() {
+        bail!("讀取遠端檔案失敗: {name}");
+    }
+    Ok(BASE64.encode(&output.stdout))
+}
+
+/// 中繼一次 `FilePush` 請求：把 `data`（base64）解碼後的原始位元組轉送給
+/// `target_id` 那台裝置既有的 `POST /api/files/{folder}/{name}?offset=<offset>`
+/// 端點，由那個端點負責寫入正確的位置（見 `web.rs` 的 `files_upload`）。
+fn push_file_chunk(ip: &str, folder: &str, name: &str, offset: u64, data: &str) -> Result<()> {
+    let bytes = BASE64.decode(data.as_bytes()).context("chunk 不是合法的 base64")?;
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{name}?offset={offset}");
+    let output = Command::new("curl")
+        .args(["--silent", "--fail", "--max-time", "10", "-X", "POST", "--data-binary", "@-", &url])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.take() {
+                let mut stdin = stdin;
+                let _ = stdin.write_all(&bytes);
+            }
+            child.wait_with_output()
+        })
+        .context("執行 curl 失敗")?;
+    if !output.status.success() {
+        bail!("寫入遠端檔案失敗: {name}");
+    }
+    Ok(())
 }
 
 /// 跟 `remote-output` 的即時鏡射不同，這裡只需要「現在這一刻」的內容一次性

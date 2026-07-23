@@ -365,14 +365,32 @@ pub(crate) fn send_cross_domain_request(ctx: &SharedContext, target_domain: &str
     }
 }
 
+/// 等 `RemoteReply` 送回來要等多久，依 `ask` 種類不同——`Exec`/`Panel` 收到
+/// 請求那一端只需要呼叫既有的本機邏輯（`remote_exec`/`fetch_panel_text_once`），
+/// 這兩個本身的 `--max-time` 都只有 5 秒左右，給發起端 5 秒等待綽綽有餘。但
+/// `FileList`/`FilePull`/`FilePush` 收到請求那一端（`global.rs` 的
+/// `fetch_remote_file_list`/`fetch_file_chunk`/`push_file_chunk`）還要再多轉
+/// 一手 HTTP 請求給實際的目標裝置（`--max-time 10`），如果還是只給發起端
+/// 5 秒，這一手中繼隨便比 MQTT 本身的傳輸延遲慢個幾秒就會被誤判成逾時——實際
+/// 上請求可能還在正常處理，只是還沒回來而已。所以檔案相關的請求給更寬裕的
+/// 20 秒，蓋過中繼那一手的 10 秒逾時上限，再留幾秒給 MQTT 本身的來回延遲。
+fn cross_domain_timeout(ask: &CrossDomainAsk) -> Duration {
+    match ask {
+        CrossDomainAsk::Exec { .. } | CrossDomainAsk::Panel { .. } => Duration::from_secs(5),
+        CrossDomainAsk::FileList { .. } | CrossDomainAsk::FilePull { .. } | CrossDomainAsk::FilePush { .. } => {
+            Duration::from_secs(20)
+        }
+    }
+}
+
 /// 直接把 `ask` 包成 `RemoteRequest`（`request_id`/`source_domain` 在這裡才
 /// 填上——`source_domain` 一定要是「真正發布出去那一刻」這台機器自己的
 /// `domain_name`，不能讓呼叫端自己填，中繼過來的請求才會用中繼那台機器的
 /// domain，而不是原始發起端的），加密發布到 `<bridge-id>/<target-domain>/remote/request`，
 /// 在 `ctx.cross_domain_pending` 登記一個 channel，等 `global.rs` 的 MQTT
-/// session 收到對應的 `RemoteReply` 送過來（逾時 5 秒，跟 `remote_exec` 的
-/// `--max-time 5` 是同一個量級）。不管成功/失敗/逾時，最後都要把登記的
-/// channel 從表裡清掉，不然逾時放棄的請求會一直留著佔位置。
+/// session 收到對應的 `RemoteReply` 送過來（逾時多久見 `cross_domain_timeout`）。
+/// 不管成功/失敗/逾時，最後都要把登記的 channel 從表裡清掉，不然逾時放棄的
+/// 請求會一直留著佔位置。
 fn send_via_mqtt(
     ctx: &SharedContext,
     bridge_id: &str,
@@ -380,6 +398,7 @@ fn send_via_mqtt(
     target_domain: &str,
     ask: CrossDomainAsk,
 ) -> Result<RemoteReply> {
+    let timeout = cross_domain_timeout(&ask);
     let source_domain = ctx
         .lock()
         .unwrap()
@@ -394,6 +413,15 @@ fn send_via_mqtt(
         CrossDomainAsk::Panel { target_id, panel_name } => {
             RemoteRequest::Panel { request_id: request_id.clone(), source_domain, target_id, panel_name }
         }
+        CrossDomainAsk::FileList { target_id, folder } => {
+            RemoteRequest::FileList { request_id: request_id.clone(), source_domain, target_id, folder }
+        }
+        CrossDomainAsk::FilePull { target_id, folder, name, offset } => {
+            RemoteRequest::FilePull { request_id: request_id.clone(), source_domain, target_id, folder, name, offset }
+        }
+        CrossDomainAsk::FilePush { target_id, folder, name, offset, data } => {
+            RemoteRequest::FilePush { request_id: request_id.clone(), source_domain, target_id, folder, name, offset, data }
+        }
     };
 
     let pending = ctx.lock().unwrap().cross_domain_pending.clone();
@@ -404,7 +432,7 @@ fn send_via_mqtt(
         let sealed = crypto::seal(&request)?;
         let topic = format!("{bridge_id}/{target_domain}/remote/request");
         client.publish(topic, QoS::AtMostOnce, false, sealed).map_err(|err| anyhow::anyhow!("MQTT publish 失敗: {err}"))?;
-        rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow::anyhow!("等待跨 domain 回覆逾時（5 秒）"))
+        rx.recv_timeout(timeout).map_err(|_| anyhow::anyhow!("等待跨 domain 回覆逾時（{} 秒）", timeout.as_secs()))
     })();
 
     pending.lock().unwrap().remove(&request_id);
@@ -412,16 +440,19 @@ fn send_via_mqtt(
 }
 
 /// 中繼一次跨 domain 請求給 `addr`（自己的 system server）新增的
-/// `/api/remote/cross-relay` 端點。`--max-time` 抓 10 秒，比 `send_via_mqtt`
-/// 本身的 5 秒逾時再多一點餘裕，蓋掉這段 HTTP 呼叫本身的往返時間。
+/// `/api/remote/cross-relay` 端點。`--max-time` 要比對方那一端
+/// `send_via_mqtt` 實際會等的時間（見 `cross_domain_timeout`）再多一點餘裕，
+/// 蓋掉這段 HTTP 呼叫本身的往返時間——不然這一段自己先逾時放棄，對方那邊的
+/// `send_via_mqtt` 可能根本都還沒等到期。
 fn send_via_relay(addr: &str, target_domain: &str, ask: CrossDomainAsk) -> Result<RemoteReply> {
+    let curl_timeout = (cross_domain_timeout(&ask) + Duration::from_secs(5)).as_secs().to_string();
     let body = serde_json::json!({ "domain": target_domain, "ask": ask }).to_string();
     let url = format!("http://{addr}:9759/api/remote/cross-relay");
     let output = Command::new("curl")
         .args([
             "--silent",
             "--max-time",
-            "10",
+            &curl_timeout,
             "-X",
             "POST",
             "-H",

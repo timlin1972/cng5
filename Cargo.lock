@@ -533,6 +533,7 @@ dependencies = [
  "async-stream",
  "chacha20poly1305",
  "crossterm",
+ "data-encoding",
  "id3",
  "portable-pty",
  "qrcode",

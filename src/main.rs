@@ -26,8 +26,8 @@ use rustyline::{
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
 use plugins::{
-    DevicePlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin,
-    RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
+    DevicePlugin, FilesPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin, OutputPlugin,
+    QrPlugin, RemoteOutputPlugin, RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
 };
 use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
@@ -53,6 +53,10 @@ fn main() -> Result<()> {
         (
             "device",
             Box::new(|ctx| Box::new(DevicePlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "files",
+            Box::new(|ctx| Box::new(FilesPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
         (
             "gitrepo",
