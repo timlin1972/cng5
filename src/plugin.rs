@@ -13,7 +13,7 @@ use crate::output::OutputBuffer;
 /// 常數）。之後要發新版本時，**只需要改這一行**：`system` plugin 的
 /// `version` 指令/panel、`DeviceReport`（因此 `device`/`global` 的清單也一
 /// 起）、`/api/version` 都是讀這裡，不用到處改。
-pub const APP_VERSION: &str = "1.0.0";
+pub const APP_VERSION: &str = "1.2.0";
 
 /// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
 /// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
@@ -108,6 +108,15 @@ pub fn global_registry_key(domain: &str, id: &str) -> String {
 /// 檔案傳輸「可能要切檔慢慢傳」，換取「真的傳得成」比「傳快一點」更重要。
 pub const FILE_CHUNK_SIZE: usize = 4 * 1024;
 
+/// 一則 `FileList` 回覆最多塞多少原始位元組（以檔名長度估算，不含 JSON/AEAD
+/// 包裝開銷）——資料夾檔案一多，整份清單一次塞進一則 MQTT 回覆一樣會被
+/// broker 悄悄丟掉（跟 `FILE_CHUNK_SIZE` 要解決的是同一個門檻問題，只是這裡
+/// 撐爆訊息大小的是「檔案數量」而不是「單一檔案內容」）。收到請求那一端
+/// （`global.rs` 的 `build_remote_reply`）把完整清單依這個預算切成一頁一頁，
+/// 呼叫端（`plugins::files::list_remote_files_mqtt`）用回覆帶的 `total` 判斷
+/// 還有沒有下一頁，逐頁把 `offset` 往前推，直到湊滿 `total` 筆。
+pub const FILE_LIST_PAGE_BUDGET: usize = 4 * 1024;
+
 /// 一個檔案的基本資訊，`FileList` 回覆裡每個檔案一筆，`plugins::files` 用來
 /// 算「這次 copy 總共幾個檔案」；也是 `GET /api/files/{folder}` 的 JSON 回應
 /// 形狀，同網域跟跨 domain 兩條路徑共用同一個型別。
@@ -134,11 +143,15 @@ pub struct FileMeta {
 /// 不能只因為請求通過了 AEAD 解密就信任內容——加密只保證「這是持有同一把
 /// key 的裝置送的」，不代表內容本身沒有問題（例如打錯字的資料夾名稱，或
 /// 未來版本間協定不一致）。
+///
+/// `FileList` 的 `offset` 是「清單裡第幾筆開始」（不是位元組位移，跟
+/// `FilePull`/`FilePush` 的 `offset` 意義不同）——資料夾檔案數量多時一頁裝
+/// 不下（見 `FILE_LIST_PAGE_BUDGET`），要像 `FilePull` 分 chunk 一樣分頁拉。
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CrossDomainAsk {
     Exec { target_id: String, line: String },
     Panel { target_id: String, panel_name: String },
-    FileList { target_id: String, folder: String },
+    FileList { target_id: String, folder: String, offset: usize },
     FilePull { target_id: String, folder: String, name: String, offset: u64 },
     FilePush { target_id: String, folder: String, name: String, offset: u64, data: String },
 }
@@ -160,7 +173,7 @@ pub enum CrossDomainAsk {
 pub enum RemoteRequest {
     Exec { request_id: String, source_domain: String, target_id: String, line: String },
     Panel { request_id: String, source_domain: String, target_id: String, panel_name: String },
-    FileList { request_id: String, source_domain: String, target_id: String, folder: String },
+    FileList { request_id: String, source_domain: String, target_id: String, folder: String, offset: usize },
     FilePull { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64 },
     FilePush { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64, data: String },
 }
@@ -185,7 +198,7 @@ pub enum RemoteReply {
     Exec { request_id: String, prompt: String, error: Option<String> },
     Panel { request_id: String, text: Option<String> },
     Error { request_id: String, message: String },
-    FileList { request_id: String, files: Vec<FileMeta> },
+    FileList { request_id: String, files: Vec<FileMeta>, total: usize },
     FileChunk { request_id: String, data: String },
     FilePushAck { request_id: String },
 }

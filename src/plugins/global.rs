@@ -13,9 +13,9 @@ use crate::crypto;
 use crate::output::OutputBuffer;
 use crate::plugin::{
     global_registry_key, merged_global_view, DeviceReport, FileMeta, GlobalListItem, GlobalRegistryEntry, Plugin,
-    RemoteReply, RemoteRequest, SharedContext, FILE_CHUNK_SIZE,
+    RemoteReply, RemoteRequest, SharedContext, FILE_CHUNK_SIZE, FILE_LIST_PAGE_BUDGET,
 };
-use crate::plugins::{safe_file_path, ALLOWED_FOLDERS, REPORT_INTERVAL};
+use crate::plugins::{safe_file_path, url_encode_filename, ALLOWED_FOLDERS, REPORT_INTERVAL};
 use crate::shell;
 use crate::sysinfo;
 use crate::web::PORT;
@@ -431,7 +431,7 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
             };
             RemoteReply::Panel { request_id: request_id.clone(), text: fetch_panel_text_once(&ip, panel_name) }
         }
-        RemoteRequest::FileList { request_id, target_id, folder, .. } => {
+        RemoteRequest::FileList { request_id, target_id, folder, offset, .. } => {
             let Some(ip) = target_ip(ctx, target_id) else {
                 return RemoteReply::Error {
                     request_id: request_id.clone(),
@@ -445,7 +445,11 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
                 };
             }
             match fetch_remote_file_list(&ip, folder) {
-                Ok(files) => RemoteReply::FileList { request_id: request_id.clone(), files },
+                Ok(all_files) => {
+                    let total = all_files.len();
+                    let files = paginate_file_list(&all_files, *offset);
+                    RemoteReply::FileList { request_id: request_id.clone(), files, total }
+                }
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
         }
@@ -507,6 +511,25 @@ fn fetch_remote_file_list(ip: &str, folder: &str) -> Result<Vec<FileMeta>> {
     serde_json::from_str(&body).context("回應格式不對")
 }
 
+/// 把完整的檔案清單從 `offset` 開始切一頁：累計的原始位元組數（以檔名長度
+/// 估算，`+ 24` 粗抓 `size` 數字跟 JSON 標點的開銷）一旦會超過
+/// `FILE_LIST_PAGE_BUDGET` 就切下一頁——用 `>` 而不是 `>=`，且第一筆一定收，
+/// 這樣就算單一檔名長到自己就超過預算，也不會回傳空頁面卡住呼叫端的分頁
+/// 迴圈（見 `plugins::files::list_remote_files_mqtt`）。
+fn paginate_file_list(all: &[FileMeta], offset: usize) -> Vec<FileMeta> {
+    let mut page = Vec::new();
+    let mut size = 0usize;
+    for item in all.iter().skip(offset) {
+        let item_size = item.name.len() + 24;
+        if !page.is_empty() && size + item_size > FILE_LIST_PAGE_BUDGET {
+            break;
+        }
+        size += item_size;
+        page.push(item.clone());
+    }
+    page
+}
+
 /// 中繼一次 `FilePull` 請求：對 `target_id` 那台裝置既有的
 /// `GET /api/files/{folder}/{name}` 端點送一個 `Range` 請求，只拿 `offset` 開始
 /// 的一個 chunk（見 `plugin::FILE_CHUNK_SIZE`），不用整個檔案讀進記憶體。
@@ -517,7 +540,7 @@ fn fetch_remote_file_list(ip: &str, folder: &str) -> Result<Vec<FileMeta>> {
 /// 416 那種情況。
 fn fetch_file_chunk(ip: &str, folder: &str, name: &str, offset: u64) -> Result<String> {
     let end = offset + FILE_CHUNK_SIZE as u64 - 1;
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{name}");
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{}", url_encode_filename(name));
     let output = Command::new("curl")
         .args(["--silent", "--fail", "--max-time", "10", "--range", &format!("{offset}-{end}"), &url])
         .output()
@@ -533,7 +556,7 @@ fn fetch_file_chunk(ip: &str, folder: &str, name: &str, offset: u64) -> Result<S
 /// 端點，由那個端點負責寫入正確的位置（見 `web.rs` 的 `files_upload`）。
 fn push_file_chunk(ip: &str, folder: &str, name: &str, offset: u64, data: &str) -> Result<()> {
     let bytes = BASE64.decode(data.as_bytes()).context("chunk 不是合法的 base64")?;
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{name}?offset={offset}");
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{}?offset={offset}", url_encode_filename(name));
     let output = Command::new("curl")
         .args(["--silent", "--fail", "--max-time", "10", "-X", "POST", "--data-binary", "@-", &url])
         .stdin(std::process::Stdio::piped())

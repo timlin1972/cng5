@@ -10,6 +10,7 @@ use data_encoding::BASE64;
 
 use crate::output::OutputBuffer;
 use crate::plugin::{CrossDomainAsk, FileMeta, Plugin, RemoteReply, SharedContext, FILE_CHUNK_SIZE};
+use crate::plugins::{MUSIC_DIR, NOTEPAD_DIR};
 use crate::shell::send_cross_domain_request;
 use crate::web::PORT;
 
@@ -17,9 +18,10 @@ use crate::web::PORT;
 /// （`web.rs` 的 `/api/files/{folder}...`）跟跨 domain 的 MQTT 請求
 /// （`global.rs` 的 `build_remote_reply`）兩邊都要檢查的同一份清單——不管是
 /// 本機發起、還是收到別人的請求，`folder` 都要驗證過在這裡面才能碰，不能被
-/// 請求內容的字串繞過去存取任意路徑。目前只有 `music`（跟
-/// `plugins::MUSIC_DIR` 剛好是同一個名字），之後要開放別的資料夾就在這裡加。
-pub const ALLOWED_FOLDERS: &[&str] = &["music"];
+/// 請求內容的字串繞過去存取任意路徑。直接用 `MUSIC_DIR`/`NOTEPAD_DIR` 常數
+/// （而不是重複打一次字面量），folder 名稱跟資料夾實際路徑保證一致，之後要
+/// 開放別的資料夾就在這裡加。
+pub const ALLOWED_FOLDERS: &[&str] = &[MUSIC_DIR, NOTEPAD_DIR];
 
 /// `folder`（先確認在白名單內）底下的 `name` 組出實際路徑，`name` 只接受單一
 /// 檔名（不能含路徑分隔符或是 `.`/`..`）——不管是本機組出來的路徑、還是收到
@@ -33,6 +35,25 @@ pub(crate) fn safe_file_path(folder: &str, name: &str) -> Option<PathBuf> {
         return None;
     }
     Some(Path::new(folder).join(name))
+}
+
+/// 把檔名塞進 `/api/files/{folder}/{name}` 這個 URL 之前先 percent-encode——
+/// 檔名可能含空白、中文、全形標點這類字元，原封不動塞進 URL 字串會讓 curl
+/// 送出的請求列本身就是不合法的（空白提前截斷網址，或整段位元組不是合法的
+/// URL 語法），實測遇過的真實案例是含有全形冒號、書名號、括號的中文歌名下載
+/// 失敗。只留英數字跟 `-_.~` 不編碼（RFC 3986 的 unreserved 字元集），其餘每個
+/// 位元組都編成 `%XX`。伺服器那端（`web.rs` 的 `files_download`/`files_upload`，
+/// 透過 actix 的 `web::Path` extractor）會自動 percent-decode 回原始檔名，不需要
+/// 額外處理。
+pub(crate) fn url_encode_filename(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for byte in name.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 const MANUAL_TEXT: &str = "\
@@ -50,8 +71,10 @@ broker 對單則訊息大小有限制，塞不下整個檔案）。
   status                       查目前有沒有 copy 在進行、進度到哪、是哪個檔案
 
 注意事項：
-  - 目前只開放 music 這個資料夾，其他名字會被拒絕。
+  - 目前只開放 music、notepad 這兩個資料夾，其他名字會被拒絕。
   - 是「複製」不是「同步」：只會新增/覆蓋檔案，不會刪除目的地多出來的檔案。
+  - 目的地已經有同名且大小一樣的檔案就跳過不重傳（用檔案大小當快速判斷，不
+    逐位元組比對內容），重跑同一個 copy 只會補傳真的缺少/大小不同的檔案。
   - 同一時間只能有一個 copy 在跑，進行中再下一次 copy 會被擋掉，先用 status
     確認前一個做完了沒（完成後 status 還是會顯示上一次的結果，直到下一次
     copy 開始才會被蓋掉）。
@@ -323,14 +346,39 @@ fn list_local_files(dir: &Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// 目的地已經有同名檔案、且大小一樣，就當作「已經傳過」跳過不重傳——用檔案
+/// 大小當快速判斷依據，不逐位元組算 checksum（那需要整個讀一次檔案內容，對
+/// 「重跑同一個 copy，大部分檔案其實都沒變」這種常見情境來說成本不成比例；
+/// 大小不同一定代表內容不同，必須重傳，大小剛好相同但內容不同這種理論上可能
+/// 但實務上少見的情況，接受這個取捨）。
+fn local_file_matches(path: &Path, expected_size: u64) -> bool {
+    fs::metadata(path).map(|m| m.len() == expected_size).unwrap_or(false)
+}
+
+fn remote_file_matches(remote_files: &[FileMeta], name: &str, expected_size: u64) -> bool {
+    remote_files.iter().any(|f| f.name == name && f.size == expected_size)
+}
+
 fn run_push(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc<Mutex<Option<TransferStatus>>>) -> Result<()> {
     let dir = Path::new(folder);
     let names = list_local_files(dir)?;
     set_total(status, names.len());
+    // 先查一次目的地既有的檔案清單，才能跳過已經傳過、大小沒變的檔案；跟
+    // `run_pull` 開頭就先拿到完整清單是同一個理由，唯一差別是這裡查的是「對方
+    // 已經有什麼」而不是「對方有什麼要拉」。
+    let remote_files: Vec<FileMeta> = match target {
+        CopyTarget::Http { ip } => list_remote_files_http(ip, folder)?,
+        CopyTarget::CrossDomain { domain, target_id } => list_remote_files_mqtt(ctx, domain, target_id, folder)?,
+    };
     for name in names {
         let path = dir.join(&name);
         let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         set_current_file(status, &name, size);
+        if remote_file_matches(&remote_files, &name, size) {
+            finish_current_file(status);
+            bump_completed(status);
+            continue;
+        }
         match target {
             CopyTarget::Http { ip } => {
                 push_file_http(ip, folder, &name, &path)?;
@@ -355,6 +403,11 @@ fn run_pull(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc
     for meta in files {
         set_current_file(status, &meta.name, meta.size);
         let dest = Path::new(folder).join(&meta.name);
+        if local_file_matches(&dest, meta.size) {
+            finish_current_file(status);
+            bump_completed(status);
+            continue;
+        }
         match target {
             CopyTarget::Http { ip } => {
                 pull_file_http(ip, folder, &meta.name, &dest)?;
@@ -372,7 +425,7 @@ fn run_pull(ctx: &SharedContext, target: &CopyTarget, folder: &str, status: &Arc
 // --- 同網域：整檔透過既有的 /api/files 端點傳輸，不用切 chunk ---
 
 fn push_file_http(ip: &str, folder: &str, name: &str, path: &Path) -> Result<()> {
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{name}");
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{}", url_encode_filename(name));
     let output = Command::new("curl")
         .args([
             "--silent",
@@ -407,7 +460,7 @@ fn list_remote_files_http(ip: &str, folder: &str) -> Result<Vec<FileMeta>> {
 }
 
 fn pull_file_http(ip: &str, folder: &str, name: &str, dest: &Path) -> Result<()> {
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{name}");
+    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{}", url_encode_filename(name));
     let output = Command::new("curl")
         .args(["--silent", "--fail", "--max-time", "120", "-o", &dest.display().to_string(), &url])
         .output()
@@ -459,13 +512,31 @@ fn push_file_mqtt(
     Ok(())
 }
 
+/// 資料夾檔案數量多時，`FileList` 的完整清單一則 MQTT 回覆塞不下（見
+/// `FILE_LIST_PAGE_BUDGET`），對面會分頁回，這裡跟 `pull_file_mqtt` 拉檔案
+/// 內容一樣，逐頁把 `offset` 往前推，直到湊滿回覆帶的 `total` 筆。多留一個
+/// 「這頁是空的就先停」的保險，避免 `total` 剛好跟實際筆數對不上（例如清單
+/// 中途被改動）時無窮迴圈下去。
 fn list_remote_files_mqtt(ctx: &SharedContext, domain: &str, target_id: &str, folder: &str) -> Result<Vec<FileMeta>> {
-    let ask = CrossDomainAsk::FileList { target_id: target_id.to_string(), folder: folder.to_string() };
-    match send_cross_domain_request(ctx, domain, ask)? {
-        RemoteReply::FileList { files, .. } => Ok(files),
-        RemoteReply::Error { message, .. } => bail!(message),
-        _ => bail!("收到不符預期的回覆型別"),
+    let mut files = Vec::new();
+    loop {
+        let ask =
+            CrossDomainAsk::FileList { target_id: target_id.to_string(), folder: folder.to_string(), offset: files.len() };
+        match send_cross_domain_request(ctx, domain, ask)? {
+            RemoteReply::FileList { files: page, total, .. } => {
+                if page.is_empty() {
+                    break;
+                }
+                files.extend(page);
+                if files.len() >= total {
+                    break;
+                }
+            }
+            RemoteReply::Error { message, .. } => bail!(message),
+            _ => bail!("收到不符預期的回覆型別"),
+        }
     }
+    Ok(files)
 }
 
 /// 逐個 chunk 拉一個檔案，用 `FileList` 已經拿到的 `meta.size` 判斷有沒有拉完

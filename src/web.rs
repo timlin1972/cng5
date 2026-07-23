@@ -166,12 +166,16 @@ async fn remote_cross_relay(body: web::Json<CrossRelayRequest>, ctx: web::Data<S
 /// 檔案大小判斷拉到哪裡算拉完，不需要伺服器另外回報「這是不是最後一塊」）。
 /// `folder` 沒過白名單、或資料夾還不存在，都當作空清單，不報錯——跟
 /// `music_files` 判斷資料夾不存在時的容錯邏輯一致。
+///
+/// 依檔名排序回傳：`global.rs` 的 `fetch_remote_file_list` 分頁時（見
+/// `paginate_file_list`）每一頁都是各自重新呼叫這個端點，`fs::read_dir` 本身
+/// 不保證每次呼叫順序一致，沒排序的話跨頁可能漏掉或重複某些檔案。
 async fn files_list(path: web::Path<String>) -> impl Responder {
     let folder = path.into_inner();
     if !ALLOWED_FOLDERS.contains(&folder.as_str()) {
         return HttpResponse::BadRequest().finish();
     }
-    let files: Vec<FileMeta> = std::fs::read_dir(&folder)
+    let mut files: Vec<FileMeta> = std::fs::read_dir(&folder)
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok())
@@ -184,6 +188,7 @@ async fn files_list(path: web::Path<String>) -> impl Responder {
                 .collect()
         })
         .unwrap_or_default();
+    files.sort_by(|a, b| a.name.cmp(&b.name));
     HttpResponse::Ok().json(files)
 }
 

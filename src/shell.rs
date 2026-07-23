@@ -413,8 +413,8 @@ fn send_via_mqtt(
         CrossDomainAsk::Panel { target_id, panel_name } => {
             RemoteRequest::Panel { request_id: request_id.clone(), source_domain, target_id, panel_name }
         }
-        CrossDomainAsk::FileList { target_id, folder } => {
-            RemoteRequest::FileList { request_id: request_id.clone(), source_domain, target_id, folder }
+        CrossDomainAsk::FileList { target_id, folder, offset } => {
+            RemoteRequest::FileList { request_id: request_id.clone(), source_domain, target_id, folder, offset }
         }
         CrossDomainAsk::FilePull { target_id, folder, name, offset } => {
             RemoteRequest::FilePull { request_id: request_id.clone(), source_domain, target_id, folder, name, offset }

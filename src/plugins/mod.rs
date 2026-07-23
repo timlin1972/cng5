@@ -13,7 +13,7 @@ mod weather;
 mod wol;
 
 pub use device::DevicePlugin;
-pub(crate) use files::{safe_file_path, ALLOWED_FOLDERS};
+pub(crate) use files::{safe_file_path, url_encode_filename, ALLOWED_FOLDERS};
 pub use files::FilesPlugin;
 pub use gitrepo::GitRepoPlugin;
 pub use global::GlobalPlugin;
