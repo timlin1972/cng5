@@ -146,3 +146,67 @@ impl Plugin for DevicePlugin {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use std::time::Instant;
+
+    use crate::plugin::{ContextInner, DeviceEntry, DeviceReport};
+
+    fn make_report(id: &str) -> DeviceReport {
+        DeviceReport {
+            id: id.to_string(),
+            ip: "127.0.0.1".to_string(),
+            os: "linux".to_string(),
+            version: "1.3.0".to_string(),
+            tailscale: false,
+            mode: "standalone".to_string(),
+            device_uptime_secs: 0,
+            app_uptime_secs: 0,
+        }
+    }
+
+    fn ctx_with_entry(last_seen: Instant) -> SharedContext {
+        let ctx: SharedContext = Arc::new(Mutex::new(ContextInner::default()));
+        ctx.lock().unwrap().devices.insert("a".to_string(), DeviceEntry { report: make_report("a"), last_seen });
+        ctx
+    }
+
+    /// 剛回報過（`last_seen` 就是現在）的裝置，還在 `ALIVE_TTL` 窗口內，`status`
+    /// 應該把它算進「上線中」。
+    #[test]
+    fn recent_report_counts_as_alive() {
+        let ctx = ctx_with_entry(Instant::now());
+        let mut plugin = DevicePlugin::new(ctx);
+        let out = OutputBuffer::new();
+        plugin.status(&out).unwrap();
+        assert!(out.all().join("\n").contains("上線中: 1"));
+    }
+
+    /// 上次回報時間已經超過 `ALIVE_TTL`（回報間隔的 3 倍）的裝置，`status`
+    /// 應該把它算進「離線」（不計入上線中），即使它的 `report` 資料還留著。
+    #[test]
+    fn stale_report_counts_as_offline() {
+        let stale = Instant::now().checked_sub(ALIVE_TTL + Duration::from_secs(1)).expect("測試環境時鐘異常");
+        let ctx = ctx_with_entry(stale);
+        let mut plugin = DevicePlugin::new(ctx);
+        let out = OutputBuffer::new();
+        plugin.status(&out).unwrap();
+        assert!(out.all().join("\n").contains("上線中: 0"));
+    }
+
+    /// 剛好在 `ALIVE_TTL` 窗口內（差 1 秒未過期）仍應算上線——確認邊界是
+    /// 「嚴格大於才算離線」而不是提早一點就誤判。
+    #[test]
+    fn report_just_inside_ttl_still_alive() {
+        let almost_stale =
+            Instant::now().checked_sub(ALIVE_TTL - Duration::from_secs(1)).expect("測試環境時鐘異常");
+        let ctx = ctx_with_entry(almost_stale);
+        let mut plugin = DevicePlugin::new(ctx);
+        let out = OutputBuffer::new();
+        plugin.status(&out).unwrap();
+        assert!(out.all().join("\n").contains("上線中: 1"));
+    }
+}

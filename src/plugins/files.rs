@@ -625,3 +625,37 @@ impl Plugin for FilesPlugin {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 白名單內的資料夾 + 單純檔名，應該正常組出路徑。
+    #[test]
+    fn allowed_folder_with_plain_name_ok() {
+        assert_eq!(safe_file_path(MUSIC_DIR, "song.mp3"), Some(Path::new(MUSIC_DIR).join("song.mp3")));
+        assert_eq!(safe_file_path(NOTEPAD_DIR, "note.md"), Some(Path::new(NOTEPAD_DIR).join("note.md")));
+    }
+
+    /// 不在白名單裡的資料夾（不管是打錯字還是刻意嘗試存取任意路徑）一律拒絕，
+    /// 即使檔名本身完全合法。
+    #[test]
+    fn folder_outside_allow_list_rejected() {
+        assert_eq!(safe_file_path("secrets", "note.md"), None);
+        assert_eq!(safe_file_path("", "note.md"), None);
+        assert_eq!(safe_file_path("/etc", "passwd"), None);
+    }
+
+    /// 檔名裡含路徑分隔符、`.`、`..`，或整個是空字串，都必須拒絕——這是防止
+    /// 收到的請求即使通過了 AEAD 解密驗證，仍藉由檔名跳脫出白名單資料夾之外
+    /// 的最後一道防線（見 `safe_file_path` 上方的說明）。
+    #[test]
+    fn traversal_attempts_rejected() {
+        assert_eq!(safe_file_path(MUSIC_DIR, ""), None);
+        assert_eq!(safe_file_path(MUSIC_DIR, "."), None);
+        assert_eq!(safe_file_path(MUSIC_DIR, ".."), None);
+        assert_eq!(safe_file_path(MUSIC_DIR, "../secrets.txt"), None);
+        assert_eq!(safe_file_path(MUSIC_DIR, "sub/song.mp3"), None);
+        assert_eq!(safe_file_path(MUSIC_DIR, "sub\\song.mp3"), None);
+    }
+}

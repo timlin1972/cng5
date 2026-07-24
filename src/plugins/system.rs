@@ -127,6 +127,11 @@ pub struct SystemPlugin {
     /// 那個）寫入的。
     mode: Arc<Mutex<SystemMode>>,
     tailscale: TailscaleCache,
+    /// 上一次 `pull_peers` 成功拉回完整裝置清單的時間；`None` 代表從沒成功過
+    /// （或還不是 client 模式）。`status`/`panel_text` 用這個顯示「距上次同步
+    /// 幾秒」，讓使用者能分辨「伺服器暫時連不上」跟「其他裝置真的離線」，不用
+    /// 只靠個別裝置的 `ALIVE_TTL` 間接猜（見 `pull_peers` 的說明）。
+    last_pull_ok: Arc<Mutex<Option<Instant>>>,
 }
 
 impl SystemPlugin {
@@ -134,8 +139,9 @@ impl SystemPlugin {
         let id = sysinfo::hostname();
         let mode = Arc::new(Mutex::new(SystemMode::Standalone));
         let tailscale = TailscaleCache::new();
-        Self::spawn_reporter(ctx.clone(), id.clone(), mode.clone(), tailscale.clone());
-        Self { ctx, id, mode, tailscale }
+        let last_pull_ok = Arc::new(Mutex::new(None));
+        Self::spawn_reporter(ctx.clone(), id.clone(), mode.clone(), tailscale.clone(), last_pull_ok.clone());
+        Self { ctx, id, mode, tailscale, last_pull_ok }
     }
 
     /// 背景回報執行緒，整個程式活著期間持續跑，每 `REPORT_INTERVAL` 一次：
@@ -147,7 +153,13 @@ impl SystemPlugin {
     ///    對方（`push_report`），並拉一次完整的裝置清單回來合併進本機
     ///    registry（`pull_peers`）——自己那一列用本機剛查好的資料為準，不
     ///    會被伺服器回傳、可能有延遲的版本蓋掉。
-    fn spawn_reporter(ctx: SharedContext, id: String, mode: Arc<Mutex<SystemMode>>, tailscale: TailscaleCache) {
+    fn spawn_reporter(
+        ctx: SharedContext,
+        id: String,
+        mode: Arc<Mutex<SystemMode>>,
+        tailscale: TailscaleCache,
+        last_pull_ok: Arc<Mutex<Option<Instant>>>,
+    ) {
         thread::spawn(move || loop {
             let current_mode = *mode.lock().unwrap();
             let report = Self::build_report(&id, &tailscale, current_mode);
@@ -162,7 +174,7 @@ impl SystemPlugin {
                 ctx.lock().unwrap().log_activity("http-out", format!("POST http://{addr}:9759/api/device/register"));
                 Self::push_report(&addr, &report);
                 ctx.lock().unwrap().log_activity("http-out", format!("GET http://{addr}:9759/api/device/list"));
-                Self::pull_peers(&addr, &ctx, &id);
+                Self::pull_peers(&addr, &ctx, &id, &last_pull_ok);
             }
             thread::sleep(REPORT_INTERVAL);
         });
@@ -213,16 +225,32 @@ impl SystemPlugin {
     /// 餘每一列都直接覆蓋。`last_seen` 依伺服器回傳的「幾秒前收到」往回推算
     /// 出一個本機的 `Instant`，這樣 `DevicePlugin` 判斷 alive 用的是同一套
     /// 邏輯，不需要另外從網路上搬一個「alive」旗標過來。
-    fn pull_peers(addr: &str, ctx: &SharedContext, my_id: &str) {
+    ///
+    /// 失敗（curl 本身跑不起來、伺服器回非成功狀態、回應不是合法 UTF-8/JSON）
+    /// 時記一筆 `log_activity` 說明原因並直接放棄這一輪，不更新 `last_pull_ok`
+    /// ——這樣使用者能靠 `status` 顯示的「距上次成功同步」看出「伺服器連不
+    /// 上」，而不是只能等 30 秒後靠其他裝置的 `ALIVE_TTL` 間接猜測（見
+    /// spec.md Edge Case: 群組伺服器離線）。
+    fn pull_peers(addr: &str, ctx: &SharedContext, my_id: &str, last_pull_ok: &Arc<Mutex<Option<Instant>>>) {
         let url = format!("http://{addr}:9759/api/device/list");
         let Ok(output) = Command::new("curl").args(["--silent", "--max-time", "5", &url]).output() else {
+            ctx.lock().unwrap().log_activity("http-out", format!("GET {url} 失敗: curl 無法執行"));
             return;
         };
         if !output.status.success() {
+            ctx.lock()
+                .unwrap()
+                .log_activity("http-out", format!("GET {url} 失敗: curl 結束狀態非成功（可能是逾時或連線被拒）"));
             return;
         }
-        let Ok(body) = String::from_utf8(output.stdout) else { return };
-        let Ok(items) = serde_json::from_str::<Vec<DeviceListItem>>(&body) else { return };
+        let Ok(body) = String::from_utf8(output.stdout) else {
+            ctx.lock().unwrap().log_activity("http-out", format!("GET {url} 失敗: 回應不是合法的 UTF-8"));
+            return;
+        };
+        let Ok(items) = serde_json::from_str::<Vec<DeviceListItem>>(&body) else {
+            ctx.lock().unwrap().log_activity("http-out", format!("GET {url} 失敗: 回應不是預期的裝置清單格式"));
+            return;
+        };
         let mut inner = ctx.lock().unwrap();
         for item in items {
             if item.report.id == my_id {
@@ -232,6 +260,21 @@ impl SystemPlugin {
                 .checked_sub(Duration::from_secs_f64(item.age_secs.max(0.0)))
                 .unwrap_or_else(Instant::now);
             inner.devices.insert(item.report.id.clone(), DeviceEntry { report: item.report, last_seen });
+        }
+        drop(inner);
+        *last_pull_ok.lock().unwrap() = Some(Instant::now());
+    }
+
+    /// `status`/`panel_text` 顯示用的「距上次成功同步裝置清單過了幾秒」文字。
+    /// 只有 client 模式、且已經至少成功過一次時才有意義；還沒同步過或不是
+    /// client 就顯示對應的說明，不要顯示一個誤導性的數字（例如 0 秒）。
+    fn last_sync_text(&self, mode: SystemMode) -> String {
+        if mode != SystemMode::Client {
+            return "N/A（不是 client 模式）".to_string();
+        }
+        match *self.last_pull_ok.lock().unwrap() {
+            Some(at) => format!("{} 秒前", at.elapsed().as_secs()),
+            None => "尚未成功同步過（見 activities 的失敗記錄）".to_string(),
         }
     }
 
@@ -256,14 +299,16 @@ impl SystemPlugin {
     }
 
     fn status(&mut self, out: &OutputBuffer) -> Result<()> {
+        let mode = *self.mode.lock().unwrap();
         out.push(&format!(
-            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\n",
+            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\n最近成功同步: {}\ndevice uptime: {}\napp uptime: {}\n",
             self.id,
             self.ip(),
             sysinfo::os(),
             self.tailscale_flag(),
             self.mode_str(),
             self.server_text(),
+            self.last_sync_text(mode),
             sysinfo::format_uptime(sysinfo::device_uptime_secs()),
             sysinfo::format_uptime(sysinfo::app_uptime_secs()),
         ));
@@ -343,14 +388,16 @@ impl Plugin for SystemPlugin {
     }
 
     fn panel_text(&self) -> Option<String> {
+        let mode = *self.mode.lock().unwrap();
         Some(format!(
-            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\ndevice uptime: {}\napp uptime: {}\nversion: {}\nbuild: {}",
+            "id: {}\nip: {}\nos: {}\ntailscale: {}\nmode: {}\nserver: {}\n最近成功同步: {}\ndevice uptime: {}\napp uptime: {}\nversion: {}\nbuild: {}",
             self.id,
             self.ip(),
             sysinfo::os(),
             self.tailscale_flag(),
             self.mode_str(),
             self.server_text(),
+            self.last_sync_text(mode),
             sysinfo::format_uptime(sysinfo::device_uptime_secs()),
             sysinfo::format_uptime(sysinfo::app_uptime_secs()),
             APP_VERSION,

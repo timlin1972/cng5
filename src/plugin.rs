@@ -14,7 +14,7 @@ use crate::output::OutputBuffer;
 /// 常數）。之後要發新版本時，**只需要改這一行**：`system` plugin 的
 /// `version` 指令/panel、`DeviceReport`（因此 `device`/`global` 的清單也一
 /// 起）、`/api/version` 都是讀這裡，不用到處改。
-pub const APP_VERSION: &str = "1.3.0";
+pub const APP_VERSION: &str = "1.4.0";
 
 /// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
 /// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
@@ -337,4 +337,47 @@ pub trait Plugin: Send {
     /// 的標準寫法，沒辦法只在這裡寫一次預設實作套用到所有型別，每個 plugin
     /// 都要各自實作成 `{ self }`。
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 舊版（還沒有 `os`/`version` 欄位的 build）傳過來的 `DeviceReport` JSON
+    /// 不會有這兩個 key；`#[serde(default = "default_os"/"default_version")]`
+    /// 應該讓它們解析成 `"N/A"`，而不是讓整筆資料解析失敗（見欄位上方的說明）。
+    #[test]
+    fn device_report_missing_os_and_version_defaults_to_na() {
+        let json = r#"{
+            "id": "old-machine",
+            "ip": "10.0.0.5",
+            "tailscale": false,
+            "mode": "standalone",
+            "device_uptime_secs": 100,
+            "app_uptime_secs": 10
+        }"#;
+        let report: DeviceReport = serde_json::from_str(json).expect("缺少 os/version 欄位不該解析失敗");
+        assert_eq!(report.os, "N/A");
+        assert_eq!(report.version, "N/A");
+        assert_eq!(report.id, "old-machine");
+    }
+
+    /// 新版（有帶 `os`/`version`）的 JSON 應該正常保留原值，確認
+    /// `#[serde(default)]` 只在欄位缺席時才套用預設值，不會蓋掉正常收到的內容。
+    #[test]
+    fn device_report_with_os_and_version_keeps_values() {
+        let json = r#"{
+            "id": "new-machine",
+            "ip": "10.0.0.6",
+            "os": "linux",
+            "version": "1.3.0",
+            "tailscale": true,
+            "mode": "server",
+            "device_uptime_secs": 200,
+            "app_uptime_secs": 20
+        }"#;
+        let report: DeviceReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.os, "linux");
+        assert_eq!(report.version, "1.3.0");
+    }
 }

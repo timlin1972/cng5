@@ -216,4 +216,46 @@ mod tests {
         assert!(decode_hex("0").is_err()); // 長度不是偶數
         assert!(decode_hex("zz").is_err()); // 不是合法 hex
     }
+
+    // 以上測試都用合成的 `Ping` 結構驗證加解密機制本身；以下改用
+    // `plugin.rs` 實際的跨 domain 協定型別，確認它們的 serde 形狀能正確通過
+    // 同一套加密層往返，而不只是抽象的 T: Serialize 型別參數在理論上成立。
+    use crate::plugin::{RemoteReply, RemoteRequest};
+
+    #[test]
+    fn remote_request_round_trips_through_seal_open() {
+        let key = test_key();
+        let req = RemoteRequest::Exec {
+            request_id: "req-1".to_string(),
+            source_domain: "domain-a".to_string(),
+            target_id: "machine-b".to_string(),
+            line: "plugin enter wol".to_string(),
+        };
+        let wire = seal_with(&key, &req).unwrap();
+        let got: RemoteRequest = open_with(&key, &wire).unwrap();
+        match got {
+            RemoteRequest::Exec { request_id, source_domain, target_id, line } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(source_domain, "domain-a");
+                assert_eq!(target_id, "machine-b");
+                assert_eq!(line, "plugin enter wol");
+            }
+            other => panic!("預期 Exec 變體，實際收到其他變體（source_domain={}）", other.source_domain()),
+        }
+    }
+
+    #[test]
+    fn remote_reply_round_trips_through_seal_open() {
+        let key = test_key();
+        let reply = RemoteReply::Error { request_id: "req-1".to_string(), message: "查無此裝置".to_string() };
+        let wire = seal_with(&key, &reply).unwrap();
+        let got: RemoteReply = open_with(&key, &wire).unwrap();
+        match got {
+            RemoteReply::Error { request_id, message } => {
+                assert_eq!(request_id, "req-1");
+                assert_eq!(message, "查無此裝置");
+            }
+            other => panic!("預期 Error 變體，實際收到其他變體: {}", other.request_id()),
+        }
+    }
 }

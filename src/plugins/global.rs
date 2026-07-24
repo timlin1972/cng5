@@ -403,7 +403,17 @@ fn handle_remote_request(bridge_id: &str, domain: &str, payload: &[u8], client: 
     if my_domain.as_deref() != Some(domain) {
         return;
     }
-    let Ok(request) = crypto::open::<RemoteRequest>(payload) else { return };
+    let Ok(request) = crypto::open::<RemoteRequest>(payload) else {
+        // 解密失敗（金鑰不符、內容被竄改、或時間戳超出防重放窗口）記一筆活動，
+        // 讓使用者能在 `activities` 看到「這裡被拒絕過訊息」，跟單純的「對方
+        // 沒回應／逾時」（見 `shell::send_cross_domain_request` 的逾時錯誤）
+        // 區分開來，不要兩種情況呈現一樣、看不出原因的症狀（見
+        // spec.md Edge Case: 金鑰不一致偵測性）。
+        ctx.lock()
+            .unwrap()
+            .log_activity("mqtt-in", format!("remote/request 解密失敗，已拒絕（domain={domain}）"));
+        return;
+    };
     let reply = build_remote_reply(&request, ctx);
     let Ok(sealed) = crypto::seal(&reply) else { return };
     let reply_topic = format!("{bridge_id}/{}/remote/reply", request.source_domain());
@@ -619,7 +629,12 @@ fn handle_remote_reply(domain: &str, payload: &[u8], ctx: &SharedContext) {
     if my_domain.as_deref() != Some(domain) {
         return;
     }
-    let Ok(reply) = crypto::open::<RemoteReply>(payload) else { return };
+    let Ok(reply) = crypto::open::<RemoteReply>(payload) else {
+        // 理由同 `handle_remote_request` 的解密失敗分支：讓「訊息被拒絕」在
+        // `activities` 留下痕跡，跟單純的逾時區分開來。
+        ctx.lock().unwrap().log_activity("mqtt-in", format!("remote/reply 解密失敗，已拒絕（domain={domain}）"));
+        return;
+    };
     if let Some(sender) = pending.lock().unwrap().remove(reply.request_id()) {
         let _ = sender.send(reply);
     }
