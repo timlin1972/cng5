@@ -77,7 +77,7 @@ impl Plugin for ClockPlugin {
     fn panel_text(&self) -> Option<String> {
         let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         let hms = sysinfo::local_hms(ts);
-        Some(render_hms(&hms, ts % 2 == 0))
+        Some(render_hms(&hms, ts.is_multiple_of(2)))
     }
 
     fn manual_text(&self) -> &'static str {
