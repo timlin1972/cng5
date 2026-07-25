@@ -1,4 +1,5 @@
 mod activities;
+mod clock;
 mod device;
 mod files;
 mod gitrepo;
