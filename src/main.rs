@@ -27,8 +27,9 @@ use rustyline::{
 use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
 use plugins::{
-    ActivitiesPlugin, DevicePlugin, FilesPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin, NotepadPlugin,
-    OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, SystemPlugin, WeatherPlugin, WolPlugin,
+    ActivitiesPlugin, ClockPlugin, DevicePlugin, FilesPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin,
+    NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, SystemPlugin, WeatherPlugin,
+    WolPlugin,
 };
 use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
@@ -54,6 +55,10 @@ fn main() -> Result<()> {
         (
             "activities",
             Box::new(|ctx| Box::new(ActivitiesPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "clock",
+            Box::new(|ctx| Box::new(ClockPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
         (
             "device",

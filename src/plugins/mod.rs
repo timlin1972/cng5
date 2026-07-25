@@ -15,6 +15,7 @@ mod weather;
 mod wol;
 
 pub use activities::ActivitiesPlugin;
+pub use clock::ClockPlugin;
 pub use device::DevicePlugin;
 pub(crate) use files::{safe_file_path, url_encode_filename, ALLOWED_FOLDERS};
 pub use files::FilesPlugin;

@@ -1,3 +1,11 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use anyhow::{bail, Result};
+
+use crate::output::OutputBuffer;
+use crate::plugin::{Plugin, SharedContext};
+use crate::sysinfo;
+
 /// 每個數字（`0`-`9`）固定 3 欄 × 5 列的點陣字型，`'1'` 代表填滿、`'0'` 代表留白。
 const DIGIT_FONT: [[&str; 5]; 10] = [
     ["111", "101", "101", "101", "111"], // 0
@@ -35,6 +43,50 @@ pub fn render_hms(hms: &str, colon_on: bool) -> String {
         .map(|row| glyphs.iter().map(|g| g[row].as_str()).collect::<Vec<_>>().join("  "))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+const MANUAL_TEXT: &str = "\
+clock：panel 用 ASCII 大字顯示現在時間（hh:mm:ss，本地時區、24 小時制，不含日期）。
+
+沒有指令，全部都在 panel 裡自動顯示：
+  冒號每秒閃爍一次（單數秒顯示、雙數秒隱藏），數字用固定大小的方塊字型畫，
+  不管當下是幾點幾分幾秒，畫出來的寬度都一樣（不會因為數字不同而跳動）。
+
+panel 拉太窄畫不下的話會直接被裁切，不會自動縮小字型或換行。
+";
+
+/// 沒有任何狀態（沒有計時器、沒有快取）——`panel_text()` 每次被呼叫都直接讀
+/// 當下的系統時間即時算，反正 GUI 本來就每 200ms 重繪一次面板。
+pub struct ClockPlugin;
+
+impl ClockPlugin {
+    pub fn new(_ctx: SharedContext) -> Self {
+        Self
+    }
+}
+
+impl Plugin for ClockPlugin {
+    fn commands(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    fn dispatch(&mut self, cmd: &str, _args: &[String], _out: &OutputBuffer) -> Result<()> {
+        bail!("clock 不認得指令: {cmd}")
+    }
+
+    fn panel_text(&self) -> Option<String> {
+        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let hms = sysinfo::local_hms(ts);
+        Some(render_hms(&hms, ts % 2 == 0))
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -114,5 +166,30 @@ mod tests {
                 assert_eq!(diff_cols, 0, "row {row_idx} 不應該因為冒號閃爍而改變");
             }
         }
+    }
+
+    #[test]
+    fn dispatch_always_errors() {
+        let mut plugin = ClockPlugin::new(std::sync::Arc::new(std::sync::Mutex::new(crate::plugin::ContextInner::default())));
+        let out = OutputBuffer::new();
+        let err = plugin.dispatch("anything", &[], &out).unwrap_err();
+        assert!(err.to_string().contains("clock 不認得指令"));
+    }
+
+    #[test]
+    fn panel_text_is_five_lines_of_constant_width() {
+        let plugin = ClockPlugin::new(std::sync::Arc::new(std::sync::Mutex::new(crate::plugin::ContextInner::default())));
+        let text = plugin.panel_text().expect("clock panel 應該永遠有內容");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 5);
+        for line in &lines {
+            assert_eq!(line.chars().count(), 34, "每一行都應該是 34 欄寬: {line:?}");
+        }
+    }
+
+    #[test]
+    fn commands_list_is_empty() {
+        let plugin = ClockPlugin::new(std::sync::Arc::new(std::sync::Mutex::new(crate::plugin::ContextInner::default())));
+        assert!(plugin.commands().is_empty());
     }
 }
