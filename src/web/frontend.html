@@ -576,6 +576,53 @@
   .notepad-preview tbody tr:not(:first-child) td {
     border-top: 1px solid #262a33;
   }
+  .storage-body {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+  }
+  .storage-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border-bottom: 1px solid #3a4150;
+  }
+  .storage-breadcrumb { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .storage-breadcrumb a { color: #6f9dff; text-decoration: none; margin-right: 2px; }
+  .storage-breadcrumb a:hover { text-decoration: underline; }
+  .storage-toolbar button {
+    background: #232833;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    padding: 3px 10px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  .storage-toolbar button:hover { background: #2b3140; }
+  .storage-table {
+    flex: 1;
+    overflow: auto;
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 12px;
+  }
+  .storage-table td { padding: 4px 10px; border-top: 1px solid #262a33; white-space: nowrap; }
+  .storage-table a { color: #6f9dff; text-decoration: none; }
+  .storage-table a:hover { text-decoration: underline; }
+  .storage-table button {
+    background: none;
+    border: none;
+    color: #9aa4b8;
+    cursor: pointer;
+    font-size: 12px;
+    margin-left: 6px;
+  }
+  .storage-table button:hover { color: #d8dee9; }
 </style>
 <style>
 /* 內嵌的 xterm.js 樣式（版本 5.5.0，從 jsdelivr 抓下來原封不動貼上，
@@ -1599,6 +1646,7 @@
     let musicUi = null;
     let shellUi = null;
     let notepadUi = null;
+    let storageUi = null;
     if (name === "player") {
       // 跟任何 plugin 都無關的獨立播放器：不訂閱 SSE（`body` 保持 `undefined`），
       // 左邊檔案清單＋下載列，右邊封面＋播放控制。
@@ -2326,6 +2374,176 @@
       loadFile(state.name).then(() => viewEl.focus());
 
       notepadUi = { container };
+    } else if (name === "storage") {
+      panel.style.width = "560px";
+      panel.style.height = "420px";
+
+      const container = document.createElement("div");
+      container.className = "storage-body";
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "storage-toolbar";
+      const breadcrumb = document.createElement("span");
+      breadcrumb.className = "storage-breadcrumb";
+      const uploadBtn = document.createElement("button");
+      uploadBtn.textContent = "⬆ 上傳";
+      const uploadInput = document.createElement("input");
+      uploadInput.type = "file";
+      uploadInput.style.display = "none";
+      const mkdirBtn = document.createElement("button");
+      mkdirBtn.textContent = "＋ 新資料夾";
+      toolbar.appendChild(breadcrumb);
+      toolbar.appendChild(uploadBtn);
+      toolbar.appendChild(uploadInput);
+      toolbar.appendChild(mkdirBtn);
+
+      const table = document.createElement("table");
+      table.className = "storage-table";
+      const tbody = document.createElement("tbody");
+      table.appendChild(tbody);
+
+      container.appendChild(toolbar);
+      container.appendChild(table);
+
+      const state = { currentPath: "" };
+
+      const joinPath = (base, name2) => (base ? `${base}/${name2}` : name2);
+
+      function formatSize(bytes) {
+        if (bytes === 0) return "—";
+        const units = ["B", "K", "M", "G", "T"];
+        let value = bytes;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) {
+          value /= 1024;
+          unit++;
+        }
+        return unit === 0 ? `${bytes}${units[0]}` : `${value.toFixed(1)}${units[unit]}`;
+      }
+
+      function renderBreadcrumb() {
+        breadcrumb.innerHTML = "";
+        const rootSeg = document.createElement("a");
+        rootSeg.href = "#";
+        rootSeg.textContent = "/";
+        rootSeg.addEventListener("click", (e) => {
+          e.preventDefault();
+          navigate("");
+        });
+        breadcrumb.appendChild(rootSeg);
+        if (!state.currentPath) return;
+        const parts = state.currentPath.split("/");
+        let acc = "";
+        for (const part of parts) {
+          acc = acc ? `${acc}/${part}` : part;
+          const seg = document.createElement("a");
+          seg.href = "#";
+          seg.textContent = ` ${part}`;
+          const target = acc;
+          seg.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigate(target);
+          });
+          breadcrumb.appendChild(seg);
+        }
+      }
+
+      async function refresh() {
+        const path = state.currentPath;
+        let entries;
+        try {
+          const res = await fetch(`/api/storage/list?path=${encodeURIComponent(path)}`);
+          entries = await res.json();
+        } catch (_err) {
+          return; // 這次沒抓到就算了，使用者可以再手動切換一次路徑重試。
+        }
+        if (path !== state.currentPath) return; // 等待期間使用者又切了路徑，這次回應過期了，不要蓋掉新畫面。
+        renderBreadcrumb();
+        tbody.innerHTML = "";
+        for (const entry of entries) {
+          const row = document.createElement("tr");
+          const nameCell = document.createElement("td");
+          if (entry.is_dir) {
+            const link = document.createElement("a");
+            link.href = "#";
+            link.textContent = `📁 ${entry.name}`;
+            link.addEventListener("click", (e) => {
+              e.preventDefault();
+              navigate(joinPath(state.currentPath, entry.name));
+            });
+            nameCell.appendChild(link);
+          } else {
+            nameCell.textContent = `📄 ${entry.name}`;
+          }
+          const sizeCell = document.createElement("td");
+          sizeCell.textContent = entry.is_dir ? "—" : formatSize(entry.size);
+          const actionsCell = document.createElement("td");
+          if (!entry.is_dir) {
+            const dlBtn = document.createElement("a");
+            dlBtn.href = `/api/storage/download?path=${encodeURIComponent(joinPath(state.currentPath, entry.name))}`;
+            dlBtn.textContent = "⬇";
+            actionsCell.appendChild(dlBtn);
+          }
+          const delBtn = document.createElement("button");
+          delBtn.textContent = "🗑";
+          delBtn.addEventListener("click", async () => {
+            const full = joinPath(state.currentPath, entry.name);
+            if (entry.is_dir) {
+              if (!window.confirm(`確定要刪除「${entry.name}」（資料夾）嗎？裡面的內容會一併刪除`)) return;
+              await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}&recursive=true`, { method: "POST" });
+            } else {
+              if (!window.confirm(`確定要刪除「${entry.name}」嗎？`)) return;
+              await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}`, { method: "POST" });
+            }
+            refresh();
+          });
+          const renameBtn = document.createElement("button");
+          renameBtn.textContent = "✎";
+          renameBtn.addEventListener("click", async () => {
+            const newName = window.prompt("新名稱", entry.name);
+            if (!newName || newName === entry.name) return;
+            const from = joinPath(state.currentPath, entry.name);
+            const to = joinPath(state.currentPath, newName);
+            await fetch(`/api/storage/rename?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
+              method: "POST",
+            });
+            refresh();
+          });
+          actionsCell.appendChild(delBtn);
+          actionsCell.appendChild(renameBtn);
+          row.appendChild(nameCell);
+          row.appendChild(sizeCell);
+          row.appendChild(actionsCell);
+          tbody.appendChild(row);
+        }
+      }
+
+      function navigate(path) {
+        state.currentPath = path;
+        refresh();
+      }
+
+      uploadBtn.addEventListener("click", () => uploadInput.click());
+      uploadInput.addEventListener("change", async () => {
+        const file = uploadInput.files[0];
+        if (!file) return;
+        const dest = joinPath(state.currentPath, file.name);
+        await fetch(`/api/storage/upload?path=${encodeURIComponent(dest)}`, { method: "POST", body: file });
+        uploadInput.value = "";
+        refresh();
+      });
+
+      mkdirBtn.addEventListener("click", async () => {
+        const dirName = window.prompt("新資料夾名稱");
+        if (!dirName) return;
+        const dest = joinPath(state.currentPath, dirName);
+        await fetch(`/api/storage/mkdir?path=${encodeURIComponent(dest)}`, { method: "POST" });
+        refresh();
+      });
+
+      refresh();
+
+      storageUi = { container };
     } else {
       body = document.createElement("pre");
       body.className = "panel-body";
@@ -2337,7 +2555,17 @@
     handle.addEventListener("mousedown", (e) => startResize(panel, e));
 
     panel.appendChild(title);
-    panel.appendChild(musicUi ? musicUi.container : shellUi ? shellUi.container : notepadUi ? notepadUi.container : body);
+    panel.appendChild(
+      musicUi
+        ? musicUi.container
+        : shellUi
+        ? shellUi.container
+        : notepadUi
+        ? notepadUi.container
+        : storageUi
+        ? storageUi.container
+        : body
+    );
     panel.appendChild(handle);
     panel.addEventListener("mousedown", () => bringToFront(panel));
     desk.appendChild(panel);
@@ -2414,7 +2642,7 @@
     // 編輯，不需要也訂閱一份純文字版本。EventSource 斷線會自動重連，其餘
     // panel 不用自己寫 retry。
     let es = null;
-    if (name !== "player" && name !== "shell" && name !== "notepad") {
+    if (name !== "player" && name !== "shell" && name !== "notepad" && name !== "storage") {
       es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
       es.onmessage = (e) => {
         // 使用者如果往上捲去看舊內容，不要硬把它拉回底部；只有原本就在（或接近）
@@ -2434,7 +2662,7 @@
     if (musicUi) {
       startMusicFileBrowser(musicUi);
     }
-    open.set(name, { el: panel, es, musicUi, shellUi, notepadUi });
+    open.set(name, { el: panel, es, musicUi, shellUi, notepadUi, storageUi });
   }
 
   fetch("/api/version")
