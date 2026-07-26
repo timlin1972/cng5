@@ -11,6 +11,7 @@ mod qr;
 mod remote;
 mod remote_output;
 mod storage;
+mod sync;
 mod sync_baseline;
 mod system;
 mod weather;
