@@ -20,7 +20,7 @@ use crate::plugin::{
     APP_VERSION,
 };
 use crate::plugins::{
-    list_dir, make_dir, remove, rename_path, safe_file_path, safe_storage_path, ALLOWED_FOLDERS,
+    list_dir, make_dir, remove, rename_path, safe_file_path, safe_storage_path, walk_with_hashes, ALLOWED_FOLDERS,
     DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
@@ -107,6 +107,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/storage/mkdir", web::post().to(storage_mkdir))
             .route("/api/storage/delete", web::post().to(storage_delete))
             .route("/api/storage/rename", web::post().to(storage_rename))
+            .route("/api/storage/sync-manifest", web::get().to(storage_sync_manifest))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -364,6 +365,18 @@ async fn storage_rename(query: web::Query<StorageRenameQuery>) -> HttpResponse {
     match rename_path(&from, &to) {
         Ok(()) => HttpResponse::Ok().finish(),
         Err(_) => HttpResponse::BadRequest().finish(),
+    }
+}
+
+/// `GET /api/storage/sync-manifest`：回傳整棵 `storage/` 樹（含子資料夾、每個
+/// 檔案的 hash）攤平後的清單，同網域的 `sync` plugin 用這個端點取得對方的完
+/// 整清單去跟本機清單、baseline 比對。同網域走 HTTP，沒有 MQTT 那種單則訊息
+/// 大小限制，所以不分頁，直接回傳全部，跟這個檔案裡其他既有的
+/// `storage_list`/`files_list`/`music_files` 端點一樣不分頁。
+async fn storage_sync_manifest() -> HttpResponse {
+    match walk_with_hashes(Path::new(STORAGE_DIR)) {
+        Ok(entries) => HttpResponse::Ok().json(entries),
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
 

@@ -1,7 +1,14 @@
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+use anyhow::{bail, Context, Result};
 
 use crate::plugins::storage::SyncEntry;
 use crate::plugins::sync_baseline::Baseline;
+use crate::plugins::url_encode_filename;
+use crate::web::PORT;
 
 /// 這一輪同步對某個路徑該做的事。只處理檔案，不處理空資料夾——資料夾是搬檔
 /// 案時由執行層視需要自動建立，不會有獨立的「建立資料夾」/「刪除資料夾」
@@ -99,6 +106,111 @@ pub(crate) fn classify(local: &[SyncEntry], remote: &[SyncEntry], baseline: &Bas
         }
     }
     actions
+}
+
+/// 跟一個同步對象「怎麼溝通」的抽象介面——分類演算法（`classify`）算完要做
+/// 什麼事之後，實際執行搬檔/建資料夾/刪除都透過這個介面，不管對方是同網域
+/// （`HttpTransport`）還是跨 domain（Task 6 的 `CrossDomainTransport`），呼叫端
+/// 的程式碼完全一樣。物件安全（沒有泛型方法、沒有 `Self: Sized` 限制），可以
+/// 用 `Box<dyn SyncTransport>` 依角色動態選擇實作。
+pub(crate) trait SyncTransport {
+    /// 取得對方目前整棵 `storage/` 樹的清單（含每個檔案的 hash）。
+    fn manifest(&self) -> Result<Vec<SyncEntry>>;
+    /// 把對方 `path` 這個檔案下載到本機的 `dest` 路徑；`expected_size` 是這個
+    /// 檔案在對方那邊的大小（來自觸發這次下載的 manifest 條目），`HttpTransport`
+    /// 用不到（HTTP 下載讀到 EOF 就結束），`CrossDomainTransport`（Task 6）需要
+    /// 靠它判斷分段下載何時結束。
+    fn download_to(&self, path: &str, expected_size: u64, dest: &Path) -> Result<()>;
+    /// 把本機 `src` 這個檔案上傳成對方的 `path`。
+    fn upload_from(&self, path: &str, src: &Path) -> Result<()>;
+    /// 在對方建立 `path` 這個資料夾。
+    fn mkdir(&self, path: &str) -> Result<()>;
+    /// 刪除對方的 `path`（檔案或資料夾，`recursive` 語意跟 `storage` plugin
+    /// 的 `remove` 一致）。
+    fn delete(&self, path: &str, recursive: bool) -> Result<()>;
+}
+
+/// 同網域的同步對象，透過既有的 `/api/storage/...` 端點溝通——不重做傳輸層，
+/// 直接呼叫 `storage` plugin 已經做好的 HTTP API。
+pub(crate) struct HttpTransport {
+    pub(crate) ip: String,
+}
+
+impl SyncTransport for HttpTransport {
+    fn manifest(&self) -> Result<Vec<SyncEntry>> {
+        let url = format!("http://{}:{PORT}/api/storage/sync-manifest", self.ip);
+        let output = Command::new("curl")
+            .args(["--silent", "--fail", "--max-time", "30", &url])
+            .output()
+            .context("執行 curl 失敗")?;
+        if !output.status.success() {
+            bail!("查詢 sync-manifest 失敗");
+        }
+        let body = String::from_utf8(output.stdout).context("回應不是合法的 UTF-8")?;
+        serde_json::from_str(&body).context("回應格式不對")
+    }
+
+    fn download_to(&self, path: &str, _expected_size: u64, dest: &Path) -> Result<()> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("建立資料夾失敗: {}", parent.display()))?;
+        }
+        let url = format!("http://{}:{PORT}/api/storage/download?path={}", self.ip, url_encode_filename(path));
+        let output = Command::new("curl")
+            .args(["--silent", "--fail", "--max-time", "120", "-o", &dest.display().to_string(), &url])
+            .output()
+            .context("執行 curl 失敗")?;
+        if !output.status.success() {
+            bail!("下載失敗: {path}");
+        }
+        Ok(())
+    }
+
+    fn upload_from(&self, path: &str, src: &Path) -> Result<()> {
+        let url = format!("http://{}:{PORT}/api/storage/upload?path={}", self.ip, url_encode_filename(path));
+        let output = Command::new("curl")
+            .args([
+                "--silent",
+                "--fail",
+                "--max-time",
+                "120",
+                "-X",
+                "POST",
+                "--data-binary",
+                &format!("@{}", src.display()),
+                &url,
+            ])
+            .output()
+            .context("執行 curl 失敗")?;
+        if !output.status.success() {
+            bail!("上傳失敗: {path}");
+        }
+        Ok(())
+    }
+
+    fn mkdir(&self, path: &str) -> Result<()> {
+        let url = format!("http://{}:{PORT}/api/storage/mkdir?path={}", self.ip, url_encode_filename(path));
+        let output = Command::new("curl")
+            .args(["--silent", "--fail", "--max-time", "10", "-X", "POST", &url])
+            .output()
+            .context("執行 curl 失敗")?;
+        if !output.status.success() {
+            bail!("建立資料夾失敗: {path}");
+        }
+        Ok(())
+    }
+
+    fn delete(&self, path: &str, recursive: bool) -> Result<()> {
+        let url =
+            format!("http://{}:{PORT}/api/storage/delete?path={}&recursive={recursive}", self.ip, url_encode_filename(path));
+        let output = Command::new("curl")
+            .args(["--silent", "--fail", "--max-time", "30", "-X", "POST", &url])
+            .output()
+            .context("執行 curl 失敗")?;
+        if !output.status.success() {
+            bail!("刪除失敗: {path}");
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
