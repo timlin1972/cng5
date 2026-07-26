@@ -46,7 +46,7 @@ pub(crate) fn classify(local: &[SyncEntry], remote: &[SyncEntry], baseline: &Bas
     let mut all_paths: HashSet<&String> = HashSet::new();
     all_paths.extend(local_states.keys());
     all_paths.extend(remote_states.keys());
-    all_paths.extend(baseline.keys());
+    all_paths.extend(baseline.files.keys());
 
     let mut paths: Vec<&String> = all_paths.into_iter().collect();
     paths.sort();
@@ -55,7 +55,7 @@ pub(crate) fn classify(local: &[SyncEntry], remote: &[SyncEntry], baseline: &Bas
     for path in paths {
         let local_state = local_states.get(path);
         let remote_state = remote_states.get(path);
-        let base = baseline.get(path);
+        let base = baseline.files.get(path);
 
         match (local_state, remote_state, base) {
             (Some(_), None, None) => actions.push(SyncAction::PushToRemote { path: path.clone() }),
@@ -483,7 +483,7 @@ pub(crate) fn run_sync_pass(
                 match result {
                     Ok(()) => {
                         if let Some(hash) = find_hash(&local, &path) {
-                            baseline.insert(
+                            baseline.files.insert(
                                 path,
                                 BaselineEntry { local_hash: hash.to_string(), remote_hash: hash.to_string() },
                             );
@@ -499,7 +499,7 @@ pub(crate) fn run_sync_pass(
                 match transport.download_to(&path, size, &dest) {
                     Ok(()) => {
                         if let Some(hash) = find_hash(&remote, &path) {
-                            baseline.insert(
+                            baseline.files.insert(
                                 path,
                                 BaselineEntry { local_hash: hash.to_string(), remote_hash: hash.to_string() },
                             );
@@ -511,14 +511,14 @@ pub(crate) fn run_sync_pass(
             }
             SyncAction::DeleteLocal { path } => match crate::plugins::remove(&local_root.join(&path), true) {
                 Ok(()) => {
-                    baseline.remove(&path);
+                    baseline.files.remove(&path);
                     outcome.deleted_local += 1;
                 }
                 Err(err) => outcome.error = Some(format!("刪除本機 {path} 失敗: {err:#}")),
             },
             SyncAction::DeleteRemote { path } => match transport.delete(&path, true) {
                 Ok(()) => {
-                    baseline.remove(&path);
+                    baseline.files.remove(&path);
                     outcome.deleted_remote += 1;
                 }
                 Err(err) => outcome.error = Some(format!("刪除對方 {path} 失敗: {err:#}")),
@@ -533,7 +533,7 @@ pub(crate) fn run_sync_pass(
                         if let (Some(local_hash), Some(remote_hash)) =
                             (find_hash(&local, &path), find_hash(&remote, &path))
                         {
-                            baseline.insert(
+                            baseline.files.insert(
                                 path,
                                 BaselineEntry {
                                     local_hash: local_hash.to_string(),
@@ -775,7 +775,7 @@ mod tests {
     /// 但已經確認過的衝突會刻意留下不同的值，測試裡分開指定才能覆蓋到兩種
     /// 情況。
     fn baseline_of(entries: &[(&str, &str, &str)]) -> Baseline {
-        entries
+        let files = entries
             .iter()
             .map(|(path, local_hash, remote_hash)| {
                 (
@@ -783,14 +783,15 @@ mod tests {
                     BaselineEntry { local_hash: local_hash.to_string(), remote_hash: remote_hash.to_string() },
                 )
             })
-            .collect()
+            .collect();
+        Baseline { files, known_dirs: HashSet::new() }
     }
 
     #[test]
     fn new_local_file_pushes_to_remote() {
         let local = vec![file("new.txt", "h1")];
         let remote = vec![];
-        let actions = classify(&local, &remote, &Baseline::new());
+        let actions = classify(&local, &remote, &Baseline::default());
         assert_eq!(actions, vec![SyncAction::PushToRemote { path: "new.txt".to_string() }]);
     }
 
@@ -798,7 +799,7 @@ mod tests {
     fn new_remote_file_pulls_from_remote() {
         let local = vec![];
         let remote = vec![file("new.txt", "h1")];
-        let actions = classify(&local, &remote, &Baseline::new());
+        let actions = classify(&local, &remote, &Baseline::default());
         assert_eq!(actions, vec![SyncAction::PullFromRemote { path: "new.txt".to_string() }]);
     }
 
@@ -851,7 +852,7 @@ mod tests {
     fn both_sides_independently_created_same_name_different_content_is_conflict() {
         let local = vec![file("new.txt", "hA")];
         let remote = vec![file("new.txt", "hB")];
-        let actions = classify(&local, &remote, &Baseline::new()); // 沒有 baseline
+        let actions = classify(&local, &remote, &Baseline::default()); // 沒有 baseline
         assert_eq!(actions, vec![SyncAction::Conflict { path: "new.txt".to_string() }]);
     }
 
@@ -859,7 +860,7 @@ mod tests {
     fn both_sides_independently_created_same_name_same_content_is_no_action() {
         let local = vec![file("new.txt", "hA")];
         let remote = vec![file("new.txt", "hA")];
-        let actions = classify(&local, &remote, &Baseline::new());
+        let actions = classify(&local, &remote, &Baseline::default());
         assert!(actions.is_empty());
     }
 
@@ -916,7 +917,7 @@ mod tests {
         // baseline 可以判斷是誰改的，保守當成衝突處理。
         let local = vec![file("f.txt", "hA")];
         let remote = vec![file("f.txt", "hB")];
-        let actions = classify(&local, &remote, &Baseline::new());
+        let actions = classify(&local, &remote, &Baseline::default());
         assert_eq!(actions, vec![SyncAction::Conflict { path: "f.txt".to_string() }]);
     }
 
@@ -957,7 +958,7 @@ mod tests {
     fn multiple_independent_paths_each_classified_separately() {
         let local = vec![file("a.txt", "h1"), file("b.txt", "h1")];
         let remote = vec![file("b.txt", "h1")]; // a.txt 只有本機有，b.txt 兩邊一樣
-        let actions = classify(&local, &remote, &Baseline::new());
+        let actions = classify(&local, &remote, &Baseline::default());
         assert_eq!(actions, vec![SyncAction::PushToRemote { path: "a.txt".to_string() }]);
     }
 

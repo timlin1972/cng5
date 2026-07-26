@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -21,8 +21,25 @@ pub(crate) struct BaselineEntry {
 }
 
 /// 一個同步對象（同 domain 的某個 client id、或跨 domain 的某個 domain 名稱）
-/// 的完整 baseline：相對路徑 -> 上次同步完成時的狀態。
-pub(crate) type Baseline = HashMap<String, BaselineEntry>;
+/// 的完整 baseline：檔案層級的狀態（相對路徑 -> 上次同步完成時的狀態），加上
+/// 目錄層級的 `known_dirs`。
+///
+/// `known_dirs` 記錄「上一輪同步完成時，雙邊都存在的所有目錄路徑」——不限於
+/// 當時是空的：一個原本有檔案、後來檔案被清空的目錄，只要它在上一輪同步完成
+/// 時雙邊都存在過，就會在這裡；只追蹤「一直是空的」目錄沒辦法正確修好「client
+/// 砍掉一個有內容的目錄，server 端檔案跟著刪了但目錄本身變成孤兒」這個情況。
+///
+/// 兩個欄位都加 `#[serde(default)]`，讓改版前那種扁平 `{路徑: BaselineEntry}`
+/// （沒有這層 `files`/`known_dirs` 外殼）的舊格式檔案，用新結構去解析時觸發的
+/// 失敗，能被 `load_baseline` 既有的「格式壞掉當作沒有 baseline」錯誤處理路徑
+/// 接住，安全降級成空 `Baseline`，不會 panic。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+pub(crate) struct Baseline {
+    #[serde(default)]
+    pub(crate) files: HashMap<String, BaselineEntry>,
+    #[serde(default)]
+    pub(crate) known_dirs: HashSet<String>,
+}
 
 pub(crate) fn baseline_path(state_dir: &Path, partner_key: &str) -> PathBuf {
     state_dir.join(format!("{partner_key}.json"))
@@ -35,7 +52,7 @@ pub(crate) fn load_baseline(state_dir: &Path, partner_key: &str) -> Baseline {
     let path = baseline_path(state_dir, partner_key);
     match fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
-        Err(_) => Baseline::new(),
+        Err(_) => Baseline::default(),
     }
 }
 
@@ -66,8 +83,8 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let state_dir = test_state_dir("round-trip");
-        let mut baseline = Baseline::new();
-        baseline.insert(
+        let mut baseline = Baseline::default();
+        baseline.files.insert(
             "photos/beach.jpg".to_string(),
             BaselineEntry { local_hash: "abc123".to_string(), remote_hash: "abc123".to_string() },
         );
@@ -80,7 +97,8 @@ mod tests {
     fn load_missing_file_returns_empty_baseline() {
         let state_dir = test_state_dir("missing-file");
         let loaded = load_baseline(&state_dir, "nonexistent-partner");
-        assert!(loaded.is_empty());
+        assert!(loaded.files.is_empty());
+        assert!(loaded.known_dirs.is_empty());
     }
 
     #[test]
@@ -89,21 +107,34 @@ mod tests {
         fs::create_dir_all(&state_dir).unwrap();
         fs::write(baseline_path(&state_dir, "broken"), b"{ this is not valid json").unwrap();
         let loaded = load_baseline(&state_dir, "broken");
-        assert!(loaded.is_empty());
+        assert!(loaded.files.is_empty());
+    }
+
+    #[test]
+    fn load_legacy_flat_format_returns_empty_baseline_not_panic() {
+        // 改版前的舊格式：扁平的 {路徑: BaselineEntry}，沒有 files/known_dirs
+        // 這層外殼——新結構解析這種格式一定會失敗，必須安全降級，不能 panic。
+        let state_dir = test_state_dir("legacy-flat-format");
+        fs::create_dir_all(&state_dir).unwrap();
+        let legacy_json = r#"{"photos/beach.jpg": {"local_hash": "abc123", "remote_hash": "abc123"}}"#;
+        fs::write(baseline_path(&state_dir, "legacy-partner"), legacy_json).unwrap();
+        let loaded = load_baseline(&state_dir, "legacy-partner");
+        assert!(loaded.files.is_empty());
+        assert!(loaded.known_dirs.is_empty());
     }
 
     #[test]
     fn save_creates_state_dir_if_missing() {
         let state_dir = test_state_dir("creates-dir");
         assert!(!state_dir.exists());
-        save_baseline(&state_dir, "domain-branch-b", &Baseline::new()).unwrap();
+        save_baseline(&state_dir, "domain-branch-b", &Baseline::default()).unwrap();
         assert!(state_dir.is_dir());
     }
 
     #[test]
     fn save_leaves_no_temp_file_behind() {
         let state_dir = test_state_dir("no-temp-leftover");
-        save_baseline(&state_dir, "client-a", &Baseline::new()).unwrap();
+        save_baseline(&state_dir, "client-a", &Baseline::default()).unwrap();
         let tmp_path = baseline_path(&state_dir, "client-a").with_extension("json.tmp");
         assert!(!tmp_path.exists());
         assert!(baseline_path(&state_dir, "client-a").exists());
@@ -112,11 +143,13 @@ mod tests {
     #[test]
     fn different_partners_get_different_files() {
         let state_dir = test_state_dir("different-partners");
-        let mut baseline_a = Baseline::new();
-        baseline_a.insert("x.txt".to_string(), BaselineEntry { local_hash: "h1".to_string(), remote_hash: "h1".to_string() });
+        let mut baseline_a = Baseline::default();
+        baseline_a
+            .files
+            .insert("x.txt".to_string(), BaselineEntry { local_hash: "h1".to_string(), remote_hash: "h1".to_string() });
         save_baseline(&state_dir, "client-a", &baseline_a).unwrap();
-        save_baseline(&state_dir, "client-b", &Baseline::new()).unwrap();
+        save_baseline(&state_dir, "client-b", &Baseline::default()).unwrap();
         assert_eq!(load_baseline(&state_dir, "client-a"), baseline_a);
-        assert!(load_baseline(&state_dir, "client-b").is_empty());
+        assert!(load_baseline(&state_dir, "client-b").files.is_empty());
     }
 }
