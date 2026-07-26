@@ -414,17 +414,23 @@ fn resolve_conflict(
 /// 對 `path` 這個目的地確保上層資料夾在對方那邊存在——`upload_from`/
 /// `HttpTransport` 底層的 `/api/storage/upload` 不會自動建立中間目錄（見
 /// `storage_upload` 的文件），推新檔案進一個新的子資料夾之前要先在對方那邊
-/// `mkdir` 過。只在資料夾還沒出現在 `remote` 清單裡時才呼叫，避免每次都白跑
-/// 一次 mkdir 請求。
-fn ensure_remote_parent_dirs(transport: &dyn SyncTransport, path: &str, remote: &[SyncEntry]) -> Result<()> {
+/// `mkdir` 過。`known_dirs` 由呼叫端在整個 `run_sync_pass` 的動作迴圈之外建立、
+/// 持續傳入同一個可變集合——只在資料夾還沒出現在這個集合裡時才呼叫 `mkdir`，
+/// 呼叫完馬上把它記進去。這樣同一輪同步裡，先推的檔案剛建立好的資料夾，後面
+/// 推進同一個資料夾的檔案就不會重複呼叫 `mkdir`（對方的 `make_dir`/
+/// `StorageMkdir` 對已存在的路徑會回報錯誤，不是單純的 no-op）。
+fn ensure_remote_parent_dirs(
+    transport: &dyn SyncTransport,
+    path: &str,
+    known_dirs: &mut std::collections::HashSet<String>,
+) -> Result<()> {
     let Some((dir, _name)) = path.rsplit_once('/') else { return Ok(()) };
-    let known_dirs: std::collections::HashSet<&str> =
-        remote.iter().filter(|e| e.is_dir).map(|e| e.path.as_str()).collect();
     let mut acc = String::new();
     for segment in dir.split('/') {
         acc = if acc.is_empty() { segment.to_string() } else { format!("{acc}/{segment}") };
-        if !known_dirs.contains(acc.as_str()) {
+        if !known_dirs.contains(&acc) {
             transport.mkdir(&acc)?;
+            known_dirs.insert(acc.clone());
         }
     }
     Ok(())
@@ -462,10 +468,17 @@ pub(crate) fn run_sync_pass(
     let mut baseline = load_baseline(state_dir, partner_key);
     let actions = classify(&local, &remote, &baseline);
 
+    // 從 `remote` 快照建立這一輪的初始已知資料夾集合，之後在迴圈裡持續更新
+    // （見 `ensure_remote_parent_dirs` 的文件）——不能每次呼叫都重新從
+    // `remote` 建一份，那份快照在整輪同步開始時就固定了，不會反映這一輪已經
+    // 建立過的資料夾。
+    let mut known_remote_dirs: std::collections::HashSet<String> =
+        remote.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect();
+
     for action in actions {
         match action {
             SyncAction::PushToRemote { path } => {
-                let result = ensure_remote_parent_dirs(transport, &path, &remote)
+                let result = ensure_remote_parent_dirs(transport, &path, &mut known_remote_dirs)
                     .and_then(|_| transport.upload_from(&path, &local_root.join(&path)));
                 match result {
                     Ok(()) => {
@@ -723,7 +736,19 @@ fn run_all_partners(ctx: &SharedContext, statuses: &Arc<Mutex<HashMap<String, Pa
     }
 }
 
+/// 只在這一輪真的有事發生（有搬檔/刪除/衝突，或失敗）時才寫進 activities
+/// log——每 60 秒輪詢一次、每個對象都寫一筆「推0拉0刪本機0刪對方0衝突0」的話
+/// 幾乎全是雜訊，會把真正的事件淹沒，所以完全沒動靜的一輪就不記錄。
 fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
+    let had_activity = outcome.pushed > 0
+        || outcome.pulled > 0
+        || outcome.deleted_local > 0
+        || outcome.deleted_remote > 0
+        || outcome.conflicts > 0
+        || outcome.error.is_some();
+    if !had_activity {
+        return;
+    }
     let detail = match &outcome.error {
         Some(err) => format!("{partner_key} 同步失敗: {err}"),
         None => format!(
@@ -736,6 +761,8 @@ fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+
     use super::*;
     use crate::plugins::storage::SyncEntry;
     use crate::plugins::sync_baseline::{Baseline, BaselineEntry};
@@ -965,5 +992,56 @@ mod tests {
     fn conflict_copy_name_preserves_directory_prefix() {
         let name = conflict_copy_name("a/b/c/deep.txt", "x", "2026-01-01");
         assert_eq!(name, "a/b/c/deep (衝突自 x，2026-01-01).txt");
+    }
+
+    /// 只實作測試會用到的 `mkdir`，其他方法一律 `unimplemented!`——這個假
+    /// transport 專門用來模擬真實 `make_dir`/`StorageMkdir` 對「已存在的路徑」
+    /// 回報錯誤的行為，藉此證明 `ensure_remote_parent_dirs` 不會在同一輪同步
+    /// 裡對同一個資料夾重複呼叫 `mkdir`。
+    struct MkdirTrackingTransport {
+        created: RefCell<HashSet<String>>,
+    }
+
+    impl SyncTransport for MkdirTrackingTransport {
+        fn manifest(&self) -> Result<Vec<SyncEntry>> {
+            unimplemented!("not exercised by this test")
+        }
+        fn download_to(&self, _path: &str, _expected_size: u64, _dest: &Path) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        fn upload_from(&self, _path: &str, _src: &Path) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        fn mkdir(&self, path: &str) -> Result<()> {
+            let mut created = self.created.borrow_mut();
+            if created.contains(path) {
+                bail!("資料夾已存在（模擬 make_dir 對已存在路徑回報的錯誤）: {path}");
+            }
+            created.insert(path.to_string());
+            Ok(())
+        }
+        fn delete(&self, _path: &str, _recursive: bool) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+    }
+
+    #[test]
+    fn ensure_remote_parent_dirs_is_idempotent_within_one_pass() {
+        let transport = MkdirTrackingTransport { created: RefCell::new(HashSet::new()) };
+        let mut known_dirs: HashSet<String> = HashSet::new();
+        ensure_remote_parent_dirs(&transport, "photos/2026/a.jpg", &mut known_dirs).unwrap();
+        // 第二個檔案進的是這一輪才剛建立的同一個資料夾——修好之前，這一行會
+        // 因為重複呼叫 mkdir("photos") / mkdir("photos/2026") 而失敗。
+        ensure_remote_parent_dirs(&transport, "photos/2026/b.jpg", &mut known_dirs).unwrap();
+    }
+
+    #[test]
+    fn ensure_remote_parent_dirs_seeded_with_existing_dirs_skips_them() {
+        let transport = MkdirTrackingTransport { created: RefCell::new(HashSet::new()) };
+        let mut known_dirs: HashSet<String> = ["existing".to_string()].into_iter().collect();
+        // "existing" 已經在 known_dirs 裡（模擬從 remote manifest 建好的初始
+        // 狀態），不應該再呼叫一次 mkdir。
+        ensure_remote_parent_dirs(&transport, "existing/new-file.txt", &mut known_dirs).unwrap();
+        assert!(!transport.created.borrow().contains("existing"));
     }
 }
