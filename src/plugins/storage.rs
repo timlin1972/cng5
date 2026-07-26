@@ -38,6 +38,16 @@ pub(crate) struct StorageEntry {
 ///    canonicalize，確認它仍然在 `root` 的 canonical 路徑底下——這一步是為了
 ///    擋掉「路徑字串看起來在 root 裡面、但其中某一段其實是指到 root 外面的
 ///    symlink」這種繞過純字串檢查的手法。
+///
+/// 已知的理論限制：如果 `storage/` 底下已經有一個「目標不存在」的 dangling
+/// symlink，`existing_ancestor` 的判斷會停在這個 symlink 本身還存在的那一層
+/// （`Path::exists()` 對 dangling symlink 回傳 false，所以會繼續往上一層找），
+/// canonicalize 檢查因此不會真的追蹤這個 symlink 實際指到哪裡；之後如果真的對
+/// 那個路徑寫入，會透過 symlink 寫到 root 外面。這個功能本身完全不會建立
+/// symlink（`make_dir` 只建普通資料夾、上傳只寫普通檔案），所以要利用這個限制
+/// 得先有辦法直接在檔案系統裡塞一個 dangling symlink 進 `storage/`——不是這個
+/// API 本身能做到的攻擊路徑，因此接受這個取捨，不用 `symlink_metadata` 另外
+/// 逐層特殊處理。
 pub(crate) fn safe_storage_path(root: &Path, relative: &str) -> Option<PathBuf> {
     if relative.is_empty() {
         return None;
