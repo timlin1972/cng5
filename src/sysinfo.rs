@@ -1,4 +1,5 @@
 use std::net::UdpSocket;
+use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -30,6 +31,19 @@ unsafe extern "system" {
 
     /// `local_hms` 用：把 `FILETIME` 拆成年月日時分秒（`kernel32.dll`）。
     fn FileTimeToSystemTime(lpFileTime: *const FileTimeRaw, lpSystemTime: *mut SystemTimeRaw) -> i32;
+
+    /// `disk_usage` 用：查 `lpDirectoryName` 所在磁碟區的可用/總共容量
+    /// （`kernel32.dll`）。三個容量參數在 Win32 API 裡的型別是
+    /// `PULARGE_INTEGER`（`ULARGE_INTEGER` 的指標），但 `ULARGE_INTEGER`
+    /// 的記憶體佈局就是單純一個 8 bytes 的無號整數（透過 `.QuadPart` 存取），
+    /// 直接宣告成 `*mut u64` 可以拿到一樣的資料，不需要另外宣告那個 union
+    /// 型別。失敗（例如路徑不存在、沒有權限）回傳 0。
+    fn GetDiskFreeSpaceExW(
+        lpDirectoryName: *const u16,
+        lpFreeBytesAvailableToCaller: *mut u64,
+        lpTotalNumberOfBytes: *mut u64,
+        lpTotalNumberOfFreeBytes: *mut u64,
+    ) -> i32;
 }
 
 #[cfg(windows)]
@@ -117,6 +131,73 @@ pub fn format_uptime(secs: u64) -> String {
 /// 這個程式（行程）本身跑了多久，從 `PROCESS_START` 算起。
 pub fn app_uptime_secs() -> u64 {
     PROCESS_START.elapsed().as_secs()
+}
+
+/// 量測 `path` 所在檔案系統的可用/總共容量（bytes）。查不到（指令失敗、FFI
+/// 呼叫失敗）就回傳 `None`，呼叫端（`system` plugin 的 `build_report`）落地
+/// 成 0，顯示端看到 0 當作查不到處理——跟 `os`/`version` 現有「查不到就填
+/// 預設值，不能讓整包解析失敗」同一套精神。
+#[cfg(not(windows))]
+pub fn disk_usage(path: &Path) -> Option<(u64, u64)> {
+    let output = Command::new("df").arg("-k").arg(path).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    // `df -k` 至少輸出兩行：表頭 + 一筆資料。掛載點路徑太長時 `df` 會把
+    // Filesystem 那欄自己獨立一行、資料擠到下一行，所以用「最後一行」而不是
+    // 寫死拿第二行，兩種輸出排版都能正確解析。
+    let last_line = text.lines().last()?;
+    let fields: Vec<&str> = last_line.split_whitespace().collect();
+    // 標準欄位順序：Filesystem, 1K-blocks, Used, Available, Use%, Mounted on
+    if fields.len() < 4 {
+        return None;
+    }
+    let total_kb: u64 = fields[1].parse().ok()?;
+    let free_kb: u64 = fields[3].parse().ok()?;
+    Some((free_kb * 1024, total_kb * 1024))
+}
+
+#[cfg(windows)]
+pub fn disk_usage(path: &Path) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free_available: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free: u64 = 0;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_available, &mut total_bytes, &mut total_free) != 0
+    };
+    if !ok {
+        return None;
+    }
+    Some((free_available, total_bytes))
+}
+
+/// 把可用/總共 bytes 換算成 `device`/`global` 表格用的精簡格式，例如
+/// `302G/512G`；`total == 0`（代表查不到）就回傳 `N/A`。兩個表格共用同一份
+/// （跟 `format_uptime` 已經是這兩個表格共用的既有慣例一致），不是各自
+/// 維護一份。
+pub fn format_disk_usage(free: u64, total: u64) -> String {
+    if total == 0 {
+        return "N/A".to_string();
+    }
+    format!("{}/{}", format_bytes_short(free), format_bytes_short(total))
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes}{}", UNITS[0])
+    } else {
+        format!("{value:.0}{}", UNITS[unit])
+    }
 }
 
 /// 把 unix 秒數格式化成本地時區的 `hh:mm:ss`，給 `activities` plugin 顯示活動
@@ -390,5 +471,26 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+
+    #[test]
+    fn disk_usage_reports_sane_values_for_current_dir() {
+        let (free, total) = disk_usage(Path::new(".")).expect("查詢目前目錄所在檔案系統的容量應該要成功");
+        assert!(total > 0, "總容量應該大於 0");
+        assert!(free <= total, "可用容量不應該超過總容量");
+    }
+
+    #[test]
+    fn format_disk_usage_formats_as_free_slash_total() {
+        // 512G = 512 * 1024^3 bytes，302G = 302 * 1024^3 bytes——挑不會因為
+        // 四捨五入邊界而變得不穩定的整數 GiB 值。
+        let total = 512u64 * 1024 * 1024 * 1024;
+        let free = 302u64 * 1024 * 1024 * 1024;
+        assert_eq!(format_disk_usage(free, total), "302G/512G");
+    }
+
+    #[test]
+    fn format_disk_usage_reports_na_when_total_is_zero() {
+        assert_eq!(format_disk_usage(0, 0), "N/A");
     }
 }
