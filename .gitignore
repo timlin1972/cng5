@@ -35,6 +35,8 @@ target
 
 /storage
 
+/sync-state
+
 /wol
 
 /remote-key
