@@ -26,3 +26,8 @@ plugin enter device
 panel
 show
 ~
+
+# wol
+plugin enter wol
+add linds 90:09:d0:64:4e:a4
+~
