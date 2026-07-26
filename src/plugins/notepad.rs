@@ -7,10 +7,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
 
-/// 筆記檔案都放在這個資料夾底下（相對於程式執行時的工作目錄），跟 `MUSIC_DIR`
-/// 同等位階。web 那邊的編輯功能（見 `web.rs`）直接讀寫這個資料夾（固定操作
+/// 筆記檔案都放在 `storage` plugin 管理的樹底下（`storage/notepad`），這樣
+/// `storage` plugin 的檔案總管跟 `sync` plugin 的跨裝置同步都會自動涵蓋筆記
+/// 檔案，不用再靠 `files` plugin 的 `ALLOWED_FOLDERS` 手動複製機制。web 那邊
+/// 的編輯功能（見 `web.rs`）直接讀寫這個資料夾（固定操作
 /// `DEFAULT_NOTEPAD_FILE`），不透過 `Shell`/`NotepadPlugin`。
-pub(crate) const NOTEPAD_DIR: &str = "notepad";
+pub(crate) const NOTEPAD_DIR: &str = "storage/notepad";
 
 /// 一開始（還沒按 Ctrl-F 切換過檔案）預設開這個檔案。
 pub(crate) const DEFAULT_NOTEPAD_FILE: &str = "notepad.md";
@@ -18,14 +20,14 @@ pub(crate) const DEFAULT_NOTEPAD_FILE: &str = "notepad.md";
 /// `manual` 指令的說明。這個 plugin 主要透過 GUI panel 直接打字使用，指令列
 /// 能做的事很少，manual 裡要講清楚真正的操作方式在 panel 裡，不是指令。
 const MANUAL_TEXT: &str = "\
-notepad：簡單的純文字筆記，內容存在 notepad/ 資料夾底下。
+notepad：簡單的純文字筆記，內容存在 storage/notepad/ 資料夾底下。
 
 主要操作都在 GUI 的 panel 裡，不是透過指令：
   進入 panel 後直接打字就是編輯，方向鍵移動游標
   Ctrl-F                 切換/開啟另一個筆記檔案（輸入檔名按 Enter）
 
 指令列（CLI 模式）能做的只有：
-  list    列出 notepad/ 資料夾底下已經存過的筆記檔名
+  list    列出 storage/notepad/ 資料夾底下已經存過的筆記檔名
 
 檔案切換讀不到就當成新的空白筆記，不會報錯——這是正常的「開新筆記」情境。
 ";
@@ -275,7 +277,7 @@ impl NotepadPlugin {
         }
     }
 
-    /// `list` 指令：列出 `notepad/` 資料夾底下目前有哪些檔案，這樣才知道有哪些
+    /// `list` 指令：列出 `storage/notepad/` 資料夾底下目前有哪些檔案，這樣才知道有哪些
     /// 檔名可以用 Ctrl-F 切換過去，不用自己跳出去開資料夾看。跟 `MusicPlugin`
     /// 的 `list_text` 是同樣的寫法，只是不篩副檔名——筆記檔名不像 music 只認
     /// `.mp3`，什麼副檔名都可能是使用者自己開的筆記。

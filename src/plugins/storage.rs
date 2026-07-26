@@ -13,8 +13,9 @@ use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
 
 /// `storage` plugin 管理的檔案都放在這個資料夾底下（相對於程式執行時的工作
-/// 目錄），跟 `MUSIC_DIR`/`NOTEPAD_DIR` 同樣的命名慣例。跟那兩個資料夾不同的
-/// 是，這個資料夾底下允許任意深度的巢狀子資料夾。
+/// 目錄），跟 `MUSIC_DIR` 同樣的命名慣例。跟那個資料夾不同的是，這個資料夾
+/// 底下允許任意深度的巢狀子資料夾——`NOTEPAD_DIR`（`storage/notepad`）就是
+/// 巢狀在這裡面的其中一個子資料夾。
 pub(crate) const STORAGE_DIR: &str = "storage";
 
 /// 一個檔案或資料夾的中繼資料，`storage list` 指令跟 `/api/storage/list` 都用

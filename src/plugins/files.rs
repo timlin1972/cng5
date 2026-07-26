@@ -10,7 +10,7 @@ use data_encoding::BASE64;
 
 use crate::output::OutputBuffer;
 use crate::plugin::{CrossDomainAsk, FileMeta, Plugin, RemoteReply, SharedContext, FILE_CHUNK_SIZE};
-use crate::plugins::{MUSIC_DIR, NOTEPAD_DIR};
+use crate::plugins::MUSIC_DIR;
 use crate::shell::send_cross_domain_request;
 use crate::web::PORT;
 
@@ -18,10 +18,12 @@ use crate::web::PORT;
 /// （`web.rs` 的 `/api/files/{folder}...`）跟跨 domain 的 MQTT 請求
 /// （`global.rs` 的 `build_remote_reply`）兩邊都要檢查的同一份清單——不管是
 /// 本機發起、還是收到別人的請求，`folder` 都要驗證過在這裡面才能碰，不能被
-/// 請求內容的字串繞過去存取任意路徑。直接用 `MUSIC_DIR`/`NOTEPAD_DIR` 常數
-/// （而不是重複打一次字面量），folder 名稱跟資料夾實際路徑保證一致，之後要
-/// 開放別的資料夾就在這裡加。
-pub const ALLOWED_FOLDERS: &[&str] = &[MUSIC_DIR, NOTEPAD_DIR];
+/// 請求內容的字串繞過去存取任意路徑。直接用 `MUSIC_DIR` 常數（而不是重複打
+/// 一次字面量），folder 名稱跟資料夾實際路徑保證一致，之後要開放別的資料夾
+/// 就在這裡加。`notepad` 不在這裡——它現在放在 `storage/notepad`，由
+/// `storage` plugin 的檔案總管跟 `sync` plugin 的跨裝置同步自動涵蓋，不需要
+/// 這套手動複製機制。
+pub const ALLOWED_FOLDERS: &[&str] = &[MUSIC_DIR];
 
 /// `folder`（先確認在白名單內）底下的 `name` 組出實際路徑，`name` 只接受單一
 /// 檔名（不能含路徑分隔符或是 `.`/`..`）——不管是本機組出來的路徑、還是收到
@@ -634,14 +636,15 @@ mod tests {
     #[test]
     fn allowed_folder_with_plain_name_ok() {
         assert_eq!(safe_file_path(MUSIC_DIR, "song.mp3"), Some(Path::new(MUSIC_DIR).join("song.mp3")));
-        assert_eq!(safe_file_path(NOTEPAD_DIR, "note.md"), Some(Path::new(NOTEPAD_DIR).join("note.md")));
     }
 
     /// 不在白名單裡的資料夾（不管是打錯字還是刻意嘗試存取任意路徑）一律拒絕，
-    /// 即使檔名本身完全合法。
+    /// 即使檔名本身完全合法。`notepad` 現在放在 `storage/notepad`，不再是
+    /// `ALLOWED_FOLDERS` 的成員，也該被拒絕。
     #[test]
     fn folder_outside_allow_list_rejected() {
         assert_eq!(safe_file_path("secrets", "note.md"), None);
+        assert_eq!(safe_file_path("storage/notepad", "note.md"), None);
         assert_eq!(safe_file_path("", "note.md"), None);
         assert_eq!(safe_file_path("/etc", "passwd"), None);
     }
