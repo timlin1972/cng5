@@ -11,10 +11,6 @@ use anyhow::{bail, Context, Result};
 use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
 
-/// 監控目錄清單存放位置，跟 `NotepadPlugin`/`NOTEPAD_DIR` 一樣的作法：存在程式
-/// 執行目錄底下，重啟後不用重新 `add` 一次。
-const GITREPO_DIR: &str = "gitrepo";
-const WATCHED_FILE: &str = "watched.txt";
 
 /// `manual` 指令印出來的說明，比 `commands()`/`help` 那種一行式的用法字串完整，
 /// 帶使用情境跟範例——指令一多，光看 `add <dir>` 這種簽名不容易想起整套流程
@@ -40,7 +36,6 @@ untracked 的新檔案也算。
   - add/remove 之後、下一次 scan 完成之前，list 只會顯示「目錄有更動，等待
     scan...」，不顯示舊資料，因為那已經不代表目前這份監控目錄清單了。
   - scan 進行中如果又 add/remove，這一輪 scan 的結果會作廢，等於中途停止。
-  - 監控目錄清單會存檔，重開程式不用重新 add。
 ";
 
 /// 平行掃描 repo 的執行緒數上限。先設成 1（等於循序執行）是使用者刻意選的保守
@@ -166,8 +161,10 @@ fn is_dirty(repo: &Path) -> Result<bool> {
 impl GitRepoPlugin {
     pub fn new(_ctx: SharedContext) -> Self {
         // 剛啟動、還沒 scan 過，跟「目錄有更動」是同一種「資料不可信」的狀態，
-        // 用同一個 `Stale` 表示，不用另外分兩種訊息。
-        Self { watched: Self::load_watched(), scan: Arc::new(Mutex::new(ScanState::Stale)), generation: Arc::new(AtomicU64::new(0)) }
+        // 用同一個 `Stale` 表示，不用另外分兩種訊息。監控目錄清單不做磁碟
+        // 持久化——使用者改成把 `add` 指令寫進 `script-local.cli`，每次啟動
+        // 都會重新執行，這裡直接從空清單開始就好。
+        Self { watched: Vec::new(), scan: Arc::new(Mutex::new(ScanState::Stale)), generation: Arc::new(AtomicU64::new(0)) }
     }
 
     /// `add`/`remove` 真的改動了監控目錄清單之後呼叫：上一次的 scan 結果（不管
@@ -175,26 +172,6 @@ impl GitRepoPlugin {
     fn mark_stale(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         *self.scan.lock().unwrap() = ScanState::Stale;
-    }
-
-    fn watched_path() -> PathBuf {
-        Path::new(GITREPO_DIR).join(WATCHED_FILE)
-    }
-
-    fn load_watched() -> Vec<PathBuf> {
-        fs::read_to_string(Self::watched_path())
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .map(PathBuf::from)
-            .collect()
-    }
-
-    fn save_watched(&self) -> Result<()> {
-        fs::create_dir_all(GITREPO_DIR).context("建立 gitrepo 目錄失敗")?;
-        let content: String = self.watched.iter().map(|dir| format!("{}\n", dir.display())).collect();
-        fs::write(Self::watched_path(), content).context("儲存監控目錄清單失敗")?;
-        Ok(())
     }
 
     fn add(&mut self, dir: &str, out: &OutputBuffer) -> Result<()> {
@@ -209,7 +186,6 @@ impl GitRepoPlugin {
             return Ok(());
         }
         self.watched.push(canonical.clone());
-        self.save_watched()?;
         self.mark_stale();
         let count = repos_under(&canonical).len();
         out.push(&format!("已加入監控目錄: {} ({count} 個 git repo)\n", display_path(&canonical)));
@@ -226,7 +202,6 @@ impl GitRepoPlugin {
         if self.watched.len() == before {
             bail!("沒有監控這個目錄: {}", display_path(&canonical));
         }
-        self.save_watched()?;
         self.mark_stale();
         out.push(&format!("已移除監控目錄: {}\n", display_path(&canonical)));
         Ok(())
@@ -238,7 +213,6 @@ impl GitRepoPlugin {
             return Ok(());
         }
         self.watched.clear();
-        self.save_watched()?;
         self.mark_stale();
         out.push("已清除所有監控目錄\n");
         Ok(())

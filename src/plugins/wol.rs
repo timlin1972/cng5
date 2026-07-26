@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
 use std::net::UdpSocket;
-use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
@@ -13,10 +11,6 @@ use crate::sysinfo;
 /// 重點，port 9 是傳統上的「discard」服務，不需要對方真的在監聽這個 port）。
 const WOL_PORT: u16 = 9;
 
-/// 已命名裝置清單存放位置，跟 `GitRepoPlugin`/`GITREPO_DIR` 一樣的作法：存在
-/// 程式執行目錄底下，重啟後不用重新 `add` 一次。
-const WOL_DIR: &str = "wol";
-const DEVICES_FILE: &str = "devices.txt";
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
@@ -83,27 +77,9 @@ pub struct WolPlugin {
 
 impl WolPlugin {
     pub fn new(ctx: SharedContext) -> Self {
-        Self { ctx, devices: Self::load_devices() }
-    }
-
-    fn devices_path() -> PathBuf {
-        Path::new(WOL_DIR).join(DEVICES_FILE)
-    }
-
-    fn load_devices() -> HashMap<String, String> {
-        fs::read_to_string(Self::devices_path())
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| line.split_once(' '))
-            .map(|(name, mac)| (name.to_string(), mac.to_string()))
-            .collect()
-    }
-
-    fn save_devices(&self) -> Result<()> {
-        fs::create_dir_all(WOL_DIR).context("建立 wol 目錄失敗")?;
-        let content: String = self.devices.iter().map(|(name, mac)| format!("{name} {mac}\n")).collect();
-        fs::write(Self::devices_path(), content).context("儲存裝置清單失敗")?;
-        Ok(())
+        // 命名裝置清單不做磁碟持久化——使用者改成把 `add` 指令寫進
+        // `script-local.cli`，每次啟動都會重新執行，這裡直接從空清單開始。
+        Self { ctx, devices: HashMap::new() }
     }
 
     fn add(&mut self, name: &str, mac: &str, out: &OutputBuffer) -> Result<()> {
@@ -111,7 +87,6 @@ impl WolPlugin {
             bail!("不像是 mac 位址: {mac}（要是 6 組兩碼十六進位，用 : 或 - 分隔）");
         }
         let existed = self.devices.insert(name.to_string(), mac.to_string()).is_some();
-        self.save_devices()?;
         if existed {
             out.push(&format!("已更新: {name} -> {mac}\n"));
         } else {
@@ -124,7 +99,6 @@ impl WolPlugin {
         if self.devices.remove(name).is_none() {
             bail!("沒有這個名字: {name}");
         }
-        self.save_devices()?;
         out.push(&format!("已移除: {name}\n"));
         Ok(())
     }
