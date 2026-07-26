@@ -19,7 +19,10 @@ use crate::plugin::{
     merged_global_view, CrossDomainAsk, DeviceEntry, DeviceListItem, DeviceReport, FileMeta, SharedContext,
     APP_VERSION,
 };
-use crate::plugins::{safe_file_path, ALLOWED_FOLDERS, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, SUBTITLE_LANG_PRIORITY};
+use crate::plugins::{
+    list_dir, make_dir, remove, rename_path, safe_file_path, safe_storage_path, ALLOWED_FOLDERS,
+    DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+};
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 
 type SharedShell = Arc<Mutex<Shell>>;
@@ -98,6 +101,12 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/files/{folder}", web::get().to(files_list))
             .route("/api/files/{folder}/{name}", web::get().to(files_download))
             .route("/api/files/{folder}/{name}", web::post().to(files_upload))
+            .route("/api/storage/list", web::get().to(storage_list))
+            .route("/api/storage/download", web::get().to(storage_download))
+            .route("/api/storage/upload", web::post().to(storage_upload))
+            .route("/api/storage/mkdir", web::post().to(storage_mkdir))
+            .route("/api/storage/delete", web::post().to(storage_delete))
+            .route("/api/storage/rename", web::post().to(storage_rename))
     })
     .bind(("0.0.0.0", PORT))?
     .run()
@@ -249,6 +258,112 @@ async fn files_upload(
     match result {
         Ok(()) => HttpResponse::Ok().finish(),
         Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+/// `GET /api/storage/list?path=<相對路徑>`：列出該路徑底下的項目。`path` 是
+/// 空字串時代表根目錄本身（`safe_storage_path` 一律拒絕空字串，因為那對「檔案
+/// 名稱」來說沒有意義，但對「要不要列根目錄」這個情境需要特別放行，所以這裡
+/// 直接特判，不透過 `safe_storage_path`）。
+#[derive(Deserialize)]
+struct StoragePathQuery {
+    path: String,
+}
+
+async fn storage_list(query: web::Query<StoragePathQuery>) -> HttpResponse {
+    let target = if query.path.is_empty() {
+        Some(PathBuf::from(STORAGE_DIR))
+    } else {
+        safe_storage_path(Path::new(STORAGE_DIR), &query.path)
+    };
+    let Some(target) = target else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match list_dir(&target) {
+        Ok(entries) => HttpResponse::Ok().json(entries),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `GET /api/storage/download?path=<相對檔案路徑>`：下載單一檔案。用
+/// `actix_files::NamedFile` 是因為它會自動處理 `Range` 請求，跟現有
+/// `files_download`/`music_file_audio` 同樣的理由——大檔案/影片也能拖拉進度。
+async fn storage_download(query: web::Query<StoragePathQuery>, req: HttpRequest) -> HttpResponse {
+    let Some(file_path) = safe_storage_path(Path::new(STORAGE_DIR), &query.path) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match actix_files::NamedFile::open(&file_path) {
+        Ok(file) => file.into_response(&req),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `POST /api/storage/upload?path=<目的地相對路徑，含檔名>`：把 request body
+/// 的原始位元組整個寫成一個檔案，同名直接覆蓋。目的地的上層資料夾必須已經
+/// 存在（不會自動建立中間目錄——要先用 `storage/mkdir` 建立），這跟真實 NAS
+/// 產品「先建資料夾、才能上傳進去」的使用順序一致。
+async fn storage_upload(query: web::Query<StoragePathQuery>, body: web::Bytes) -> HttpResponse {
+    let Some(file_path) = safe_storage_path(Path::new(STORAGE_DIR), &query.path) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    let Some(parent) = file_path.parent() else {
+        return HttpResponse::BadRequest().finish();
+    };
+    if !parent.is_dir() {
+        return HttpResponse::BadRequest().finish();
+    }
+    match std::fs::write(&file_path, &body) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+/// `POST /api/storage/mkdir?path=<相對路徑>`：建立資料夾。
+async fn storage_mkdir(query: web::Query<StoragePathQuery>) -> HttpResponse {
+    let Some(dir_path) = safe_storage_path(Path::new(STORAGE_DIR), &query.path) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match make_dir(&dir_path) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::BadRequest().finish(),
+    }
+}
+
+/// `POST /api/storage/delete?path=<相對路徑>&recursive=<bool>`：刪除檔案/資料夾。
+#[derive(Deserialize)]
+struct StorageDeleteQuery {
+    path: String,
+    #[serde(default)]
+    recursive: bool,
+}
+
+async fn storage_delete(query: web::Query<StorageDeleteQuery>) -> HttpResponse {
+    let Some(target) = safe_storage_path(Path::new(STORAGE_DIR), &query.path) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match remove(&target, query.recursive) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::BadRequest().finish(),
+    }
+}
+
+/// `POST /api/storage/rename?from=<相對路徑>&to=<相對路徑>`：重新命名/搬移。
+#[derive(Deserialize)]
+struct StorageRenameQuery {
+    from: String,
+    to: String,
+}
+
+async fn storage_rename(query: web::Query<StorageRenameQuery>) -> HttpResponse {
+    let (Some(from), Some(to)) = (
+        safe_storage_path(Path::new(STORAGE_DIR), &query.from),
+        safe_storage_path(Path::new(STORAGE_DIR), &query.to),
+    ) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match rename_path(&from, &to) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::BadRequest().finish(),
     }
 }
 
