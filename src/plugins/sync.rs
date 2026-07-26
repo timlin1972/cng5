@@ -213,6 +213,115 @@ impl SyncTransport for HttpTransport {
     }
 }
 
+use std::io::Write;
+
+use crate::plugin::{CrossDomainAsk, RemoteReply, SharedContext};
+use crate::shell::send_cross_domain_request;
+
+/// 跨 domain 的同步對象，透過 Task 4 新增的 `CrossDomainAsk::Storage*` 系列，走
+/// 既有的 MQTT 中繼機制（`send_cross_domain_request`）溝通，做法比照
+/// `files.rs` 的 `list_remote_files_mqtt`/`push_file_mqtt`/`pull_file_mqtt`
+/// （4KB chunk、逐段往返），只是路徑換成 storage 底下的巢狀相對路徑，而且不需
+/// 要 `target_id`（見 Task 4 的設計說明：跨 domain 同步是 server 對 server，
+/// 對方直接回答自己的 `storage/`，不用再往下 relay 給某個特定裝置）。
+pub(crate) struct CrossDomainTransport {
+    pub(crate) ctx: SharedContext,
+    pub(crate) domain: String,
+}
+
+impl SyncTransport for CrossDomainTransport {
+    fn manifest(&self) -> Result<Vec<SyncEntry>> {
+        let mut entries = Vec::new();
+        loop {
+            let ask = CrossDomainAsk::StorageManifest { offset: entries.len() };
+            match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
+                RemoteReply::StorageManifest { entries: page, total, .. } => {
+                    if page.is_empty() {
+                        break;
+                    }
+                    entries.extend(page);
+                    if entries.len() >= total {
+                        break;
+                    }
+                }
+                RemoteReply::Error { message, .. } => bail!(message),
+                _ => bail!("收到不符預期的回覆型別"),
+            }
+        }
+        Ok(entries)
+    }
+
+    fn download_to(&self, path: &str, expected_size: u64, dest: &Path) -> Result<()> {
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("建立資料夾失敗: {}", parent.display()))?;
+        }
+        let mut file = fs::File::create(dest).with_context(|| format!("建立檔案失敗: {}", dest.display()))?;
+        if expected_size == 0 {
+            return Ok(()); // 空檔案：建立完就結束，不需要真的要任何 chunk。
+        }
+        let mut offset: u64 = 0;
+        while offset < expected_size {
+            let ask = CrossDomainAsk::StorageFilePull { path: path.to_string(), offset };
+            let data = match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
+                RemoteReply::FileChunk { data, .. } => data,
+                RemoteReply::Error { message, .. } => bail!(message),
+                _ => bail!("收到不符預期的回覆型別"),
+            };
+            let bytes = data_encoding::BASE64.decode(data.as_bytes()).context("chunk 不是合法的 base64")?;
+            if bytes.is_empty() {
+                bail!("遠端回傳空的 chunk（檔案可能在傳輸過程中被改動），已知大小: {expected_size}");
+            }
+            file.write_all(&bytes)?;
+            offset += bytes.len() as u64;
+        }
+        Ok(())
+    }
+
+    fn upload_from(&self, path: &str, src: &Path) -> Result<()> {
+        let data = fs::read(src).with_context(|| format!("讀取檔案失敗: {}", src.display()))?;
+        let mut offset: usize = 0;
+        loop {
+            let end = (offset + crate::plugin::FILE_CHUNK_SIZE).min(data.len());
+            let chunk = &data[offset..end];
+            let ask = CrossDomainAsk::StorageFilePush {
+                path: path.to_string(),
+                offset: offset as u64,
+                data: data_encoding::BASE64.encode(chunk),
+            };
+            match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
+                RemoteReply::FilePushAck { .. } => {}
+                RemoteReply::Error { message, .. } => bail!(message),
+                _ => bail!("收到不符預期的回覆型別"),
+            }
+            offset = end;
+            // 空檔案也要送這一次「第 0 個 chunk、內容是空的」請求，讓對面至少
+            // 建立一個空檔案出來，見 `files.rs` 的 `push_file_mqtt` 同樣的理由。
+            if offset >= data.len() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn mkdir(&self, path: &str) -> Result<()> {
+        let ask = CrossDomainAsk::StorageMkdir { path: path.to_string() };
+        match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
+            RemoteReply::Ack { .. } => Ok(()),
+            RemoteReply::Error { message, .. } => bail!(message),
+            _ => bail!("收到不符預期的回覆型別"),
+        }
+    }
+
+    fn delete(&self, path: &str, recursive: bool) -> Result<()> {
+        let ask = CrossDomainAsk::StorageDelete { path: path.to_string(), recursive };
+        match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
+            RemoteReply::Ack { .. } => Ok(()),
+            RemoteReply::Error { message, .. } => bail!(message),
+            _ => bail!("收到不符預期的回覆型別"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
