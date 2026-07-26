@@ -1,0 +1,72 @@
+<h2>檔案總管 panel 要用哪種版面？</h2>
+<p class="subtitle">這個 panel 會嵌在現有的深色桌面式 UI 裡（跟 player/shell/notepad 一樣是客製化 panel），下面三種是可能的排版方向</p>
+
+<div class="cards">
+  <div class="card" data-choice="table" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup" style="margin:0;">
+        <div class="mockup-header">📁 storage</div>
+        <div class="mockup-body" style="background:#1b1f27; padding:10px; font-family:monospace; font-size:12px; color:#cdd3de;">
+          <div style="color:#8fa3c8; margin-bottom:8px;">/ photos / 2026-summer</div>
+          <div style="display:flex; gap:8px; margin-bottom:8px;">
+            <button class="mock-button" style="font-size:11px; padding:3px 8px;">⬆ 上傳</button>
+            <button class="mock-button" style="font-size:11px; padding:3px 8px;">＋ 新資料夾</button>
+          </div>
+          <table style="width:100%; border-collapse:collapse;">
+            <tr style="color:#6f7c93; text-align:left;"><th style="padding:2px 4px;">名稱</th><th>大小</th><th>時間</th><th></th></tr>
+            <tr><td style="padding:2px 4px;">📁 raw/</td><td>—</td><td>07-20</td><td></td></tr>
+            <tr><td style="padding:2px 4px;">🖼️ beach.jpg</td><td>3.2M</td><td>07-21</td><td><a href="#" style="color:#6f9dff;">⬇</a></td></tr>
+            <tr><td style="padding:2px 4px;">🖼️ sunset.png</td><td>5.1M</td><td>07-22</td><td><a href="#" style="color:#6f9dff;">⬇</a></td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A. 表格清單（Table）</h3>
+      <p>像 Synology File Station：檔名、大小、時間分欄，資訊密度高，跟現有其他 panel 的文字風格最接近。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="grid" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup" style="margin:0;">
+        <div class="mockup-header">📁 storage</div>
+        <div class="mockup-body" style="background:#1b1f27; padding:10px; font-family:monospace; font-size:12px; color:#cdd3de;">
+          <div style="color:#8fa3c8; margin-bottom:8px;">/ photos / 2026-summer</div>
+          <div style="display:flex; gap:8px; margin-bottom:8px;">
+            <button class="mock-button" style="font-size:11px; padding:3px 8px;">⬆ 上傳</button>
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:8px; text-align:center;">
+            <div style="background:#232833; border-radius:6px; padding:8px;">📁<br>raw</div>
+            <div style="background:#232833; border-radius:6px; padding:8px;">🖼️<br>beach.jpg</div>
+            <div style="background:#232833; border-radius:6px; padding:8px;">🖼️<br>sunset.png</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B. 縮圖網格（Grid）</h3>
+      <p>像 Google 相簿：每個檔案一個方塊，圖片類可以之後加縮圖預覽，但目前 panel 寬度有限、能塞的欄數不多。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="compact" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup" style="margin:0;">
+        <div class="mockup-header">📁 storage</div>
+        <div class="mockup-body" style="background:#1b1f27; padding:10px; font-family:monospace; font-size:12px; color:#cdd3de;">
+          <div style="color:#8fa3c8; margin-bottom:6px;">/photos/2026-summer  [⬆上傳] [＋資料夾]</div>
+          <div>📁 raw/</div>
+          <div>🖼️ beach.jpg <span style="color:#6f7c93;">3.2M</span> <a href="#" style="color:#6f9dff;">⬇</a></div>
+          <div>🖼️ sunset.png <span style="color:#6f7c93;">5.1M</span> <a href="#" style="color:#6f9dff;">⬇</a></div>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C. 精簡清單（Compact）</h3>
+      <p>一行一個檔案，資訊放同一行用空白隔開，最接近現有 plugin 那種「純文字 panel」的簡樸風格，實作也最簡單。</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle">點選一個卡片，或直接在下面留言告訴我你的想法（也可以是「A 但要有縮圖」這種混合意見）</p>
