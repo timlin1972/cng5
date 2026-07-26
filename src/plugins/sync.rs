@@ -296,21 +296,33 @@ pub(crate) fn classify_directories(
         let has_remote = remote_dirs.contains(path);
         let known = known_dirs.contains(path);
 
-        // 保護規則：這輪的雙邊 manifest，只要有一邊底下還有檔案，就完全跳過
-        // 這個目錄的建立/刪除判斷，讓檔案層級的動作先處理（見設計文件「執行
-        // 順序」一節）。
+        if has_local && has_remote {
+            // 雙邊都有這個目錄——不管底下現在有沒有檔案，都先確認一致、
+            // 記進 known_dirs。這一步不能被下面的保護規則擋住：一個目前
+            // 雙邊都有內容的目錄，日後內容被清空、只剩一邊有時，要能正確
+            // 判斷「這是 known_dirs 有記錄的目錄」才能傳遞刪除；如果只有
+            // 「一直是空的」目錄才會被確認，這個目錄就永遠不會被追蹤，之後
+            // 就算清空了也沒辦法正確傳遞刪除（這正是最早那個 bug 沒被真正
+            // 修好的根本原因）。
+            confirmed_dirs.push(path.clone());
+            continue;
+        }
+
+        // 保護規則：只套用在「只有一邊有這個目錄」的建立/刪除判斷——這輪的
+        // 雙邊 manifest，只要有一邊底下還有檔案，就跳過這個目錄的建立/刪除
+        // 判斷，讓檔案層級的動作先處理（見設計文件「執行順序」一節）。
         if has_files_under(local, path) || has_files_under(remote, path) {
             continue;
         }
 
         match (has_local, has_remote, known) {
-            (true, true, _) => confirmed_dirs.push(path.clone()),
             (true, false, false) => actions.push(SyncAction::CreateRemoteDir { path: path.clone() }),
             (false, true, false) => actions.push(SyncAction::CreateLocalDir { path: path.clone() }),
             (true, false, true) => actions.push(SyncAction::DeleteLocalDir { path: path.clone() }),
             (false, true, true) => actions.push(SyncAction::DeleteRemoteDir { path: path.clone() }),
             (false, false, true) => stale_dirs.push(path.clone()),
             (false, false, false) => {} // 從沒被雙邊同時擁有過，無事可做
+            (true, true, _) => unreachable!("已經在上面用 continue 處理過"),
         }
     }
 
@@ -1502,6 +1514,60 @@ mod tests {
         assert!(result.actions.is_empty());
         assert_eq!(result.confirmed_dirs, vec!["stable".to_string()]);
         assert!(result.stale_dirs.is_empty());
+    }
+
+    #[test]
+    fn dir_with_files_on_both_sides_still_confirms_into_known_dirs() {
+        // 目錄目前雙邊都有內容（不是空的）——這種情況也要確認記進
+        // known_dirs，不能因為有檔案就完全跳過確認，不然這個目錄的存在
+        // 永遠不會被追蹤，之後就算清空了也沒辦法正確傳遞刪除（這是最早
+        // 那個 bug 沒被真正修好的根本原因，也是這次修正要解決的問題）。
+        let local = vec![dir("photos"), file("photos/a.jpg", "h1")];
+        let remote = vec![dir("photos"), file("photos/a.jpg", "h1")];
+        let result = classify_directories(&local, &remote, &HashSet::new());
+        assert!(result.actions.is_empty());
+        assert_eq!(result.confirmed_dirs, vec!["photos".to_string()]);
+        assert!(result.stale_dirs.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_directory_with_content_eventually_propagates_delete_not_recreate() {
+        // 端對端重現最早回報的 bug 情境，橫跨三輪 classify_directories 呼叫
+        // （模擬三次背景輪詢），確認修正後的行為：目錄先被確認記進
+        // known_dirs（第一輪），內容被刪除但目錄還沒被回報乾淨時先跳過
+        // （第二輪，保護規則生效），最後雙邊都確認乾淨後才傳遞刪除，而不是
+        // 誤判成「從沒見過、要新建」。
+        let mut known_dirs: HashSet<String> = HashSet::new();
+
+        // 第一輪：雙邊都有 photos/a.jpg，穩定同步過的狀態。
+        let round1_local = vec![dir("photos"), file("photos/a.jpg", "h1")];
+        let round1_remote = vec![dir("photos"), file("photos/a.jpg", "h1")];
+        let round1 = classify_directories(&round1_local, &round1_remote, &known_dirs);
+        assert!(round1.actions.is_empty());
+        assert_eq!(round1.confirmed_dirs, vec!["photos".to_string()]);
+        for path in &round1.confirmed_dirs {
+            known_dirs.insert(path.clone());
+        }
+
+        // 第二輪：client（remote）整個目錄被外部刪掉了（含檔案），server
+        // （local）這輪一開始抓到的 manifest 還沒反映出檔案層級的刪除已經
+        // 執行完——保護規則命中，這輪先跳過目錄判斷。
+        let round2_local = vec![dir("photos"), file("photos/a.jpg", "h1")];
+        let round2_remote: Vec<SyncEntry> = vec![];
+        let round2 = classify_directories(&round2_local, &round2_remote, &known_dirs);
+        assert!(round2.actions.is_empty());
+        assert!(round2.confirmed_dirs.is_empty());
+        assert!(round2.stale_dirs.is_empty());
+        // known_dirs 不變（round2 沒有任何動作去修改它）。
+
+        // 第三輪：local 的檔案層級刪除已經在前一輪執行完，這輪重新掃描顯示
+        // photos 變成空目錄；remote 完全沒有 photos。known_dirs 有記錄，
+        // 應該傳遞刪除到 local（DeleteLocalDir），不是誤判成建立
+        // （CreateRemoteDir）。
+        let round3_local = vec![dir("photos")]; // 檔案已經被刪，目錄變空
+        let round3_remote: Vec<SyncEntry> = vec![];
+        let round3 = classify_directories(&round3_local, &round3_remote, &known_dirs);
+        assert_eq!(round3.actions, vec![SyncAction::DeleteLocalDir { path: "photos".to_string() }]);
     }
 
     #[test]
