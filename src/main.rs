@@ -28,8 +28,8 @@ use output::OutputBuffer;
 use plugin::{ContextInner, Plugin};
 use plugins::{
     ActivitiesPlugin, ClockPlugin, DevicePlugin, FilesPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin,
-    NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, SystemPlugin, WeatherPlugin,
-    WolPlugin,
+    NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, StoragePlugin, SystemPlugin,
+    WeatherPlugin, WolPlugin,
 };
 use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
@@ -95,6 +95,10 @@ fn main() -> Result<()> {
         (
             "remote-output",
             Box::new(|ctx| Box::new(RemoteOutputPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "storage",
+            Box::new(|ctx| Box::new(StoragePlugin::new(ctx)) as Box<dyn Plugin>),
         ),
         (
             "system",
