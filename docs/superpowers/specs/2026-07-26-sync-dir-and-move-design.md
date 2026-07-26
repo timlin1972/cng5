@@ -143,18 +143,28 @@ manifest）判斷，不額外重新查詢：
 HTTP 的 `/api/storage/mkdir`/`/api/storage/delete`、跨 domain 的
 `CrossDomainAsk::StorageMkdir`/`StorageDelete`），不需要新增任何東西。
 
-**Move 動作需要新增一個「直接 rename」的傳輸原語**（這是這次唯一需要新增傳輸層的地方）：
+**同網域的 rename 端點已經存在，不用新增**：`storage.rs` 的 `rename_path(from, to)`（`storage mv`
+指令在用）、`web.rs` 的 `POST /api/storage/rename?from=<path>&to=<path>`（驗證 `from`/`to` 都通過
+`safe_storage_path`）都已經是現成的。`rename_path`／這個端點都**不會**自動建立 `to` 的父目錄
+（`from` 不存在、或 `to` 已經是資料夾就報錯，其餘直接 `fs::rename`），所以 `to` 的上層目錄要在
+呼叫前確保存在——用法比照現有 `PushToRemote` 呼叫 `ensure_remote_parent_dirs` 的方式，不改
+`rename_path`/`storage_rename` 本身的行為（那是共用給互動式 `storage mv` 指令的，維持原樣）。
 
-- 同網域：新增 `POST /api/storage/rename?from=<path>&to=<path>`（`web.rs`），伺服器端驗證
-  `from`、`to` 都通過 `safe_storage_path`、先 `fs::create_dir_all` 建立 `to` 的父目錄、再
-  `fs::rename(from, to)`。
-- 跨 domain：新增 `CrossDomainAsk::StorageRename { from: String, to: String }`（`plugin.rs`），
-  在 `global.rs` 的 `build_remote_reply` 裡新增對應分支，做法跟同網域端點一致（驗證路徑、建
-  父目錄、`fs::rename`）。
-- `SyncTransport` trait（`sync.rs`）新增 `fn rename(&self, from: &str, to: &str) -> Result<()>`，
-  `HttpTransport`/`CrossDomainTransport` 各自實作，分別打上面兩個新端點。
-- 本機側的 `MoveLocal` 不用新端點——直接呼叫 `std::fs::create_dir_all`（`to` 的父目錄）+
-  `std::fs::rename`。
+**只有跨 domain 這條路徑真的需要新增東西**：新增 `CrossDomainAsk::StorageRename { from: String,
+to: String }`（`plugin.rs`，比照 `StorageMkdir`/`StorageDelete` 同一組模式：`RemoteRequest`
+新增對應變體＋`source_domain()` 分支、`shell.rs` 的 `cross_domain_timeout`／`send_via_mqtt`
+新增分支、`global.rs` 的 `build_remote_reply`／`request_kind` 新增分支，執行時一樣先驗證
+`from`/`to` 都通過 `safe_storage_path`，再呼叫 `rename_path`，成功回 `RemoteReply::Ack`）。
+
+`SyncTransport` trait（`sync.rs`）新增 `fn rename(&self, from: &str, to: &str) -> Result<()>`，
+`HttpTransport` 打現成的 `/api/storage/rename`，`CrossDomainTransport` 送新的
+`CrossDomainAsk::StorageRename`。呼叫端（`run_sync_pass`）在呼叫 `transport.rename` 之前，用
+`ensure_remote_parent_dirs` 確保 `to` 的父目錄存在（跟現有 `PushToRemote` 的呼叫方式一致，共用
+同一個 `known_remote_dirs` 集合）。
+
+本機側的 `MoveLocal` 不用透過 `SyncTransport`——直接呼叫 `std::fs::create_dir_all`（`to` 的
+父目錄）+ `crate::plugins::storage::rename_path`（本機端也沿用現成函式，不重寫 `fs::rename`
+邏輯）。
 
 ## Baseline 更新
 
