@@ -10,9 +10,9 @@ use crate::plugins::sync_baseline::{Baseline, BaselineEntry};
 use crate::plugins::url_encode_filename;
 use crate::web::PORT;
 
-/// 這一輪同步對某個路徑該做的事。只處理檔案，不處理空資料夾——資料夾是搬檔
-/// 案時由執行層視需要自動建立，不會有獨立的「建立資料夾」/「刪除資料夾」
-/// 動作。
+/// 這一輪同步對某個路徑（檔案）或某個目錄該做的事。檔案動作（`classify`）
+/// 跟目錄動作（`classify_directories`）是分開算的兩批，執行時檔案動作全部
+/// 先跑完才處理目錄動作——見 `run_sync_pass`。
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum SyncAction {
     PushToRemote { path: String },
@@ -20,6 +20,10 @@ pub(crate) enum SyncAction {
     DeleteLocal { path: String },
     DeleteRemote { path: String },
     Conflict { path: String },
+    CreateLocalDir { path: String },
+    CreateRemoteDir { path: String },
+    DeleteLocalDir { path: String },
+    DeleteRemoteDir { path: String },
 }
 
 struct FileState {
@@ -106,6 +110,75 @@ pub(crate) fn classify(local: &[SyncEntry], remote: &[SyncEntry], baseline: &Bas
         }
     }
     actions
+}
+
+/// `classify_directories` 的輸出：目錄動作，加上這一輪雙邊都確認一致、應該
+/// （重新）記進 `known_dirs` 的路徑，以及雙邊都已經不存在、應該從
+/// `known_dirs` 移除的路徑（不移除的話，之後任何一邊重新建立同名空目錄會被
+/// 誤判成「known_dirs 有記錄、只剩一邊有」而錯誤觸發刪除，而不是建立）。
+#[derive(Debug, PartialEq)]
+pub(crate) struct DirClassification {
+    pub(crate) actions: Vec<SyncAction>,
+    pub(crate) confirmed_dirs: Vec<String>,
+    pub(crate) stale_dirs: Vec<String>,
+}
+
+fn dir_paths(entries: &[SyncEntry]) -> HashSet<String> {
+    entries.iter().filter(|e| e.is_dir).map(|e| e.path.clone()).collect()
+}
+
+/// `entries` 裡有沒有任何檔案的路徑是 `dir_path` 底下（遞迴）——目錄建立/
+/// 刪除的保護規則用這個判斷「這輪還不能動這個目錄」，見 `classify_directories`。
+fn has_files_under(entries: &[SyncEntry], dir_path: &str) -> bool {
+    let prefix = format!("{dir_path}/");
+    entries.iter().any(|e| !e.is_dir && e.path.starts_with(&prefix))
+}
+
+/// 目錄層級的分類：只看目錄本身的建立/刪除，不牽涉任何檔案內容，純函式。
+/// 用這一輪已經抓到的雙邊 manifest（`local`/`remote`）判斷，不額外重新查詢。
+pub(crate) fn classify_directories(
+    local: &[SyncEntry],
+    remote: &[SyncEntry],
+    known_dirs: &HashSet<String>,
+) -> DirClassification {
+    let local_dirs = dir_paths(local);
+    let remote_dirs = dir_paths(remote);
+
+    let mut all_dirs: HashSet<&String> = HashSet::new();
+    all_dirs.extend(local_dirs.iter());
+    all_dirs.extend(remote_dirs.iter());
+    all_dirs.extend(known_dirs.iter());
+    let mut dirs: Vec<&String> = all_dirs.into_iter().collect();
+    dirs.sort();
+
+    let mut actions = Vec::new();
+    let mut confirmed_dirs = Vec::new();
+    let mut stale_dirs = Vec::new();
+
+    for path in dirs {
+        let has_local = local_dirs.contains(path);
+        let has_remote = remote_dirs.contains(path);
+        let known = known_dirs.contains(path);
+
+        // 保護規則：這輪的雙邊 manifest，只要有一邊底下還有檔案，就完全跳過
+        // 這個目錄的建立/刪除判斷，讓檔案層級的動作先處理（見設計文件「執行
+        // 順序」一節）。
+        if has_files_under(local, path) || has_files_under(remote, path) {
+            continue;
+        }
+
+        match (has_local, has_remote, known) {
+            (true, true, _) => confirmed_dirs.push(path.clone()),
+            (true, false, false) => actions.push(SyncAction::CreateRemoteDir { path: path.clone() }),
+            (false, true, false) => actions.push(SyncAction::CreateLocalDir { path: path.clone() }),
+            (true, false, true) => actions.push(SyncAction::DeleteLocalDir { path: path.clone() }),
+            (false, true, true) => actions.push(SyncAction::DeleteRemoteDir { path: path.clone() }),
+            (false, false, true) => stale_dirs.push(path.clone()),
+            (false, false, false) => {} // 從沒被雙邊同時擁有過，無事可做
+        }
+    }
+
+    DirClassification { actions, confirmed_dirs, stale_dirs }
 }
 
 /// 跟一個同步對象「怎麼溝通」的抽象介面——分類演算法（`classify`）算完要做
@@ -545,6 +618,15 @@ pub(crate) fn run_sync_pass(
                     }
                     Err(err) => outcome.error = Some(format!("處理衝突 {path} 失敗: {err:#}")),
                 }
+            }
+            SyncAction::CreateLocalDir { .. }
+            | SyncAction::CreateRemoteDir { .. }
+            | SyncAction::DeleteLocalDir { .. }
+            | SyncAction::DeleteRemoteDir { .. } => {
+                unreachable!(
+                    "classify() never produces directory actions — classify_directories() does, and its \
+                     output is executed in a separate block after this loop (see a later task in this plan)"
+                )
             }
         }
     }
@@ -1044,5 +1126,106 @@ mod tests {
         // 狀態），不應該再呼叫一次 mkdir。
         ensure_remote_parent_dirs(&transport, "existing/new-file.txt", &mut known_dirs).unwrap();
         assert!(!transport.created.borrow().contains("existing"));
+    }
+
+    fn dir(path: &str) -> SyncEntry {
+        SyncEntry { path: path.to_string(), is_dir: true, size: 0, modified: 0, hash: None }
+    }
+
+    #[test]
+    fn new_empty_dir_only_local_creates_remote_dir() {
+        let local = vec![dir("newdir")];
+        let remote = vec![];
+        let result = classify_directories(&local, &remote, &HashSet::new());
+        assert_eq!(result.actions, vec![SyncAction::CreateRemoteDir { path: "newdir".to_string() }]);
+        assert!(result.confirmed_dirs.is_empty());
+        assert!(result.stale_dirs.is_empty());
+    }
+
+    #[test]
+    fn new_empty_dir_only_remote_creates_local_dir() {
+        let local = vec![];
+        let remote = vec![dir("newdir")];
+        let result = classify_directories(&local, &remote, &HashSet::new());
+        assert_eq!(result.actions, vec![SyncAction::CreateLocalDir { path: "newdir".to_string() }]);
+    }
+
+    #[test]
+    fn known_dir_missing_from_remote_deletes_local_dir() {
+        // known_dirs 有紀錄（上一輪雙邊都有）、這輪 remote 找不到這個目錄了、
+        // 雙邊底下都沒有檔案 → 傳遞刪除到 local，讓 local 跟上 remote 已經
+        // 刪除的狀態。
+        let local = vec![dir("olddir")];
+        let remote = vec![];
+        let known_dirs: HashSet<String> = ["olddir".to_string()].into_iter().collect();
+        let result = classify_directories(&local, &remote, &known_dirs);
+        assert_eq!(result.actions, vec![SyncAction::DeleteLocalDir { path: "olddir".to_string() }]);
+    }
+
+    #[test]
+    fn known_dir_missing_from_local_deletes_remote_dir() {
+        let local = vec![];
+        let remote = vec![dir("olddir")];
+        let known_dirs: HashSet<String> = ["olddir".to_string()].into_iter().collect();
+        let result = classify_directories(&local, &remote, &known_dirs);
+        assert_eq!(result.actions, vec![SyncAction::DeleteRemoteDir { path: "olddir".to_string() }]);
+    }
+
+    #[test]
+    fn dir_guard_skips_when_remote_still_has_files_under_it() {
+        // photos 在 local 這輪已經完全消失（含檔案），但 remote 的 manifest
+        // 還沒反映出檔案層級的刪除（下一輪才會）——保護規則：remote 底下還有
+        // 檔案，這輪完全跳過這個目錄的建立/刪除判斷。
+        let local = vec![];
+        let remote = vec![dir("photos"), file("photos/img.jpg", "h1")];
+        let known_dirs: HashSet<String> = ["photos".to_string()].into_iter().collect();
+        let result = classify_directories(&local, &remote, &known_dirs);
+        assert!(result.actions.is_empty());
+        assert!(result.confirmed_dirs.is_empty());
+        assert!(result.stale_dirs.is_empty());
+    }
+
+    #[test]
+    fn dir_guard_skips_when_local_still_has_files_under_it() {
+        let local = vec![dir("photos"), file("photos/img.jpg", "h1")];
+        let remote = vec![];
+        let known_dirs: HashSet<String> = ["photos".to_string()].into_iter().collect();
+        let result = classify_directories(&local, &remote, &known_dirs);
+        assert!(result.actions.is_empty());
+    }
+
+    #[test]
+    fn both_sides_have_new_dir_confirms_without_conflict() {
+        // 雙邊各自獨立新建同名空目錄，known_dirs 沒有記錄——不是衝突，直接
+        // 確認一致，之後應該被記進 known_dirs，不輸出任何動作。
+        let local = vec![dir("shared")];
+        let remote = vec![dir("shared")];
+        let result = classify_directories(&local, &remote, &HashSet::new());
+        assert!(result.actions.is_empty());
+        assert_eq!(result.confirmed_dirs, vec!["shared".to_string()]);
+    }
+
+    #[test]
+    fn both_sides_missing_previously_known_dir_marks_stale() {
+        // 雙邊都已經不再有這個目錄了（先前各自都刪過），known_dirs 裡的舊
+        // 紀錄應該被清掉，不然之後任何一邊重新建立同名空目錄時，會被誤判成
+        // 「known_dirs 有記錄、只剩一邊有」而錯誤地觸發刪除，而不是建立。
+        let local = vec![];
+        let remote = vec![];
+        let known_dirs: HashSet<String> = ["gone".to_string()].into_iter().collect();
+        let result = classify_directories(&local, &remote, &known_dirs);
+        assert!(result.actions.is_empty());
+        assert_eq!(result.stale_dirs, vec!["gone".to_string()]);
+    }
+
+    #[test]
+    fn dir_present_on_both_sides_and_known_produces_no_action() {
+        let local = vec![dir("stable")];
+        let remote = vec![dir("stable")];
+        let known_dirs: HashSet<String> = ["stable".to_string()].into_iter().collect();
+        let result = classify_directories(&local, &remote, &known_dirs);
+        assert!(result.actions.is_empty());
+        assert_eq!(result.confirmed_dirs, vec!["stable".to_string()]);
+        assert!(result.stale_dirs.is_empty());
     }
 }
