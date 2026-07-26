@@ -219,6 +219,35 @@ fn pair_side(
     pairs
 }
 
+fn dir_action_path(action: &SyncAction) -> &str {
+    match action {
+        SyncAction::CreateLocalDir { path }
+        | SyncAction::CreateRemoteDir { path }
+        | SyncAction::DeleteLocalDir { path }
+        | SyncAction::DeleteRemoteDir { path } => path,
+        other => unreachable!("order_dir_actions only takes directory actions, got {other:?}"),
+    }
+}
+
+/// 決定目錄動作的執行順序：建立動作依路徑深度由淺到深（父目錄要先存在，
+/// `mkdir` 才不會失敗），刪除動作依路徑深度由深到淺（巢狀空目錄要先刪子層，
+/// 才能刪父層），建立整批排在刪除整批之前。純函式，只重新排序，不改變
+/// `actions` 的內容。只接受 `classify_directories` 產生的 4 種目錄動作。
+fn order_dir_actions(actions: Vec<SyncAction>) -> Vec<SyncAction> {
+    let mut creates: Vec<SyncAction> = Vec::new();
+    let mut deletes: Vec<SyncAction> = Vec::new();
+    for action in actions {
+        match &action {
+            SyncAction::CreateLocalDir { .. } | SyncAction::CreateRemoteDir { .. } => creates.push(action),
+            SyncAction::DeleteLocalDir { .. } | SyncAction::DeleteRemoteDir { .. } => deletes.push(action),
+            other => unreachable!("order_dir_actions only takes directory actions, got {other:?}"),
+        }
+    }
+    creates.sort_by_key(|a| dir_action_path(a).matches('/').count());
+    deletes.sort_by_key(|a| std::cmp::Reverse(dir_action_path(a).matches('/').count()));
+    creates.into_iter().chain(deletes).collect()
+}
+
 /// `classify_directories` 的輸出：目錄動作，加上這一輪雙邊都確認一致、應該
 /// （重新）記進 `known_dirs` 的路徑，以及雙邊都已經不存在、應該從
 /// `known_dirs` 移除的路徑（不移除的話，之後任何一邊重新建立同名空目錄會被
@@ -588,6 +617,8 @@ pub(crate) struct SyncOutcome {
     pub(crate) conflicts: usize,
     pub(crate) moved_local: usize,
     pub(crate) moved_remote: usize,
+    pub(crate) dirs_created: usize,
+    pub(crate) dirs_deleted: usize,
     pub(crate) error: Option<String>,
 }
 
@@ -811,6 +842,47 @@ pub(crate) fn run_sync_pass(
         }
     }
 
+    let dir_classification = classify_directories(&local, &remote, &baseline.known_dirs);
+    for path in &dir_classification.confirmed_dirs {
+        baseline.known_dirs.insert(path.clone());
+    }
+    for path in &dir_classification.stale_dirs {
+        baseline.known_dirs.remove(path);
+    }
+    for action in order_dir_actions(dir_classification.actions) {
+        match action {
+            SyncAction::CreateRemoteDir { path } => match transport.mkdir(&path) {
+                Ok(()) => {
+                    baseline.known_dirs.insert(path);
+                    outcome.dirs_created += 1;
+                }
+                Err(err) => outcome.error = Some(format!("在對方建立資料夾 {path} 失敗: {err:#}")),
+            },
+            SyncAction::CreateLocalDir { path } => match fs::create_dir_all(local_root.join(&path)) {
+                Ok(()) => {
+                    baseline.known_dirs.insert(path);
+                    outcome.dirs_created += 1;
+                }
+                Err(err) => outcome.error = Some(format!("在本機建立資料夾 {path} 失敗: {err:#}")),
+            },
+            SyncAction::DeleteRemoteDir { path } => match transport.delete(&path, false) {
+                Ok(()) => {
+                    baseline.known_dirs.remove(&path);
+                    outcome.dirs_deleted += 1;
+                }
+                Err(err) => outcome.error = Some(format!("刪除對方資料夾 {path} 失敗: {err:#}")),
+            },
+            SyncAction::DeleteLocalDir { path } => match crate::plugins::remove(&local_root.join(&path), false) {
+                Ok(()) => {
+                    baseline.known_dirs.remove(&path);
+                    outcome.dirs_deleted += 1;
+                }
+                Err(err) => outcome.error = Some(format!("刪除本機資料夾 {path} 失敗: {err:#}")),
+            },
+            other => unreachable!("classify_directories only produces directory actions, got {other:?}"),
+        }
+    }
+
     if let Err(err) = save_baseline(state_dir, partner_key, &baseline) {
         outcome.error = Some(format!("寫入 baseline 失敗: {err:#}"));
     }
@@ -842,7 +914,8 @@ sync：把本機 storage plugin 管理的整棵 storage/ 樹，跟其他裝置�
 
 指令：
   status              列出每個同步對象上次同步的時間、結果、搬了幾個檔案、
-                       刪了幾個、產生幾個衝突副本、偵測到幾個改名/搬移
+                       刪了幾個、產生幾個衝突副本、偵測到幾個改名/搬移、
+                       建立/刪除了幾個空資料夾
 
 真的衝突（雙方自上次同步後都改過同一個檔案）不會覆蓋任何一邊，兩邊都會保留
 自己原本的檔案，並且各自多一份帶「(衝突自 <對方>，日期)」標記的對方版本副
@@ -900,7 +973,7 @@ impl SyncPlugin {
                 None => "成功".to_string(),
             };
             text.push_str(&format!(
-                "{key}: {result}（{elapsed} 秒前）推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {} 搬本機 {} 搬對方 {}\n",
+                "{key}: {result}（{elapsed} 秒前）推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {} 搬本機 {} 搬對方 {} 建目錄 {} 刪目錄 {}\n",
                 status.outcome.pushed,
                 status.outcome.pulled,
                 status.outcome.deleted_local,
@@ -908,6 +981,8 @@ impl SyncPlugin {
                 status.outcome.conflicts,
                 status.outcome.moved_local,
                 status.outcome.moved_remote,
+                status.outcome.dirs_created,
+                status.outcome.dirs_deleted,
             ));
         }
         text
@@ -1014,6 +1089,8 @@ fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
         || outcome.conflicts > 0
         || outcome.moved_local > 0
         || outcome.moved_remote > 0
+        || outcome.dirs_created > 0
+        || outcome.dirs_deleted > 0
         || outcome.error.is_some();
     if !had_activity {
         return;
@@ -1021,7 +1098,7 @@ fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
     let detail = match &outcome.error {
         Some(err) => format!("{partner_key} 同步失敗: {err}"),
         None => format!(
-            "{partner_key} 同步完成：推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {} 搬本機 {} 搬對方 {}",
+            "{partner_key} 同步完成：推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {} 搬本機 {} 搬對方 {} 建目錄 {} 刪目錄 {}",
             outcome.pushed,
             outcome.pulled,
             outcome.deleted_local,
@@ -1029,6 +1106,8 @@ fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
             outcome.conflicts,
             outcome.moved_local,
             outcome.moved_remote,
+            outcome.dirs_created,
+            outcome.dirs_deleted,
         ),
     };
     ctx.lock().unwrap().log_activity("sync", detail);
@@ -1423,6 +1502,28 @@ mod tests {
         assert!(result.actions.is_empty());
         assert_eq!(result.confirmed_dirs, vec!["stable".to_string()]);
         assert!(result.stale_dirs.is_empty());
+    }
+
+    #[test]
+    fn order_dir_actions_creates_shallow_before_deep_deletes_deep_before_shallow() {
+        let actions = vec![
+            SyncAction::DeleteRemoteDir { path: "x/y".to_string() },
+            SyncAction::CreateLocalDir { path: "a/b/c".to_string() },
+            SyncAction::DeleteRemoteDir { path: "x".to_string() },
+            SyncAction::CreateLocalDir { path: "a".to_string() },
+            SyncAction::CreateLocalDir { path: "a/b".to_string() },
+        ];
+        let ordered = order_dir_actions(actions);
+        assert_eq!(
+            ordered,
+            vec![
+                SyncAction::CreateLocalDir { path: "a".to_string() },
+                SyncAction::CreateLocalDir { path: "a/b".to_string() },
+                SyncAction::CreateLocalDir { path: "a/b/c".to_string() },
+                SyncAction::DeleteRemoteDir { path: "x/y".to_string() },
+                SyncAction::DeleteRemoteDir { path: "x".to_string() },
+            ]
+        );
     }
 
     #[test]
