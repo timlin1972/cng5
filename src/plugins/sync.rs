@@ -542,6 +542,198 @@ pub(crate) fn run_sync_pass(
     outcome
 }
 
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::output::OutputBuffer;
+use crate::plugin::{merged_global_view, Plugin};
+use crate::sysinfo;
+
+/// 背景輪詢間隔——獨立於 `system` plugin 的 10 秒裝置回報間隔（`REPORT_INTERVAL`），
+/// 同步整棵樹（含每個檔案重新算 hash）比單純回報裝置狀態貴得多，不用共用同一個
+/// 頻率。
+const SYNC_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+const MANUAL_TEXT: &str = "\
+sync：把本機 storage plugin 管理的整棵 storage/ 樹，跟其他裝置雙向同步（含刪除
+傳遞、衝突處理），完全複用 system plugin 既有的 client/server/domain 角色，不用
+另外設定要跟誰同步。
+
+沒有手動觸發指令：只有這台裝置是 mode server 時，才會啟動背景輪詢（預設每 60
+秒），自動對同 domain 底下每一個已知的 client、以及 global registry 看得到的
+每一個別的 domain 的 server，各自跑一次同步。client 角色完全被動，不會主動做
+任何事，最終還是會透過 server 端的輪詢自動同步到，只是有接力延遲。
+
+指令：
+  status              列出每個同步對象上次同步的時間、結果、搬了幾個檔案、
+                       刪了幾個、產生幾個衝突副本
+
+真的衝突（雙方自上次同步後都改過同一個檔案）不會覆蓋任何一邊，兩邊都會保留
+自己原本的檔案，並且各自多一份帶「(衝突自 <對方>，日期)」標記的對方版本副
+本，需要使用者自己手動整理。
+";
+
+#[derive(Clone, Debug, Default)]
+struct PartnerStatus {
+    last_run: Option<Instant>,
+    outcome: SyncOutcome,
+}
+
+/// 沒有任何持久化狀態以外的欄位——`statuses` 只是給 `status` 指令/panel 顯示
+/// 用的執行期摘要，重啟就沒了（真正需要跨重啟保留的是 baseline，見 Task 2，
+/// 那個已經寫到磁碟）。
+pub struct SyncPlugin {
+    #[allow(dead_code)]
+    ctx: SharedContext,
+    statuses: Arc<Mutex<HashMap<String, PartnerStatus>>>,
+}
+
+impl SyncPlugin {
+    pub fn new(ctx: SharedContext) -> Self {
+        let statuses = Arc::new(Mutex::new(HashMap::new()));
+        Self::spawn_engine(ctx.clone(), statuses.clone());
+        Self { ctx, statuses }
+    }
+
+    fn spawn_engine(ctx: SharedContext, statuses: Arc<Mutex<HashMap<String, PartnerStatus>>>) {
+        thread::spawn(move || loop {
+            let is_server = ctx.lock().unwrap().is_server;
+            if is_server {
+                run_all_partners(&ctx, &statuses);
+            }
+            thread::sleep(SYNC_POLL_INTERVAL);
+        });
+    }
+
+    fn status_text(&self) -> String {
+        let statuses = self.statuses.lock().unwrap();
+        if statuses.is_empty() {
+            return "目前還沒有任何同步紀錄\n".to_string();
+        }
+        let mut keys: Vec<&String> = statuses.keys().collect();
+        keys.sort();
+        let mut text = String::new();
+        for key in keys {
+            let status = &statuses[key];
+            let elapsed = status.last_run.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+            let result = match &status.outcome.error {
+                Some(err) => format!("失敗: {err}"),
+                None => "成功".to_string(),
+            };
+            text.push_str(&format!(
+                "{key}: {result}（{elapsed} 秒前）推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {}\n",
+                status.outcome.pushed,
+                status.outcome.pulled,
+                status.outcome.deleted_local,
+                status.outcome.deleted_remote,
+                status.outcome.conflicts,
+            ));
+        }
+        text
+    }
+}
+
+impl Plugin for SyncPlugin {
+    fn commands(&self) -> &'static [&'static str] {
+        &["status"]
+    }
+
+    fn dispatch(&mut self, cmd: &str, _args: &[String], out: &OutputBuffer) -> Result<()> {
+        match cmd {
+            "status" => {
+                out.push(&self.status_text());
+                Ok(())
+            }
+            other => bail!("sync 不認得指令: {other}"),
+        }
+    }
+
+    fn panel_text(&self) -> Option<String> {
+        Some(self.status_text())
+    }
+
+    fn manual_text(&self) -> &'static str {
+        MANUAL_TEXT
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+fn record_status(
+    statuses: &Arc<Mutex<HashMap<String, PartnerStatus>>>,
+    key: &str,
+    outcome: SyncOutcome,
+) {
+    statuses
+        .lock()
+        .unwrap()
+        .insert(key.to_string(), PartnerStatus { last_run: Some(Instant::now()), outcome });
+}
+
+/// 一輪背景輪詢：對同 domain 底下每一個已知的 client、以及看得到的每一個別
+/// 的 domain（套用字典序 tie-break），各自跑一次 `run_sync_pass`，並把結果
+/// 記進 `statuses`、寫進 activities log。任何一個對象失敗都不影響其他對象
+/// 繼續跑。
+fn run_all_partners(ctx: &SharedContext, statuses: &Arc<Mutex<HashMap<String, PartnerStatus>>>) {
+    let my_hostname = sysinfo::hostname();
+
+    let (clients, my_domain, peer_domains): (Vec<(String, String)>, Option<String>, Vec<String>) = {
+        let inner = ctx.lock().unwrap();
+        let clients: Vec<(String, String)> = inner
+            .devices
+            .iter()
+            .filter(|(id, _)| id.as_str() != my_hostname.as_str())
+            .map(|(id, entry)| (id.clone(), entry.report.ip.clone()))
+            .collect();
+        let my_domain = inner.domain_name.clone();
+        let peer_domains: HashSet<String> = merged_global_view(&inner).into_iter().map(|item| item.domain).collect();
+        (clients, my_domain, peer_domains.into_iter().collect())
+    };
+
+    for (client_id, ip) in clients {
+        let transport = HttpTransport { ip };
+        let partner_key = format!("client-{client_id}");
+        let outcome = run_sync_pass(ctx, &transport, &partner_key, &my_hostname, &client_id);
+        log_outcome(ctx, &partner_key, &outcome);
+        record_status(statuses, &partner_key, outcome);
+    }
+
+    if let Some(my_domain) = &my_domain {
+        for peer_domain in peer_domains {
+            if my_domain.as_str() >= peer_domain.as_str() {
+                // Tie-break：兩個 domain 互相看得到彼此時，只有名稱字典序比較
+                // 小的那一方才主動發起，避免兩邊同時互相發起造成競態（見設計
+                // 文件「拓撲與觸發時機」一節）。`>=`（不是單純 `>`）這個等號
+                // 也順便處理了另一件事：`merged_global_view` 回傳的清單裡本來
+                // 就包含「自己 domain 底下的裝置」這一份（用自己的
+                // `domain_name` 當 `domain` 欄位），`peer_domain == my_domain`
+                // 這個情況一定會被這行擋掉，不會誤把自己的 domain 當成一個要
+                // 主動發起同步的跨 domain 對象。
+                continue;
+            }
+            let transport = CrossDomainTransport { ctx: ctx.clone(), domain: peer_domain.clone() };
+            let partner_key = format!("domain-{peer_domain}");
+            let outcome = run_sync_pass(ctx, &transport, &partner_key, my_domain, &peer_domain);
+            log_outcome(ctx, &partner_key, &outcome);
+            record_status(statuses, &partner_key, outcome);
+        }
+    }
+}
+
+fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
+    let detail = match &outcome.error {
+        Some(err) => format!("{partner_key} 同步失敗: {err}"),
+        None => format!(
+            "{partner_key} 同步完成：推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {}",
+            outcome.pushed, outcome.pulled, outcome.deleted_local, outcome.deleted_remote, outcome.conflicts
+        ),
+    };
+    ctx.lock().unwrap().log_activity("sync", detail);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,6 +38,7 @@ pub use qr::QrPlugin;
 pub use remote::RemotePlugin;
 pub use remote_output::RemoteOutputPlugin;
 pub use storage::StoragePlugin;
+pub use sync::SyncPlugin;
 pub(crate) use system::REPORT_INTERVAL;
 pub use system::SystemPlugin;
 pub use weather::WeatherPlugin;
