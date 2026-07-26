@@ -10,6 +10,7 @@ mod output;
 mod qr;
 mod remote;
 mod remote_output;
+mod storage;
 mod system;
 mod weather;
 mod wol;
