@@ -20,6 +20,8 @@ pub(crate) enum SyncAction {
     DeleteLocal { path: String },
     DeleteRemote { path: String },
     Conflict { path: String },
+    MoveLocal { from: String, to: String },
+    MoveRemote { from: String, to: String },
     CreateLocalDir { path: String },
     CreateRemoteDir { path: String },
     DeleteLocalDir { path: String },
@@ -109,7 +111,106 @@ pub(crate) fn classify(local: &[SyncEntry], remote: &[SyncEntry], baseline: &Bas
             }
         }
     }
-    actions
+    pair_moves(actions, &local_states, &remote_states, baseline)
+}
+
+/// 單側改名/搬移配對：把「這輪本來要各自輸出的 `DeleteRemote`」（本機刪了一
+/// 個 baseline 有記錄的路徑）跟「這輪本來要各自輸出的 `PushToRemote`、且該
+/// 路徑在 baseline 裡完全沒有記錄」（本機的全新檔案，不是單邊修改既有路徑）
+/// 依內容 hash 配對，配成功的合併成一個 `MoveRemote`，不再各自輸出。對稱地，
+/// `DeleteLocal` 配「baseline 沒有記錄的 `PullFromRemote`」，合併成
+/// `MoveLocal`。只在同一側配對（不會拿 `DeleteRemote` 去配
+/// `PullFromRemote`），`Conflict`、或「baseline 有記錄的單邊修改」都不參與
+/// 配對——只有乾淨的「刪除」跟「全新新增」才可能是同一次改名/搬移的兩端。
+fn pair_moves(
+    actions: Vec<SyncAction>,
+    local_states: &HashMap<String, FileState>,
+    remote_states: &HashMap<String, FileState>,
+    baseline: &Baseline,
+) -> Vec<SyncAction> {
+    let local_side = pair_side(
+        &actions,
+        |a| match a {
+            SyncAction::DeleteRemote { path } => baseline.files.get(path).map(|b| (path.clone(), b.local_hash.clone())),
+            _ => None,
+        },
+        |a| match a {
+            SyncAction::PushToRemote { path } if !baseline.files.contains_key(path) => {
+                local_states.get(path).map(|s| (path.clone(), s.hash.clone()))
+            }
+            _ => None,
+        },
+    );
+    let remote_side = pair_side(
+        &actions,
+        |a| match a {
+            SyncAction::DeleteLocal { path } => baseline.files.get(path).map(|b| (path.clone(), b.remote_hash.clone())),
+            _ => None,
+        },
+        |a| match a {
+            SyncAction::PullFromRemote { path } if !baseline.files.contains_key(path) => {
+                remote_states.get(path).map(|s| (path.clone(), s.hash.clone()))
+            }
+            _ => None,
+        },
+    );
+
+    let mut moved_away: HashSet<String> = HashSet::new();
+    let mut moved_new: HashSet<String> = HashSet::new();
+    let mut moves = Vec::new();
+    for (from, to) in local_side {
+        moved_away.insert(from.clone());
+        moved_new.insert(to.clone());
+        moves.push(SyncAction::MoveRemote { from, to });
+    }
+    for (from, to) in remote_side {
+        moved_away.insert(from.clone());
+        moved_new.insert(to.clone());
+        moves.push(SyncAction::MoveLocal { from, to });
+    }
+
+    let mut result: Vec<SyncAction> = actions
+        .into_iter()
+        .filter(|a| match a {
+            SyncAction::DeleteRemote { path } | SyncAction::DeleteLocal { path } => !moved_away.contains(path),
+            SyncAction::PushToRemote { path } | SyncAction::PullFromRemote { path } => !moved_new.contains(path),
+            _ => true,
+        })
+        .collect();
+    result.extend(moves);
+    result
+}
+
+/// `pair_moves` 的配對核心：把 `actions` 篩成「刪除候選」跟「新增候選」(各
+/// 自用 `del_of`/`add_of` 從單一個 `SyncAction` 抽出 `(路徑, hash)`，不符合
+/// 就回 `None`)、依 hash 分組、組內依路徑字串排序後依序配對(結果穩定、可
+/// 重現)，回傳 `(舊路徑, 新路徑)` 配對清單；配不完的候選不會出現在回傳值
+/// 裡，維持原本各自的動作。
+fn pair_side(
+    actions: &[SyncAction],
+    del_of: impl Fn(&SyncAction) -> Option<(String, String)>,
+    add_of: impl Fn(&SyncAction) -> Option<(String, String)>,
+) -> Vec<(String, String)> {
+    let mut deletes: HashMap<String, Vec<String>> = HashMap::new();
+    let mut adds: HashMap<String, Vec<String>> = HashMap::new();
+    for action in actions {
+        if let Some((path, hash)) = del_of(action) {
+            deletes.entry(hash).or_default().push(path);
+        }
+        if let Some((path, hash)) = add_of(action) {
+            adds.entry(hash).or_default().push(path);
+        }
+    }
+    let mut pairs = Vec::new();
+    for (hash, mut del_paths) in deletes {
+        let Some(mut add_paths) = adds.remove(&hash) else { continue };
+        del_paths.sort();
+        add_paths.sort();
+        for (from, to) in del_paths.into_iter().zip(add_paths) {
+            pairs.push((from, to));
+        }
+    }
+    pairs
 }
 
 /// `classify_directories` 的輸出：目錄動作，加上這一輪雙邊都確認一致、應該
@@ -479,6 +580,8 @@ pub(crate) struct SyncOutcome {
     pub(crate) deleted_local: usize,
     pub(crate) deleted_remote: usize,
     pub(crate) conflicts: usize,
+    pub(crate) moved_local: usize,
+    pub(crate) moved_remote: usize,
     pub(crate) error: Option<String>,
 }
 
@@ -649,6 +752,47 @@ pub(crate) fn run_sync_pass(
                     Err(err) => outcome.error = Some(format!("處理衝突 {path} 失敗: {err:#}")),
                 }
             }
+            SyncAction::MoveRemote { from, to } => {
+                let result = ensure_remote_parent_dirs(transport, &to, &mut known_remote_dirs)
+                    .and_then(|_| transport.rename(&from, &to));
+                match result {
+                    Ok(()) => {
+                        if let Some(hash) = find_hash(&local, &to) {
+                            baseline.files.remove(&from);
+                            baseline.files.insert(
+                                to,
+                                BaselineEntry { local_hash: hash.to_string(), remote_hash: hash.to_string() },
+                            );
+                        }
+                        outcome.moved_remote += 1;
+                    }
+                    Err(err) => outcome.error = Some(format!("搬移對方 {from} -> {to} 失敗: {err:#}")),
+                }
+            }
+            SyncAction::MoveLocal { from, to } => {
+                let from_path = local_root.join(&from);
+                let to_path = local_root.join(&to);
+                let result = (|| -> Result<()> {
+                    if let Some(parent) = to_path.parent() {
+                        fs::create_dir_all(parent)
+                            .with_context(|| format!("建立資料夾失敗: {}", parent.display()))?;
+                    }
+                    crate::plugins::rename_path(&from_path, &to_path)
+                })();
+                match result {
+                    Ok(()) => {
+                        if let Some(hash) = find_hash(&remote, &to) {
+                            baseline.files.remove(&from);
+                            baseline.files.insert(
+                                to,
+                                BaselineEntry { local_hash: hash.to_string(), remote_hash: hash.to_string() },
+                            );
+                        }
+                        outcome.moved_local += 1;
+                    }
+                    Err(err) => outcome.error = Some(format!("搬移本機 {from} -> {to} 失敗: {err:#}")),
+                }
+            }
             SyncAction::CreateLocalDir { .. }
             | SyncAction::CreateRemoteDir { .. }
             | SyncAction::DeleteLocalDir { .. }
@@ -692,11 +836,14 @@ sync：把本機 storage plugin 管理的整棵 storage/ 樹，跟其他裝置�
 
 指令：
   status              列出每個同步對象上次同步的時間、結果、搬了幾個檔案、
-                       刪了幾個、產生幾個衝突副本
+                       刪了幾個、產生幾個衝突副本、偵測到幾個改名/搬移
 
 真的衝突（雙方自上次同步後都改過同一個檔案）不會覆蓋任何一邊，兩邊都會保留
 自己原本的檔案，並且各自多一份帶「(衝突自 <對方>，日期)」標記的對方版本副
 本，需要使用者自己手動整理。
+
+單側改名/搬移一個檔案時，會被偵測出來直接在對方那邊重新命名，不會重傳整份
+內容——資料夾整個改名，是靠底下每個檔案各自被偵測成改名疊加達成效果。
 ";
 
 #[derive(Clone, Debug, Default)]
@@ -747,12 +894,14 @@ impl SyncPlugin {
                 None => "成功".to_string(),
             };
             text.push_str(&format!(
-                "{key}: {result}（{elapsed} 秒前）推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {}\n",
+                "{key}: {result}（{elapsed} 秒前）推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {} 搬本機 {} 搬對方 {}\n",
                 status.outcome.pushed,
                 status.outcome.pulled,
                 status.outcome.deleted_local,
                 status.outcome.deleted_remote,
                 status.outcome.conflicts,
+                status.outcome.moved_local,
+                status.outcome.moved_remote,
             ));
         }
         text
@@ -857,6 +1006,8 @@ fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
         || outcome.deleted_local > 0
         || outcome.deleted_remote > 0
         || outcome.conflicts > 0
+        || outcome.moved_local > 0
+        || outcome.moved_remote > 0
         || outcome.error.is_some();
     if !had_activity {
         return;
@@ -864,8 +1015,14 @@ fn log_outcome(ctx: &SharedContext, partner_key: &str, outcome: &SyncOutcome) {
     let detail = match &outcome.error {
         Some(err) => format!("{partner_key} 同步失敗: {err}"),
         None => format!(
-            "{partner_key} 同步完成：推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {}",
-            outcome.pushed, outcome.pulled, outcome.deleted_local, outcome.deleted_remote, outcome.conflicts
+            "{partner_key} 同步完成：推 {} 拉 {} 刪本機 {} 刪對方 {} 衝突 {} 搬本機 {} 搬對方 {}",
+            outcome.pushed,
+            outcome.pulled,
+            outcome.deleted_local,
+            outcome.deleted_remote,
+            outcome.conflicts,
+            outcome.moved_local,
+            outcome.moved_remote,
         ),
     };
     ctx.lock().unwrap().log_activity("sync", detail);
@@ -1260,5 +1417,133 @@ mod tests {
         assert!(result.actions.is_empty());
         assert_eq!(result.confirmed_dirs, vec!["stable".to_string()]);
         assert!(result.stale_dirs.is_empty());
+    }
+
+    #[test]
+    fn local_rename_pairs_into_move_remote() {
+        // 本機把 old.jpg 改名成 new.jpg（同一份內容 h1）：baseline 有
+        // old.jpg，這一輪 local 沒有 old.jpg、有 new.jpg（baseline 沒有
+        // new.jpg 的記錄）。不應該各自變成 DeleteRemote/PushToRemote，應該
+        // 合併成一個 MoveRemote。
+        let local = vec![file("new.jpg", "h1")];
+        let remote = vec![file("old.jpg", "h1")];
+        let baseline = baseline_of(&[("old.jpg", "h1", "h1")]);
+        let actions = classify(&local, &remote, &baseline);
+        assert_eq!(actions, vec![SyncAction::MoveRemote { from: "old.jpg".to_string(), to: "new.jpg".to_string() }]);
+    }
+
+    #[test]
+    fn remote_rename_pairs_into_move_local() {
+        let local = vec![file("old.jpg", "h1")];
+        let remote = vec![file("new.jpg", "h1")];
+        let baseline = baseline_of(&[("old.jpg", "h1", "h1")]);
+        let actions = classify(&local, &remote, &baseline);
+        assert_eq!(actions, vec![SyncAction::MoveLocal { from: "old.jpg".to_string(), to: "new.jpg".to_string() }]);
+    }
+
+    #[test]
+    fn duplicate_hash_rename_pairs_by_sorted_path() {
+        // 兩張內容完全相同的照片（都是 h1）同時被改名：a-old/b-old 都刪了，
+        // a-new/b-new 都是新的。依路徑字串排序後依序配對：a-new 配 a-old，
+        // b-new 配 b-old（不是隨機順序）。
+        let local = vec![file("a-new.jpg", "h1"), file("b-new.jpg", "h1")];
+        let remote = vec![file("a-old.jpg", "h1"), file("b-old.jpg", "h1")];
+        let baseline = baseline_of(&[("a-old.jpg", "h1", "h1"), ("b-old.jpg", "h1", "h1")]);
+        let mut actions = classify(&local, &remote, &baseline);
+        actions.sort_by_key(|a| match a {
+            SyncAction::MoveRemote { from, .. } => from.clone(),
+            _ => String::new(),
+        });
+        assert_eq!(
+            actions,
+            vec![
+                SyncAction::MoveRemote { from: "a-old.jpg".to_string(), to: "a-new.jpg".to_string() },
+                SyncAction::MoveRemote { from: "b-old.jpg".to_string(), to: "b-new.jpg".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn duplicate_hash_uneven_counts_falls_back_for_leftover() {
+        // 兩個刪除候選（同 hash h1）只有一個新增候選——只配對得出一對 Move，
+        // 剩下那個刪除候選維持原本的 DeleteRemote。
+        let local = vec![file("a-new.jpg", "h1")];
+        let remote = vec![file("a-old.jpg", "h1"), file("b-old.jpg", "h1")];
+        let baseline = baseline_of(&[("a-old.jpg", "h1", "h1"), ("b-old.jpg", "h1", "h1")]);
+        let mut actions = classify(&local, &remote, &baseline);
+        actions.sort_by_key(|a| match a {
+            SyncAction::MoveRemote { from, .. } => format!("0{from}"),
+            SyncAction::DeleteRemote { path } => format!("1{path}"),
+            _ => String::new(),
+        });
+        assert_eq!(
+            actions,
+            vec![
+                SyncAction::MoveRemote { from: "a-old.jpg".to_string(), to: "a-new.jpg".to_string() },
+                SyncAction::DeleteRemote { path: "b-old.jpg".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn conflict_paths_are_not_paired_into_moves() {
+        // f.txt 在 baseline 有記錄、雙邊都改過而且改成不一樣（真衝突），同一
+        // 輪 local 又冒出一個內容剛好等於 baseline 舊值的全新路徑——不應該把
+        // 這個衝突誤配成「改名」。
+        let local = vec![file("f.txt", "h2"), file("new.txt", "h1")];
+        let remote = vec![file("f.txt", "h3")];
+        let baseline = baseline_of(&[("f.txt", "h1", "h1")]);
+        let mut actions = classify(&local, &remote, &baseline);
+        actions.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(
+            actions,
+            vec![
+                SyncAction::Conflict { path: "f.txt".to_string() },
+                SyncAction::PushToRemote { path: "new.txt".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn single_side_modification_is_not_treated_as_new_for_pairing() {
+        // f.txt 是 baseline 已經記錄的路徑、本機單邊修改過（PushToRemote），
+        // 不是「全新路徑」，不該被拿去跟任何刪除候選配對成 Move。
+        let local = vec![file("f.txt", "h2"), file("moved-away.txt", "hX")];
+        let remote = vec![file("gone.txt", "hX")];
+        let baseline = baseline_of(&[("f.txt", "h1", "h1"), ("gone.txt", "hX", "hX")]);
+        let actions = classify(&local, &remote, &baseline);
+        // moved-away.txt (新路徑, hash hX) 跟 gone.txt (刪除候選, hash hX)
+        // 內容相同、都在「local 這一側」——這才是預期會配對成的 Move；f.txt
+        // 的單邊修改必須維持是 PushToRemote，不能被誤吃進配對邏輯。
+        let mut sorted = actions.clone();
+        sorted.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(
+            sorted,
+            vec![
+                SyncAction::MoveRemote { from: "gone.txt".to_string(), to: "moved-away.txt".to_string() },
+                SyncAction::PushToRemote { path: "f.txt".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn cross_side_delete_and_add_do_not_pair() {
+        // 刪除候選在 remote 那一側（DeleteLocal：local 還留著 gone.txt、內容
+        // 沒變，remote 已經沒有它了），新增候選在 local 那一側（PushToRemote：
+        // new.txt 是全新路徑）——就算 hash 剛好一樣，這兩個屬於不同的配對
+        // bucket（DeleteLocal 只會去配 PullFromRemote，不會去配
+        // PushToRemote），不該被誤配成 Move。
+        let local = vec![file("gone.txt", "h1"), file("new.txt", "h1")];
+        let remote = vec![];
+        let baseline = baseline_of(&[("gone.txt", "h1", "h1")]);
+        let mut actions = classify(&local, &remote, &baseline);
+        actions.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(
+            actions,
+            vec![
+                SyncAction::DeleteLocal { path: "gone.txt".to_string() },
+                SyncAction::PushToRemote { path: "new.txt".to_string() },
+            ]
+        );
     }
 }
