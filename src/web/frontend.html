@@ -2477,6 +2477,8 @@
           }
           const sizeCell = document.createElement("td");
           sizeCell.textContent = entry.is_dir ? "—" : formatSize(entry.size);
+          const modifiedCell = document.createElement("td");
+          modifiedCell.textContent = new Date(entry.modified * 1000).toLocaleString();
           const actionsCell = document.createElement("td");
           if (!entry.is_dir) {
             const dlBtn = document.createElement("a");
@@ -2489,7 +2491,19 @@
           delBtn.addEventListener("click", async () => {
             const full = joinPath(state.currentPath, entry.name);
             if (entry.is_dir) {
-              if (!window.confirm(`確定要刪除「${entry.name}」（資料夾）嗎？裡面的內容會一併刪除`)) return;
+              let itemCount = 0;
+              try {
+                const res = await fetch(`/api/storage/list?path=${encodeURIComponent(full)}`);
+                const children = await res.json();
+                itemCount = children.length;
+              } catch (_err) {
+                // 查不到子項目數量就當作非空、用比較保守的措辭，不影響後面還是照樣送
+                // recursive=true 的刪除請求。
+              }
+              const message = itemCount > 0
+                ? `確定要刪除「${entry.name}」嗎？裡面還有 ${itemCount} 個項目，會一併刪除`
+                : `確定要刪除「${entry.name}」（空資料夾）嗎？`;
+              if (!window.confirm(message)) return;
               await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}&recursive=true`, { method: "POST" });
             } else {
               if (!window.confirm(`確定要刪除「${entry.name}」嗎？`)) return;
@@ -2513,6 +2527,7 @@
           actionsCell.appendChild(renameBtn);
           row.appendChild(nameCell);
           row.appendChild(sizeCell);
+          row.appendChild(modifiedCell);
           row.appendChild(actionsCell);
           tbody.appendChild(row);
         }
