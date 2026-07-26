@@ -19,7 +19,7 @@ device：顯示這台機器跟其他回報過的機器（見 system plugin 的 m
 目前的狀態——ip、os、有沒有 tailscale、mode、開機/程式執行多久、還在不在線上。
 
 範例：
-  list                查表格：每台裝置的 id/ip/os/version/tailscale/mode/uptime/alive
+  list                查表格：每台裝置的 id/ip/os/version/tailscale/mode/uptime/disk/alive
   status              簡短摘要：裝置總數、目前上線幾台
 
 alive 是「多久沒回報就視為離線」（回報間隔的 3 倍），不是真的把資料刪掉，離線
@@ -52,9 +52,11 @@ impl DevicePlugin {
         let mut ids: Vec<&String> = inner.devices.keys().collect();
         ids.sort();
 
-        let headers =
-            ["  id", "ip", "os", "version", "tailscale", "mode", "device uptime", "app uptime", "alive"];
-        let rows: Vec<[String; 9]> = ids
+        let headers = [
+            "  id", "ip", "os", "version", "tailscale", "mode", "device uptime", "app uptime", "disk",
+            "alive",
+        ];
+        let rows: Vec<[String; 10]> = ids
             .into_iter()
             .map(|id| {
                 let entry = &inner.devices[id];
@@ -73,6 +75,7 @@ impl DevicePlugin {
                     entry.report.mode.clone(),
                     sysinfo::format_uptime(entry.report.device_uptime_secs),
                     sysinfo::format_uptime(entry.report.app_uptime_secs),
+                    sysinfo::format_disk_usage(entry.report.disk_free_bytes, entry.report.disk_total_bytes),
                     if alive { "*".to_string() } else { String::new() },
                 ]
             })
@@ -104,7 +107,7 @@ fn yes_no(b: bool) -> String {
 /// 定，用 `UnicodeWidthStr` 對齊。跟 `WeatherPlugin` 的 `render_table`/`pad`
 /// 是同一個理由，但這裡的每個儲存格都只有單行內容，不需要它處理多行儲存格
 /// 那一層複雜度，所以另外寫一份精簡版而不是共用。
-fn render_table(headers: &[&str], rows: &[[String; 9]]) -> String {
+fn render_table(headers: &[&str], rows: &[[String; 10]]) -> String {
     let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(*h)).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -165,6 +168,8 @@ mod tests {
             mode: "standalone".to_string(),
             device_uptime_secs: 0,
             app_uptime_secs: 0,
+            disk_free_bytes: 0,
+            disk_total_bytes: 0,
         }
     }
 

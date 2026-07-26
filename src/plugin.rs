@@ -38,6 +38,16 @@ pub struct DeviceReport {
     pub mode: String,
     pub device_uptime_secs: u64,
     pub app_uptime_secs: u64,
+    /// 這台裝置回報當下，程式執行目錄所在檔案系統的可用容量（bytes）。舊版
+    /// （還沒有這個欄位的 build）傳過來的 JSON 缺這個 key 時，`#[serde(default)]`
+    /// 讓它解析成 0——跟 `os`/`version` 同一套「缺欄位不能讓整筆資料解析失敗」
+    /// 的理由，0 在顯示端（`sysinfo::format_disk_usage`）會被當成「查不到」
+    /// 印成 `N/A`。
+    #[serde(default)]
+    pub disk_free_bytes: u64,
+    /// 同上，總共容量（bytes）。
+    #[serde(default)]
+    pub disk_total_bytes: u64,
 }
 
 fn default_os() -> String {

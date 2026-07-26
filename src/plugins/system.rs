@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -183,6 +184,7 @@ impl SystemPlugin {
     fn build_report(id: &str, tailscale: &TailscaleCache, mode: SystemMode) -> DeviceReport {
         let tailscale_ip = tailscale.get();
         let ip = tailscale_ip.clone().unwrap_or_else(sysinfo::local_ip);
+        let (disk_free_bytes, disk_total_bytes) = sysinfo::disk_usage(Path::new(".")).unwrap_or((0, 0));
         DeviceReport {
             id: id.to_string(),
             ip,
@@ -192,6 +194,8 @@ impl SystemPlugin {
             mode: mode.as_str().to_string(),
             device_uptime_secs: sysinfo::device_uptime_secs(),
             app_uptime_secs: sysinfo::app_uptime_secs(),
+            disk_free_bytes,
+            disk_total_bytes,
         }
     }
 
