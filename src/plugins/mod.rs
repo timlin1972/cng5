@@ -20,7 +20,11 @@ pub use clock::ClockPlugin;
 pub use device::DevicePlugin;
 pub(crate) use files::{safe_file_path, url_encode_filename, ALLOWED_FOLDERS};
 pub use files::FilesPlugin;
-pub(crate) use storage::{list_dir, make_dir, remove, rename_path, safe_storage_path, STORAGE_DIR};
+pub(crate) use storage::{
+    list_dir, make_dir, paginate_sync_entries, remove, rename_path, safe_storage_path, walk_with_hashes,
+    STORAGE_DIR,
+};
+pub(crate) use storage::SyncEntry;
 pub use gitrepo::GitRepoPlugin;
 pub use global::GlobalPlugin;
 pub(crate) use music::{MUSIC_DIR, SUBTITLE_LANG_PRIORITY};

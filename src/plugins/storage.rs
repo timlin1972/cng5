@@ -4,6 +4,7 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
@@ -21,6 +22,20 @@ pub(crate) struct StorageEntry {
     pub(crate) is_dir: bool,
     pub(crate) size: u64,
     pub(crate) modified: u64,
+}
+
+/// 一個檔案或資料夾在同步演算法裡的狀態：`path` 是相對於被走訪的根目錄、用
+/// `/` 分隔的相對路徑（不管實際作業系統的分隔符是什麼，統一轉成 `/`，這樣
+/// 兩台不同作業系統的機器比對路徑字串時才不會因為分隔符不同而誤判成不同路
+/// 徑）。`hash` 資料夾一律是 `None`，檔案才有 `Some(<64 字元小寫十六進位
+/// SHA-256>)`。
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub(crate) struct SyncEntry {
+    pub(crate) path: String,
+    pub(crate) is_dir: bool,
+    pub(crate) size: u64,
+    pub(crate) modified: u64,
+    pub(crate) hash: Option<String>,
 }
 
 /// 驗證 `relative`（使用者輸入、或 HTTP 請求帶進來的相對路徑字串）是不是真的
@@ -99,6 +114,64 @@ pub(crate) fn list_dir(dir: &Path) -> Result<Vec<StorageEntry>> {
     }
     entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
     Ok(entries)
+}
+
+/// 遞迴走訪 `root` 底下所有檔案/資料夾，攤平成一份清單，每個檔案都算好
+/// SHA-256（同步演算法拿這份清單去跟對方、跟 baseline 比對）。每次同步都
+/// 重新算一次，不做「只在懷疑衝突時才算 hash」這種提前優化。
+pub(crate) fn walk_with_hashes(root: &Path) -> Result<Vec<SyncEntry>> {
+    let mut out = Vec::new();
+    walk_with_hashes_inner(root, root, &mut out)?;
+    Ok(out)
+}
+
+fn walk_with_hashes_inner(root: &Path, dir: &Path, out: &mut Vec<SyncEntry>) -> Result<()> {
+    for entry in list_dir(dir)? {
+        let full_path = dir.join(&entry.name);
+        let relative = full_path.strip_prefix(root).unwrap_or(&full_path);
+        let path_str = relative.to_string_lossy().replace('\\', "/");
+        if entry.is_dir {
+            out.push(SyncEntry { path: path_str, is_dir: true, size: 0, modified: entry.modified, hash: None });
+            walk_with_hashes_inner(root, &full_path, out)?;
+        } else {
+            let hash = hash_file(&full_path)?;
+            out.push(SyncEntry {
+                path: path_str,
+                is_dir: false,
+                size: entry.size,
+                modified: entry.modified,
+                hash: Some(hash),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let data = fs::read(path).with_context(|| format!("讀取檔案失敗: {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&data);
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// 分頁工具，給同網域的 `/api/storage/sync-manifest`（Task 5）跟跨 domain 的
+/// `RemoteRequest::StorageManifest` 處理（Task 4）共用，兩邊都需要把
+/// `walk_with_hashes` 算出來的完整清單，依照跟現有 `files`/`global` 的
+/// `FileList` 分頁一樣的位元組預算切成一頁一頁回傳，公開 MQTT broker 對單則
+/// 訊息大小有限制，不能整份塞進一則回覆。
+pub(crate) fn paginate_sync_entries(all: &[SyncEntry], offset: usize) -> Vec<SyncEntry> {
+    const PAGE_BUDGET: usize = 4 * 1024;
+    let mut page = Vec::new();
+    let mut size = 0usize;
+    for item in all.iter().skip(offset) {
+        let item_size = item.path.len() + item.hash.as_ref().map(|h| h.len()).unwrap_or(0) + 32;
+        if !page.is_empty() && size + item_size > PAGE_BUDGET {
+            break;
+        }
+        size += item_size;
+        page.push(item.clone());
+    }
+    page
 }
 
 /// 建立資料夾；已經有同名的檔案或資料夾就報錯，不會覆蓋或合併。
@@ -525,5 +598,97 @@ mod tests {
             plugin.commands(),
             &["ls [path]", "cd <path>", "mkdir <name>", "rm <name> [--recursive]", "mv <old> <new>"]
         );
+    }
+
+    #[test]
+    fn walk_with_hashes_covers_nested_files_and_dirs() {
+        let root = test_root("walk-nested");
+        fs::create_dir_all(root.join("photos/2026")).unwrap();
+        fs::write(root.join("a.txt"), b"top level").unwrap();
+        fs::write(root.join("photos/2026/beach.jpg"), b"jpg bytes").unwrap();
+        let entries = walk_with_hashes(&root).unwrap();
+        let mut paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        paths.sort();
+        assert_eq!(paths, vec!["a.txt", "photos", "photos/2026", "photos/2026/beach.jpg"]);
+
+        let dir_entry = entries.iter().find(|e| e.path == "photos").unwrap();
+        assert!(dir_entry.is_dir);
+        assert_eq!(dir_entry.hash, None);
+
+        let file_entry = entries.iter().find(|e| e.path == "a.txt").unwrap();
+        assert!(!file_entry.is_dir);
+        assert!(file_entry.hash.is_some());
+        assert_eq!(file_entry.size, "top level".len() as u64);
+    }
+
+    #[test]
+    fn walk_with_hashes_uses_forward_slash_paths() {
+        let root = test_root("walk-forward-slash");
+        fs::create_dir_all(root.join("a/b")).unwrap();
+        fs::write(root.join("a/b/c.txt"), b"x").unwrap();
+        let entries = walk_with_hashes(&root).unwrap();
+        let file_entry = entries.iter().find(|e| !e.is_dir).unwrap();
+        assert_eq!(file_entry.path, "a/b/c.txt");
+        assert!(!file_entry.path.contains('\\'));
+    }
+
+    #[test]
+    fn identical_content_produces_identical_hash() {
+        let root = test_root("walk-hash-identical");
+        fs::write(root.join("one.txt"), b"same content").unwrap();
+        fs::write(root.join("two.txt"), b"same content").unwrap();
+        let entries = walk_with_hashes(&root).unwrap();
+        let hash_one = entries.iter().find(|e| e.path == "one.txt").unwrap().hash.clone();
+        let hash_two = entries.iter().find(|e| e.path == "two.txt").unwrap().hash.clone();
+        assert_eq!(hash_one, hash_two);
+        assert!(hash_one.unwrap().len() == 64);
+    }
+
+    #[test]
+    fn different_content_produces_different_hash() {
+        let root = test_root("walk-hash-different");
+        fs::write(root.join("one.txt"), b"content A").unwrap();
+        fs::write(root.join("two.txt"), b"content B").unwrap();
+        let entries = walk_with_hashes(&root).unwrap();
+        let hash_one = entries.iter().find(|e| e.path == "one.txt").unwrap().hash.clone();
+        let hash_two = entries.iter().find(|e| e.path == "two.txt").unwrap().hash.clone();
+        assert_ne!(hash_one, hash_two);
+    }
+
+    #[test]
+    fn walk_with_hashes_on_empty_root_returns_empty() {
+        let root = test_root("walk-empty");
+        let entries = walk_with_hashes(&root).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn paginate_sync_entries_splits_by_budget_and_offset() {
+        let entries: Vec<SyncEntry> = (0..2000)
+            .map(|i| SyncEntry {
+                path: format!("file-{i}.txt"),
+                is_dir: false,
+                size: 1,
+                modified: 0,
+                hash: Some("a".repeat(64)),
+            })
+            .collect();
+        let page1 = paginate_sync_entries(&entries, 0);
+        assert!(!page1.is_empty());
+        assert!(page1.len() < entries.len(), "應該分頁，不會一次全部塞進一頁");
+        let page2 = paginate_sync_entries(&entries, page1.len());
+        assert_eq!(page2.first().unwrap().path, entries[page1.len()].path);
+    }
+
+    #[test]
+    fn paginate_sync_entries_past_end_returns_empty() {
+        let entries = vec![SyncEntry {
+            path: "only.txt".to_string(),
+            is_dir: false,
+            size: 1,
+            modified: 0,
+            hash: Some("h".to_string()),
+        }];
+        assert!(paginate_sync_entries(&entries, entries.len()).is_empty());
     }
 }
