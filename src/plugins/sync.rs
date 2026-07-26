@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::plugins::storage::SyncEntry;
-use crate::plugins::sync_baseline::Baseline;
+use crate::plugins::sync_baseline::{Baseline, BaselineEntry};
 use crate::plugins::url_encode_filename;
 use crate::web::PORT;
 
@@ -322,6 +322,226 @@ impl SyncTransport for CrossDomainTransport {
     }
 }
 
+/// 從 unix epoch 秒數算出 UTC 曆法日期字串 `YYYY-MM-DD`，純算術、不依賴任何
+/// 時間函式庫——沿用這個專案 `build.rs` 算編譯時間戳同樣的原則：不為了這裡
+/// 需要一個日期字串就額外引入日期時間 crate。演算法出處：Howard Hinnant 的
+/// `civil_from_days`（把「距離 1970-01-01 過了幾天」換算成西曆年月日，是這個
+/// 換算方向被廣泛驗證過的標準寫法）。
+pub(crate) fn epoch_to_utc_date(epoch_secs: u64) -> String {
+    let days = (epoch_secs / 86400) as i64;
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// 把一個路徑改成帶衝突標記的新檔名，標記插在副檔名前面（沒有副檔名就接在
+/// 檔名後面），資料夾前綴維持不變。
+pub(crate) fn conflict_copy_name(path: &str, label: &str, date: &str) -> String {
+    let (dir, filename) = match path.rsplit_once('/') {
+        Some((dir, name)) => (Some(dir), name),
+        None => (None, path),
+    };
+    let (stem, ext) = match filename.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, Some(ext)),
+        _ => (filename, None),
+    };
+    let new_name = match ext {
+        Some(ext) => format!("{stem} (衝突自 {label}，{date}).{ext}"),
+        None => format!("{stem} (衝突自 {label}，{date})"),
+    };
+    match dir {
+        Some(dir) => format!("{dir}/{new_name}"),
+        None => new_name,
+    }
+}
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::plugins::sync_baseline::{load_baseline, save_baseline, SYNC_STATE_DIR};
+use crate::plugins::{walk_with_hashes, STORAGE_DIR};
+
+/// 一輪同步對某個對象的結果摘要，`sync status` 指令跟 panel 都讀這個。
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct SyncOutcome {
+    pub(crate) pushed: usize,
+    pub(crate) pulled: usize,
+    pub(crate) deleted_local: usize,
+    pub(crate) deleted_remote: usize,
+    pub(crate) conflicts: usize,
+    pub(crate) error: Option<String>,
+}
+
+fn find_hash<'a>(entries: &'a [SyncEntry], path: &str) -> Option<&'a str> {
+    entries.iter().find(|e| e.path == path && !e.is_dir).and_then(|e| e.hash.as_deref())
+}
+
+fn find_size(entries: &[SyncEntry], path: &str) -> u64 {
+    entries.iter().find(|e| e.path == path && !e.is_dir).map(|e| e.size).unwrap_or(0)
+}
+
+/// 處理一個真衝突：把對方的版本下載成本機一份帶衝突標記的新檔案，同時把本機
+/// 原本的版本上傳成對方一份帶衝突標記的新檔案，兩邊各自原本的檔案都不動。
+fn resolve_conflict(
+    transport: &dyn SyncTransport,
+    path: &str,
+    my_label: &str,
+    partner_label: &str,
+    remote_size: u64,
+) -> Result<()> {
+    let epoch = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let date = epoch_to_utc_date(epoch);
+    let local_root = Path::new(STORAGE_DIR);
+
+    let local_copy_path = conflict_copy_name(path, partner_label, &date);
+    let local_copy_dest = local_root.join(&local_copy_path);
+    transport.download_to(path, remote_size, &local_copy_dest)?;
+
+    let remote_copy_path = conflict_copy_name(path, my_label, &date);
+    let local_original = local_root.join(path);
+    transport.upload_from(&remote_copy_path, &local_original)?;
+
+    Ok(())
+}
+
+/// 對 `path` 這個目的地確保上層資料夾在對方那邊存在——`upload_from`/
+/// `HttpTransport` 底層的 `/api/storage/upload` 不會自動建立中間目錄（見
+/// `storage_upload` 的文件），推新檔案進一個新的子資料夾之前要先在對方那邊
+/// `mkdir` 過。只在資料夾還沒出現在 `remote` 清單裡時才呼叫，避免每次都白跑
+/// 一次 mkdir 請求。
+fn ensure_remote_parent_dirs(transport: &dyn SyncTransport, path: &str, remote: &[SyncEntry]) -> Result<()> {
+    let Some((dir, _name)) = path.rsplit_once('/') else { return Ok(()) };
+    let known_dirs: std::collections::HashSet<&str> =
+        remote.iter().filter(|e| e.is_dir).map(|e| e.path.as_str()).collect();
+    let mut acc = String::new();
+    for segment in dir.split('/') {
+        acc = if acc.is_empty() { segment.to_string() } else { format!("{acc}/{segment}") };
+        if !known_dirs.contains(acc.as_str()) {
+            transport.mkdir(&acc)?;
+        }
+    }
+    Ok(())
+}
+
+/// 對一個同步對象跑完整的一輪：算本機清單、拿對方清單、讀 baseline、分類、
+/// 執行、把成功的部分寫回 baseline。任何一步失敗都記錄在回傳的 `error`
+/// 裡，不會 `panic`，讓背景執行緒可以繼續處理下一個對象。
+pub(crate) fn run_sync_pass(
+    _ctx: &SharedContext,
+    transport: &dyn SyncTransport,
+    partner_key: &str,
+    my_label: &str,
+    partner_label: &str,
+) -> SyncOutcome {
+    let mut outcome = SyncOutcome::default();
+    let local_root = Path::new(STORAGE_DIR);
+
+    let local = match walk_with_hashes(local_root) {
+        Ok(l) => l,
+        Err(err) => {
+            outcome.error = Some(format!("讀取本機清單失敗: {err:#}"));
+            return outcome;
+        }
+    };
+    let remote = match transport.manifest() {
+        Ok(r) => r,
+        Err(err) => {
+            outcome.error = Some(format!("取得對方清單失敗: {err:#}"));
+            return outcome;
+        }
+    };
+
+    let state_dir = Path::new(SYNC_STATE_DIR);
+    let mut baseline = load_baseline(state_dir, partner_key);
+    let actions = classify(&local, &remote, &baseline);
+
+    for action in actions {
+        match action {
+            SyncAction::PushToRemote { path } => {
+                let result = ensure_remote_parent_dirs(transport, &path, &remote)
+                    .and_then(|_| transport.upload_from(&path, &local_root.join(&path)));
+                match result {
+                    Ok(()) => {
+                        if let Some(hash) = find_hash(&local, &path) {
+                            baseline.insert(
+                                path,
+                                BaselineEntry { local_hash: hash.to_string(), remote_hash: hash.to_string() },
+                            );
+                        }
+                        outcome.pushed += 1;
+                    }
+                    Err(err) => outcome.error = Some(format!("推送 {path} 失敗: {err:#}")),
+                }
+            }
+            SyncAction::PullFromRemote { path } => {
+                let dest = local_root.join(&path);
+                let size = find_size(&remote, &path);
+                match transport.download_to(&path, size, &dest) {
+                    Ok(()) => {
+                        if let Some(hash) = find_hash(&remote, &path) {
+                            baseline.insert(
+                                path,
+                                BaselineEntry { local_hash: hash.to_string(), remote_hash: hash.to_string() },
+                            );
+                        }
+                        outcome.pulled += 1;
+                    }
+                    Err(err) => outcome.error = Some(format!("拉取 {path} 失敗: {err:#}")),
+                }
+            }
+            SyncAction::DeleteLocal { path } => match crate::plugins::remove(&local_root.join(&path), true) {
+                Ok(()) => {
+                    baseline.remove(&path);
+                    outcome.deleted_local += 1;
+                }
+                Err(err) => outcome.error = Some(format!("刪除本機 {path} 失敗: {err:#}")),
+            },
+            SyncAction::DeleteRemote { path } => match transport.delete(&path, true) {
+                Ok(()) => {
+                    baseline.remove(&path);
+                    outcome.deleted_remote += 1;
+                }
+                Err(err) => outcome.error = Some(format!("刪除對方 {path} 失敗: {err:#}")),
+            },
+            SyncAction::Conflict { path } => {
+                let remote_size = find_size(&remote, &path);
+                match resolve_conflict(transport, &path, my_label, partner_label, remote_size) {
+                    Ok(()) => {
+                        // 只更新原本這個路徑的 baseline（承認兩邊從此故意分歧），
+                        // 不替新產生的兩份衝突副本建立 baseline 條目——見本
+                        // task 開頭的「已知取捨」說明。
+                        if let (Some(local_hash), Some(remote_hash)) =
+                            (find_hash(&local, &path), find_hash(&remote, &path))
+                        {
+                            baseline.insert(
+                                path,
+                                BaselineEntry {
+                                    local_hash: local_hash.to_string(),
+                                    remote_hash: remote_hash.to_string(),
+                                },
+                            );
+                        }
+                        outcome.conflicts += 1;
+                    }
+                    Err(err) => outcome.error = Some(format!("處理衝突 {path} 失敗: {err:#}")),
+                }
+            }
+        }
+    }
+
+    if let Err(err) = save_baseline(state_dir, partner_key, &baseline) {
+        outcome.error = Some(format!("寫入 baseline 失敗: {err:#}"));
+    }
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,5 +740,38 @@ mod tests {
         let remote = vec![file("b.txt", "h1")]; // a.txt 只有本機有，b.txt 兩邊一樣
         let actions = classify(&local, &remote, &Baseline::new());
         assert_eq!(actions, vec![SyncAction::PushToRemote { path: "a.txt".to_string() }]);
+    }
+
+    #[test]
+    fn epoch_to_utc_date_known_values() {
+        assert_eq!(epoch_to_utc_date(0), "1970-01-01");
+        assert_eq!(epoch_to_utc_date(1785031586), "2026-07-26");
+    }
+
+    #[test]
+    fn conflict_copy_name_inserts_marker_before_extension() {
+        assert_eq!(
+            conflict_copy_name("photos/beach.jpg", "office-pc", "2026-07-26"),
+            "photos/beach (衝突自 office-pc，2026-07-26).jpg"
+        );
+    }
+
+    #[test]
+    fn conflict_copy_name_handles_no_extension() {
+        assert_eq!(conflict_copy_name("README", "office-pc", "2026-07-26"), "README (衝突自 office-pc，2026-07-26)");
+    }
+
+    #[test]
+    fn conflict_copy_name_handles_root_level_file() {
+        assert_eq!(
+            conflict_copy_name("notes.txt", "branch-b", "2026-07-26"),
+            "notes (衝突自 branch-b，2026-07-26).txt"
+        );
+    }
+
+    #[test]
+    fn conflict_copy_name_preserves_directory_prefix() {
+        let name = conflict_copy_name("a/b/c/deep.txt", "x", "2026-01-01");
+        assert_eq!(name, "a/b/c/deep (衝突自 x，2026-01-01).txt");
     }
 }
