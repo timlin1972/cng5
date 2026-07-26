@@ -122,6 +122,8 @@ pub(crate) fn classify(local: &[SyncEntry], remote: &[SyncEntry], baseline: &Bas
 /// `MoveLocal`。只在同一側配對（不會拿 `DeleteRemote` 去配
 /// `PullFromRemote`），`Conflict`、或「baseline 有記錄的單邊修改」都不參與
 /// 配對——只有乾淨的「刪除」跟「全新新增」才可能是同一次改名/搬移的兩端。
+/// 已經確認過的衝突（baseline 的 local_hash/remote_hash 故意留著不同）也不
+/// 參與配對——那種分歧是刻意保留的，不能被誤判成乾淨的單邊刪除。
 fn pair_moves(
     actions: Vec<SyncAction>,
     local_states: &HashMap<String, FileState>,
@@ -131,7 +133,9 @@ fn pair_moves(
     let local_side = pair_side(
         &actions,
         |a| match a {
-            SyncAction::DeleteRemote { path } => baseline.files.get(path).map(|b| (path.clone(), b.local_hash.clone())),
+            SyncAction::DeleteRemote { path } => baseline.files.get(path).and_then(|b| {
+                (b.local_hash == b.remote_hash).then(|| (path.clone(), b.local_hash.clone()))
+            }),
             _ => None,
         },
         |a| match a {
@@ -144,7 +148,9 @@ fn pair_moves(
     let remote_side = pair_side(
         &actions,
         |a| match a {
-            SyncAction::DeleteLocal { path } => baseline.files.get(path).map(|b| (path.clone(), b.remote_hash.clone())),
+            SyncAction::DeleteLocal { path } => baseline.files.get(path).and_then(|b| {
+                (b.local_hash == b.remote_hash).then(|| (path.clone(), b.remote_hash.clone()))
+            }),
             _ => None,
         },
         |a| match a {
@@ -1500,6 +1506,27 @@ mod tests {
             vec![
                 SyncAction::Conflict { path: "f.txt".to_string() },
                 SyncAction::PushToRemote { path: "new.txt".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn acknowledged_conflict_path_does_not_pair_when_renamed() {
+        // baseline 對 old.jpg 記錄的是「已經確認過的衝突」（local_hash=hA、
+        // remote_hash=hB，兩者刻意不同）。本機把 old.jpg 改名成 new.jpg（新
+        // 內容剛好是 hA）——不應該被配對成 MoveRemote（那會把 remote 那份
+        // 內容不同的 hB 錯誤地搬到 new.jpg，悄悄造成雙邊分歧卻沒被標記成
+        // 衝突），必須維持原本各自的 DeleteRemote/PushToRemote。
+        let local = vec![file("new.jpg", "hA")];
+        let remote = vec![file("old.jpg", "hB")];
+        let baseline = baseline_of(&[("old.jpg", "hA", "hB")]);
+        let mut actions = classify(&local, &remote, &baseline);
+        actions.sort_by_key(|a| format!("{a:?}"));
+        assert_eq!(
+            actions,
+            vec![
+                SyncAction::DeleteRemote { path: "old.jpg".to_string() },
+                SyncAction::PushToRemote { path: "new.jpg".to_string() },
             ]
         );
     }
