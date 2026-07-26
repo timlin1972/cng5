@@ -402,7 +402,8 @@ fn cross_domain_timeout(ask: &CrossDomainAsk) -> Duration {
         | CrossDomainAsk::StorageFilePull { .. }
         | CrossDomainAsk::StorageFilePush { .. }
         | CrossDomainAsk::StorageMkdir { .. }
-        | CrossDomainAsk::StorageDelete { .. } => Duration::from_secs(20),
+        | CrossDomainAsk::StorageDelete { .. }
+        | CrossDomainAsk::StorageRename { .. } => Duration::from_secs(20),
     }
 }
 
@@ -459,6 +460,9 @@ fn send_via_mqtt(
         }
         CrossDomainAsk::StorageDelete { path, recursive } => {
             RemoteRequest::StorageDelete { request_id: request_id.clone(), source_domain, path, recursive }
+        }
+        CrossDomainAsk::StorageRename { from, to } => {
+            RemoteRequest::StorageRename { request_id: request_id.clone(), source_domain, from, to }
         }
     };
 

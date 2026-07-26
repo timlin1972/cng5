@@ -201,6 +201,10 @@ pub(crate) trait SyncTransport {
     /// 刪除對方的 `path`（檔案或資料夾，`recursive` 語意跟 `storage` plugin
     /// 的 `remove` 一致）。
     fn delete(&self, path: &str, recursive: bool) -> Result<()>;
+    /// 在對方那邊直接把 `from` 重新命名/搬移成 `to`，不重傳內容——呼叫端要
+    /// 先確保 `to` 的上層目錄在對方那邊存在（見 `ensure_remote_parent_dirs`），
+    /// 這個方法本身不會自動建立父目錄。
+    fn rename(&self, from: &str, to: &str) -> Result<()>;
 }
 
 /// 同網域的同步對象，透過既有的 `/api/storage/...` 端點溝通——不重做傳輸層，
@@ -281,6 +285,23 @@ impl SyncTransport for HttpTransport {
             .context("執行 curl 失敗")?;
         if !output.status.success() {
             bail!("刪除失敗: {path}");
+        }
+        Ok(())
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let url = format!(
+            "http://{}:{PORT}/api/storage/rename?from={}&to={}",
+            self.ip,
+            url_encode_filename(from),
+            url_encode_filename(to)
+        );
+        let output = Command::new("curl")
+            .args(["--silent", "--fail", "--max-time", "10", "-X", "POST", &url])
+            .output()
+            .context("執行 curl 失敗")?;
+        if !output.status.success() {
+            bail!("搬移/重新命名失敗: {from} -> {to}");
         }
         Ok(())
     }
@@ -387,6 +408,15 @@ impl SyncTransport for CrossDomainTransport {
 
     fn delete(&self, path: &str, recursive: bool) -> Result<()> {
         let ask = CrossDomainAsk::StorageDelete { path: path.to_string(), recursive };
+        match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
+            RemoteReply::Ack { .. } => Ok(()),
+            RemoteReply::Error { message, .. } => bail!(message),
+            _ => bail!("收到不符預期的回覆型別"),
+        }
+    }
+
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
+        let ask = CrossDomainAsk::StorageRename { from: from.to_string(), to: to.to_string() };
         match send_cross_domain_request(&self.ctx, &self.domain, ask)? {
             RemoteReply::Ack { .. } => Ok(()),
             RemoteReply::Error { message, .. } => bail!(message),
@@ -1104,6 +1134,9 @@ mod tests {
             Ok(())
         }
         fn delete(&self, _path: &str, _recursive: bool) -> Result<()> {
+            unimplemented!("not exercised by this test")
+        }
+        fn rename(&self, _from: &str, _to: &str) -> Result<()> {
             unimplemented!("not exercised by this test")
         }
     }

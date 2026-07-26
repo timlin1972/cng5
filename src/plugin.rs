@@ -170,6 +170,7 @@ pub enum CrossDomainAsk {
     StorageFilePush { path: String, offset: u64, data: String },
     StorageMkdir { path: String },
     StorageDelete { path: String, recursive: bool },
+    StorageRename { from: String, to: String },
 }
 
 /// 跨 domain remote 的請求——透過 `global` plugin 既有的 MQTT session 加密
@@ -197,6 +198,7 @@ pub enum RemoteRequest {
     StorageFilePush { request_id: String, source_domain: String, path: String, offset: u64, data: String },
     StorageMkdir { request_id: String, source_domain: String, path: String },
     StorageDelete { request_id: String, source_domain: String, path: String, recursive: bool },
+    StorageRename { request_id: String, source_domain: String, from: String, to: String },
 }
 
 impl RemoteRequest {
@@ -211,7 +213,8 @@ impl RemoteRequest {
             | RemoteRequest::StorageFilePull { source_domain, .. }
             | RemoteRequest::StorageFilePush { source_domain, .. }
             | RemoteRequest::StorageMkdir { source_domain, .. }
-            | RemoteRequest::StorageDelete { source_domain, .. } => source_domain,
+            | RemoteRequest::StorageDelete { source_domain, .. }
+            | RemoteRequest::StorageRename { source_domain, .. } => source_domain,
         }
     }
 }

@@ -17,8 +17,8 @@ use crate::plugin::{
     RemoteReply, RemoteRequest, SharedContext, FILE_CHUNK_SIZE, FILE_LIST_PAGE_BUDGET,
 };
 use crate::plugins::{
-    make_dir, paginate_sync_entries, read_chunk, remove, safe_file_path, safe_storage_path, url_encode_filename,
-    walk_with_hashes, write_chunk, ALLOWED_FOLDERS, REPORT_INTERVAL, STORAGE_DIR,
+    make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_file_path, safe_storage_path,
+    url_encode_filename, walk_with_hashes, write_chunk, ALLOWED_FOLDERS, REPORT_INTERVAL, STORAGE_DIR,
 };
 use crate::shell;
 use crate::sysinfo;
@@ -568,6 +568,21 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
         }
+        RemoteRequest::StorageRename { request_id, from, to, .. } => {
+            let (Some(from_path), Some(to_path)) = (
+                safe_storage_path(Path::new(STORAGE_DIR), from),
+                safe_storage_path(Path::new(STORAGE_DIR), to),
+            ) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不合法的路徑: {from} -> {to}"),
+                };
+            };
+            match rename_path(&from_path, &to_path) {
+                Ok(()) => RemoteReply::Ack { request_id: request_id.clone() },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
     }
 }
 
@@ -583,6 +598,7 @@ fn request_kind(request: &RemoteRequest) -> &'static str {
         RemoteRequest::StorageFilePush { .. } => "StorageFilePush",
         RemoteRequest::StorageMkdir { .. } => "StorageMkdir",
         RemoteRequest::StorageDelete { .. } => "StorageDelete",
+        RemoteRequest::StorageRename { .. } => "StorageRename",
     }
 }
 
