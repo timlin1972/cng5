@@ -1,8 +1,11 @@
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use anyhow::{bail, Context, Result};
+use data_encoding::BASE64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -152,6 +155,38 @@ fn hash_file(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(&data);
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// 從 `path` 這個檔案的 `offset` 開始讀最多 `FILE_CHUNK_SIZE`（見
+/// `crate::plugin::FILE_CHUNK_SIZE`）個位元組，回傳 base64 編碼——給跨 domain
+/// 的 `RemoteRequest::StorageFilePull` 處理用（`global.rs` 的
+/// `build_remote_reply`），單則 MQTT 訊息塞不下整個檔案，一次只回一個 chunk。
+pub(crate) fn read_chunk(path: &Path, offset: u64) -> Result<String> {
+    let data = fs::read(path).with_context(|| format!("讀取檔案失敗: {}", path.display()))?;
+    let start = (offset as usize).min(data.len());
+    let end = (start + crate::plugin::FILE_CHUNK_SIZE).min(data.len());
+    Ok(BASE64.encode(&data[start..end]))
+}
+
+/// 把 base64 編碼的 `data_b64` 解碼後寫進 `path` 的 `offset` 位置；`offset == 0`
+/// 那一次順便建立（或清空）檔案，並確保上層資料夾存在——給跨 domain 的
+/// `RemoteRequest::StorageFilePush` 處理用，做法跟 `web.rs` 既有的
+/// `files_upload`（同網域版本）一樣是「每個 chunk 各自帶自己的 offset，seek
+/// 到對的位置寫入」。
+pub(crate) fn write_chunk(path: &Path, offset: u64, data_b64: &str) -> Result<()> {
+    let bytes = BASE64.decode(data_b64.as_bytes()).context("chunk 不是合法的 base64")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("建立資料夾失敗: {}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(offset == 0)
+        .open(path)
+        .with_context(|| format!("開啟檔案失敗: {}", path.display()))?;
+    file.seek(SeekFrom::Start(offset))?;
+    file.write_all(&bytes)?;
+    Ok(())
 }
 
 /// 分頁工具，給同網域的 `/api/storage/sync-manifest`（Task 5）跟跨 domain 的

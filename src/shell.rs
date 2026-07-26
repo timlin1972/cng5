@@ -395,9 +395,14 @@ pub(crate) fn send_cross_domain_request(ctx: &SharedContext, target_domain: &str
 fn cross_domain_timeout(ask: &CrossDomainAsk) -> Duration {
     match ask {
         CrossDomainAsk::Exec { .. } | CrossDomainAsk::Panel { .. } => Duration::from_secs(5),
-        CrossDomainAsk::FileList { .. } | CrossDomainAsk::FilePull { .. } | CrossDomainAsk::FilePush { .. } => {
-            Duration::from_secs(20)
-        }
+        CrossDomainAsk::FileList { .. }
+        | CrossDomainAsk::FilePull { .. }
+        | CrossDomainAsk::FilePush { .. }
+        | CrossDomainAsk::StorageManifest { .. }
+        | CrossDomainAsk::StorageFilePull { .. }
+        | CrossDomainAsk::StorageFilePush { .. }
+        | CrossDomainAsk::StorageMkdir { .. }
+        | CrossDomainAsk::StorageDelete { .. } => Duration::from_secs(20),
     }
 }
 
@@ -439,6 +444,21 @@ fn send_via_mqtt(
         }
         CrossDomainAsk::FilePush { target_id, folder, name, offset, data } => {
             RemoteRequest::FilePush { request_id: request_id.clone(), source_domain, target_id, folder, name, offset, data }
+        }
+        CrossDomainAsk::StorageManifest { offset } => {
+            RemoteRequest::StorageManifest { request_id: request_id.clone(), source_domain, offset }
+        }
+        CrossDomainAsk::StorageFilePull { path, offset } => {
+            RemoteRequest::StorageFilePull { request_id: request_id.clone(), source_domain, path, offset }
+        }
+        CrossDomainAsk::StorageFilePush { path, offset, data } => {
+            RemoteRequest::StorageFilePush { request_id: request_id.clone(), source_domain, path, offset, data }
+        }
+        CrossDomainAsk::StorageMkdir { path } => {
+            RemoteRequest::StorageMkdir { request_id: request_id.clone(), source_domain, path }
+        }
+        CrossDomainAsk::StorageDelete { path, recursive } => {
+            RemoteRequest::StorageDelete { request_id: request_id.clone(), source_domain, path, recursive }
         }
     };
 

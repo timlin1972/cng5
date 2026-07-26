@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -15,7 +16,10 @@ use crate::plugin::{
     global_registry_key, merged_global_view, DeviceReport, FileMeta, GlobalListItem, GlobalRegistryEntry, Plugin,
     RemoteReply, RemoteRequest, SharedContext, FILE_CHUNK_SIZE, FILE_LIST_PAGE_BUDGET,
 };
-use crate::plugins::{safe_file_path, url_encode_filename, ALLOWED_FOLDERS, REPORT_INTERVAL};
+use crate::plugins::{
+    make_dir, paginate_sync_entries, read_chunk, remove, safe_file_path, safe_storage_path, url_encode_filename,
+    walk_with_hashes, write_chunk, ALLOWED_FOLDERS, REPORT_INTERVAL, STORAGE_DIR,
+};
 use crate::shell;
 use crate::sysinfo;
 use crate::web::PORT;
@@ -505,6 +509,62 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
         }
+        RemoteRequest::StorageManifest { request_id, offset, .. } => match walk_with_hashes(Path::new(STORAGE_DIR)) {
+            Ok(all_entries) => {
+                let total = all_entries.len();
+                let entries = paginate_sync_entries(&all_entries, *offset);
+                RemoteReply::StorageManifest { request_id: request_id.clone(), entries, total }
+            }
+            Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+        },
+        RemoteRequest::StorageFilePull { request_id, path, offset, .. } => {
+            let Some(file_path) = safe_storage_path(Path::new(STORAGE_DIR), path) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不合法的路徑: {path}"),
+                };
+            };
+            match read_chunk(&file_path, *offset) {
+                Ok(data) => RemoteReply::FileChunk { request_id: request_id.clone(), data },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
+        RemoteRequest::StorageFilePush { request_id, path, offset, data, .. } => {
+            let Some(file_path) = safe_storage_path(Path::new(STORAGE_DIR), path) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不合法的路徑: {path}"),
+                };
+            };
+            match write_chunk(&file_path, *offset, data) {
+                Ok(()) => RemoteReply::FilePushAck { request_id: request_id.clone() },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
+        RemoteRequest::StorageMkdir { request_id, path, .. } => {
+            let Some(dir_path) = safe_storage_path(Path::new(STORAGE_DIR), path) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不合法的路徑: {path}"),
+                };
+            };
+            match make_dir(&dir_path) {
+                Ok(()) => RemoteReply::Ack { request_id: request_id.clone() },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
+        RemoteRequest::StorageDelete { request_id, path, recursive, .. } => {
+            let Some(target) = safe_storage_path(Path::new(STORAGE_DIR), path) else {
+                return RemoteReply::Error {
+                    request_id: request_id.clone(),
+                    message: format!("不合法的路徑: {path}"),
+                };
+            };
+            match remove(&target, *recursive) {
+                Ok(()) => RemoteReply::Ack { request_id: request_id.clone() },
+                Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
+            }
+        }
     }
 }
 
@@ -515,6 +575,11 @@ fn request_kind(request: &RemoteRequest) -> &'static str {
         RemoteRequest::FileList { .. } => "FileList",
         RemoteRequest::FilePull { .. } => "FilePull",
         RemoteRequest::FilePush { .. } => "FilePush",
+        RemoteRequest::StorageManifest { .. } => "StorageManifest",
+        RemoteRequest::StorageFilePull { .. } => "StorageFilePull",
+        RemoteRequest::StorageFilePush { .. } => "StorageFilePush",
+        RemoteRequest::StorageMkdir { .. } => "StorageMkdir",
+        RemoteRequest::StorageDelete { .. } => "StorageDelete",
     }
 }
 

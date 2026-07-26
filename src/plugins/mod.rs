@@ -23,8 +23,8 @@ pub use device::DevicePlugin;
 pub(crate) use files::{safe_file_path, url_encode_filename, ALLOWED_FOLDERS};
 pub use files::FilesPlugin;
 pub(crate) use storage::{
-    list_dir, make_dir, paginate_sync_entries, remove, rename_path, safe_storage_path, walk_with_hashes,
-    STORAGE_DIR,
+    list_dir, make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_storage_path,
+    walk_with_hashes, write_chunk, STORAGE_DIR,
 };
 pub(crate) use storage::SyncEntry;
 pub use gitrepo::GitRepoPlugin;

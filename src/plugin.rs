@@ -155,6 +155,11 @@ pub enum CrossDomainAsk {
     FileList { target_id: String, folder: String, offset: usize },
     FilePull { target_id: String, folder: String, name: String, offset: u64 },
     FilePush { target_id: String, folder: String, name: String, offset: u64, data: String },
+    StorageManifest { offset: usize },
+    StorageFilePull { path: String, offset: u64 },
+    StorageFilePush { path: String, offset: u64, data: String },
+    StorageMkdir { path: String },
+    StorageDelete { path: String, recursive: bool },
 }
 
 /// 跨 domain remote 的請求——透過 `global` plugin 既有的 MQTT session 加密
@@ -177,6 +182,11 @@ pub enum RemoteRequest {
     FileList { request_id: String, source_domain: String, target_id: String, folder: String, offset: usize },
     FilePull { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64 },
     FilePush { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64, data: String },
+    StorageManifest { request_id: String, source_domain: String, offset: usize },
+    StorageFilePull { request_id: String, source_domain: String, path: String, offset: u64 },
+    StorageFilePush { request_id: String, source_domain: String, path: String, offset: u64, data: String },
+    StorageMkdir { request_id: String, source_domain: String, path: String },
+    StorageDelete { request_id: String, source_domain: String, path: String, recursive: bool },
 }
 
 impl RemoteRequest {
@@ -186,7 +196,12 @@ impl RemoteRequest {
             | RemoteRequest::Panel { source_domain, .. }
             | RemoteRequest::FileList { source_domain, .. }
             | RemoteRequest::FilePull { source_domain, .. }
-            | RemoteRequest::FilePush { source_domain, .. } => source_domain,
+            | RemoteRequest::FilePush { source_domain, .. }
+            | RemoteRequest::StorageManifest { source_domain, .. }
+            | RemoteRequest::StorageFilePull { source_domain, .. }
+            | RemoteRequest::StorageFilePush { source_domain, .. }
+            | RemoteRequest::StorageMkdir { source_domain, .. }
+            | RemoteRequest::StorageDelete { source_domain, .. } => source_domain,
         }
     }
 }
@@ -202,6 +217,8 @@ pub enum RemoteReply {
     FileList { request_id: String, files: Vec<FileMeta>, total: usize },
     FileChunk { request_id: String, data: String },
     FilePushAck { request_id: String },
+    StorageManifest { request_id: String, entries: Vec<crate::plugins::SyncEntry>, total: usize },
+    Ack { request_id: String },
 }
 
 impl RemoteReply {
@@ -212,7 +229,9 @@ impl RemoteReply {
             | RemoteReply::Error { request_id, .. }
             | RemoteReply::FileList { request_id, .. }
             | RemoteReply::FileChunk { request_id, .. }
-            | RemoteReply::FilePushAck { request_id, .. } => request_id,
+            | RemoteReply::FilePushAck { request_id, .. }
+            | RemoteReply::StorageManifest { request_id, .. }
+            | RemoteReply::Ack { request_id, .. } => request_id,
         }
     }
 }
