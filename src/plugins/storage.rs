@@ -291,6 +291,36 @@ mod tests {
     use super::*;
     use std::fs;
 
+    static CWD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// 在同一個 process 裡改目前工作目錄是全域狀態：測試結束時（不管是正常結束
+    /// 還是中途 panic）都要換回原本的目錄，而且不能跟其他也會動工作目錄的測試
+    /// 同時執行——這個 guard 用一個共用的 `Mutex` 序列化這幾個測試，`Drop` 保證
+    /// 離開作用域（含 panic 展開）一定會換回原本的工作目錄、釋放鎖。`lock()`
+    /// 用 `unwrap_or_else` 接住 poisoned mutex（前一個測試如果真的 panic 了，
+    /// mutex 會變成 poisoned，這裡選擇繼續拿到鎖而不是讓後面的測試跟著整個
+    /// panic，畢竟這個鎖本來就是「同時只能有一個測試在動全域工作目錄」這件事的
+    /// 保護，不是在保護什麼跨測試共享的資料正確性）。
+    struct CwdGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        original: PathBuf,
+    }
+
+    impl CwdGuard {
+        fn enter(workdir: &Path) -> Self {
+            let lock = CWD_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let original = std::env::current_dir().expect("讀取目前工作目錄失敗");
+            std::env::set_current_dir(workdir).expect("切換測試用工作目錄失敗");
+            Self { _lock: lock, original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.original);
+        }
+    }
+
     /// 每個測試各自用一個獨立命名的暫存資料夾當 root，避免 cargo test 預設多執行緒
     /// 平行跑測試時互相踩到彼此的檔案——不能直接用真正的 `STORAGE_DIR`（那是
     /// 相對於工作目錄的相對路徑，多個測試同時寫入會互相干擾）。先清掉舊的殘留
@@ -423,13 +453,13 @@ mod tests {
         // 到一個乾淨的暫存目錄，plugin 內部用的相對路徑 `STORAGE_DIR` 就會
         // 落在這個暫存目錄底下。`cargo test` 預設多執行緒平行跑測試，改變
         // 工作目錄是 process 全域的狀態，所以這個測試不能跟其他也會
-        // `set_current_dir` 的測試同時執行；這個專案目前沒有其他測試會動
-        // 工作目錄，所以先接受這個限制，不用額外做執行緒鎖。
+        // `set_current_dir` 的測試（`dispatch_unknown_command_errors`）同時
+        // 執行——用 `CwdGuard` 序列化，並且保證 panic 時也會換回原本的工作
+        // 目錄。
         let workdir = std::env::temp_dir().join("cng5-storage-plugin-test-workdir");
         let _ = fs::remove_dir_all(&workdir);
         fs::create_dir_all(&workdir).unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&workdir).unwrap();
+        let _cwd_guard = CwdGuard::enter(&workdir);
 
         let ctx: SharedContext = std::sync::Arc::new(std::sync::Mutex::new(crate::plugin::ContextInner::default()));
         let mut plugin = StoragePlugin::new(ctx);
@@ -458,7 +488,6 @@ mod tests {
         plugin.dispatch("rm", &["2026-renamed".to_string(), "--recursive".to_string()], &out).unwrap();
         assert!(!Path::new(STORAGE_DIR).join("photos/2026-renamed").exists());
 
-        std::env::set_current_dir(original).unwrap();
         let _ = fs::remove_dir_all(&workdir);
     }
 
@@ -468,15 +497,13 @@ mod tests {
         let workdir = std::env::temp_dir().join("cng5-storage-plugin-test-unknown-cmd");
         let _ = fs::remove_dir_all(&workdir);
         fs::create_dir_all(&workdir).unwrap();
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&workdir).unwrap();
+        let _cwd_guard = CwdGuard::enter(&workdir);
 
         let mut plugin = StoragePlugin::new(ctx);
         let out = OutputBuffer::new();
         let err = plugin.dispatch("frobnicate", &[], &out).unwrap_err();
         assert!(err.to_string().contains("storage 不認得指令"));
 
-        std::env::set_current_dir(original).unwrap();
         let _ = fs::remove_dir_all(&workdir);
     }
 
