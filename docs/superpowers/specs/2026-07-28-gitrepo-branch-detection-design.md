@@ -49,6 +49,16 @@ commit、或 bisect 中途）才算「異動」（顯示成 `(detached HEAD)`）
 多個 remote 的 branch 剛好指到同一個 commit 時，優先選 `origin/*`，找不到才選
 字母排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
 
+**踩到的真實 bug（已修正）：** `git for-each-ref --points-at=HEAD ... refs/remotes/`
+也會列出 remote 自己的 `HEAD` symref（指向該 remote 預設 branch的指標，不是
+真正的 branch），依 git 版本不同，短名稱可能是 `<remote>`（沒有 `/`）或
+`<remote>/HEAD`。後者排序會排在 `origin/develop` 前面，「優先選 `origin/*`」
+那條規則沒有排除它，於是誤選到 `origin/HEAD`，`short_branch_name` 再把它切成
+字面上的 `"HEAD"` 回傳，導致實際在 `origin/develop` tip 上、完全乾淨的 repo
+被誤判成「branch 是 HEAD，不是 develop」。修法：`pick_detached_branch_name`
+（拆出來的純函式，方便測試）明確濾掉沒有 `/` 的候選跟結尾是 `/HEAD` 的候選，
+兩種 git 版本的行為都排除掉。
+
 ## 已知限制（刻意的取捨，不是之後要修的 bug）
 
 - `EXPECTED_BRANCH` 是單一寫死的常數（`"develop"`），套用到所有監控目錄底下

@@ -242,15 +242,35 @@ fn short_branch_name(remote_ref: &str) -> &str {
     remote_ref.split_once('/').map(|(_, rest)| rest).unwrap_or(remote_ref)
 }
 
+/// 從 `git for-each-ref --points-at=HEAD --format=%(refname:short) refs/remotes/`
+/// 的輸出裡，挑出真正代表某個 branch 的候選，回傳去掉 remote 前綴的名稱。
+///
+/// 一定要濾掉 remote 自己的 `HEAD` symref（指向該 remote 預設 branch的指標，
+/// 不是真正的 branch）——依 git 版本不同，它的短名稱可能是純粹的 `<remote>`
+/// （沒有 `/`），也可能是 `<remote>/HEAD`，兩種都要排除，不然會誤把字面上的
+/// `HEAD` 當成解析出來的 branch 名稱回傳（實測遇到的真實案例：`origin/HEAD`
+/// 排序在 `origin/develop` 前面，「優先選 origin/*」那條規則會先選到它）。
+///
+/// 多個候選都指向同一個 commit 時，優先選 `origin/*`，找不到就選字母排序
+/// 第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。純字串處理，
+/// 不呼叫 git，方便寫單元測試。
+fn pick_detached_branch_name(stdout: &str) -> Option<String> {
+    let mut names: Vec<&str> =
+        stdout.lines().filter(|l| !l.is_empty() && l.contains('/') && !l.ends_with("/HEAD")).collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
+    Some(short_branch_name(chosen).to_string())
+}
+
 /// detached HEAD 時，查目前這個 commit 是不是剛好是某個 remote branch 的最新
 /// commit（CI/build 流程常見的 `git checkout origin/develop` 就是這種情況，
 /// 這其實就是「在 develop 上」，不是異常）——如果是，回傳去掉 remote 前綴的
 /// branch 名稱，視同 checkout 在那個 branch 上，用一般 branch 的邏輯去跟基準
 /// 比對；查不到任何對得上的 remote branch 就回傳 `None`（真正意義上的
 /// detached，例如卡在某個歷史 commit），維持「跟基準不一樣」的判斷。
-///
-/// 多個 remote 剛好都指到同一個 commit 時，優先選 `origin/*`，找不到就選字母
-/// 排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
 fn resolve_detached_branch(repo: &Path) -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
@@ -261,14 +281,7 @@ fn resolve_detached_branch(repo: &Path) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut names: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
-    if names.is_empty() {
-        return None;
-    }
-    names.sort();
-    let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
-    Some(short_branch_name(chosen).to_string())
+    pick_detached_branch_name(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// 對 `repo` 跑一次 `git status --porcelain=v2 --branch`，解析成 `RepoState`。
@@ -580,5 +593,49 @@ mod status_parsing_tests {
         assert_eq!(short_branch_name("origin/develop"), "develop");
         assert_eq!(short_branch_name("upstream/feature/x"), "feature/x");
         assert_eq!(short_branch_name("no-remote-prefix"), "no-remote-prefix");
+    }
+
+    #[test]
+    fn pick_detached_branch_name_basic() {
+        assert_eq!(pick_detached_branch_name("origin/develop\n"), Some("develop".to_string()));
+    }
+
+    /// git 版本較新時，remote 的 HEAD symref 短名稱會收斂成純粹的
+    /// `<remote>`（沒有 `/`）——這種一定要濾掉，不然會被誤判成一個真正的
+    /// branch 名稱回傳。
+    #[test]
+    fn pick_detached_branch_name_ignores_collapsed_remote_head() {
+        assert_eq!(pick_detached_branch_name("origin\norigin/develop\n"), Some("develop".to_string()));
+    }
+
+    /// git 版本較舊（或不同平台）時，remote 的 HEAD symref 短名稱是
+    /// `<remote>/HEAD`——這是這次真正踩到的 bug：排序後 `origin/HEAD` 會排在
+    /// `origin/develop` 前面，「優先選 origin/*」那條規則會先選到它，
+    /// `short_branch_name` 再把它切成字面上的 `"HEAD"` 回傳，誤判成
+    /// branch 不是 develop。
+    #[test]
+    fn pick_detached_branch_name_ignores_head_suffix() {
+        assert_eq!(pick_detached_branch_name("origin/HEAD\norigin/develop\n"), Some("develop".to_string()));
+    }
+
+    #[test]
+    fn pick_detached_branch_name_prefers_origin_over_other_remotes() {
+        assert_eq!(
+            pick_detached_branch_name("upstream/develop\norigin/develop\n"),
+            Some("develop".to_string())
+        );
+    }
+
+    /// 只有 remote 的 HEAD symref、沒有任何真正的候選 branch 時，回傳
+    /// `None`——維持「真正意義上的 detached」的判斷，不要硬湊一個結果出來。
+    #[test]
+    fn pick_detached_branch_name_none_when_only_head_symref() {
+        assert_eq!(pick_detached_branch_name("origin\n"), None);
+        assert_eq!(pick_detached_branch_name("origin/HEAD\n"), None);
+    }
+
+    #[test]
+    fn pick_detached_branch_name_empty_input() {
+        assert_eq!(pick_detached_branch_name(""), None);
     }
 }

@@ -1023,12 +1023,131 @@ Run: `cargo test gitrepo 2>&1 | tail -20` 跟 `cargo test 2>&1 | tail -6`（全�
 `# branch.head feature/x`（跟 `EXPECTED_BRANCH` 不同，會被列為異動）。驗證
 完刪除測試用的 repo，不留痕跡。
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/plugins/gitrepo.rs docs/superpowers/specs/2026-07-28-gitrepo-branch-detection-design.md docs/superpowers/plans/2026-07-28-gitrepo-branch-detection.md
 git commit -m "$(cat <<'EOF'
 gitrepo：拿掉「第一次看到的基準」，改成單一寫死的 develop
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+Committed as `1c4bddf`，已 push 到 origin/main。
+
+---
+
+### Task 8（追加，2026-07-28）：修正 `origin/HEAD` symref 誤判成 branch 名稱 `"HEAD"`
+
+**背景：** 使用者回報一個真實案例：`buildroot/dl/plugin_moxa_mstp` 明明是
+`HEAD detached at origin/develop`、工作目錄乾淨，卻被列成「branch 是 HEAD，
+不是 develop」。根因是 `resolve_detached_branch` 用
+`git for-each-ref --points-at=HEAD ... refs/remotes/` 找候選時，沒有排除
+remote 自己的 `HEAD` symref（指向該 remote 預設 branch 的指標，依 git 版本
+短名稱可能是 `<remote>` 或 `<remote>/HEAD`）——`origin/HEAD` 字母排序排在
+`origin/develop` 前面，「優先選 `origin/*`」那條規則沒有分辨兩者，選到
+`origin/HEAD`，`short_branch_name` 切掉 `origin/` 之後剩下字面上的 `"HEAD"`。
+
+**Files:**
+- Modify: `src/plugins/gitrepo.rs`
+
+**Interfaces：**
+- 從 `resolve_detached_branch` 拆出一個純函式
+  `pick_detached_branch_name(stdout: &str) -> Option<String>`（不呼叫
+  git，方便寫單元測試），濾掉候選裡「沒有 `/`」跟「結尾是 `/HEAD`」的項目
+  （兩種都是 remote 的 HEAD symref，不是真正的 branch）。
+
+- [x] **Step 1: 拆出 `pick_detached_branch_name`，`resolve_detached_branch` 改成呼叫它**
+
+```rust
+fn pick_detached_branch_name(stdout: &str) -> Option<String> {
+    let mut names: Vec<&str> =
+        stdout.lines().filter(|l| !l.is_empty() && l.contains('/') && !l.ends_with("/HEAD")).collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
+    Some(short_branch_name(chosen).to_string())
+}
+
+fn resolve_detached_branch(repo: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["for-each-ref", "--points-at=HEAD", "--format=%(refname:short)", "refs/remotes/"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    pick_detached_branch_name(&String::from_utf8_lossy(&output.stdout))
+}
+```
+
+- [x] **Step 2: 加上單元測試（重現這次的真實 bug）**
+
+在 `status_parsing_tests` 模組裡加：
+
+```rust
+    #[test]
+    fn pick_detached_branch_name_basic() {
+        assert_eq!(pick_detached_branch_name("origin/develop\n"), Some("develop".to_string()));
+    }
+
+    #[test]
+    fn pick_detached_branch_name_ignores_collapsed_remote_head() {
+        assert_eq!(pick_detached_branch_name("origin\norigin/develop\n"), Some("develop".to_string()));
+    }
+
+    #[test]
+    fn pick_detached_branch_name_ignores_head_suffix() {
+        assert_eq!(pick_detached_branch_name("origin/HEAD\norigin/develop\n"), Some("develop".to_string()));
+    }
+
+    #[test]
+    fn pick_detached_branch_name_prefers_origin_over_other_remotes() {
+        assert_eq!(
+            pick_detached_branch_name("upstream/develop\norigin/develop\n"),
+            Some("develop".to_string())
+        );
+    }
+
+    #[test]
+    fn pick_detached_branch_name_none_when_only_head_symref() {
+        assert_eq!(pick_detached_branch_name("origin\n"), None);
+        assert_eq!(pick_detached_branch_name("origin/HEAD\n"), None);
+    }
+
+    #[test]
+    fn pick_detached_branch_name_empty_input() {
+        assert_eq!(pick_detached_branch_name(""), None);
+    }
+```
+
+- [x] **Step 3: Build + 測試**
+
+Run: `cargo build 2>&1 | tail -40`（clean）
+Run: `cargo test gitrepo 2>&1 | tail -30`（12 個 gitrepo 測試全過，含新增的 6
+個 `pick_detached_branch_name_*`）
+Run: `cargo test 2>&1 | tail -6`（全專案 129 個測試全過）
+
+- [x] **Step 4: 用真實 repo 重現＋確認修好**
+
+拿丟棄式的 bare remote + clone，把 remote 的 `HEAD` 設成指向 `develop`
+（`git symbolic-ref HEAD refs/heads/develop`），clone 之後 `git checkout
+origin/develop` 進入 detached 狀態，確認 `git for-each-ref --points-at=HEAD
+--format='%(refname:short)' refs/remotes/` 印出的內容跟 `pick_detached_branch_name`
+的濾除邏輯對得上。驗證完刪除測試用的 repo，不留痕跡。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/plugins/gitrepo.rs docs/superpowers/specs/2026-07-28-gitrepo-branch-detection-design.md docs/superpowers/plans/2026-07-28-gitrepo-branch-detection.md
+git commit -m "$(cat <<'EOF'
+gitrepo：修正 origin/HEAD symref 被誤判成 branch 名稱 "HEAD" 的 bug
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF
