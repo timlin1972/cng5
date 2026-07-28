@@ -17,8 +17,8 @@ use crate::plugin::{
     RemoteReply, RemoteRequest, SharedContext, FILE_CHUNK_SIZE, FILE_LIST_PAGE_BUDGET,
 };
 use crate::plugins::{
-    make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_file_path, safe_storage_path,
-    url_encode_filename, walk_with_hashes, write_chunk, ALLOWED_FOLDERS, REPORT_INTERVAL, STORAGE_DIR,
+    make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_music_copy_path, safe_storage_path,
+    url_encode_filename, walk_with_hashes, write_chunk, REPORT_INTERVAL, STORAGE_DIR,
 };
 use crate::shell;
 use crate::sysinfo;
@@ -454,60 +454,54 @@ fn build_remote_reply(request: &RemoteRequest, ctx: &SharedContext) -> RemoteRep
             };
             RemoteReply::Panel { request_id: request_id.clone(), text: fetch_panel_text_once(&ip, panel_name) }
         }
-        RemoteRequest::FileList { request_id, target_id, folder, offset, .. } => {
+        RemoteRequest::MusicFileList { request_id, target_id, offset, .. } => {
             let Some(ip) = target_ip(ctx, target_id) else {
                 return RemoteReply::Error {
                     request_id: request_id.clone(),
                     message: format!("目標裝置不存在: {target_id}"),
                 };
             };
-            if !ALLOWED_FOLDERS.contains(&folder.as_str()) {
-                return RemoteReply::Error {
-                    request_id: request_id.clone(),
-                    message: format!("不支援的資料夾: {folder}"),
-                };
-            }
-            match fetch_remote_file_list(&ip, folder) {
+            match fetch_remote_file_list(&ip) {
                 Ok(all_files) => {
                     let total = all_files.len();
                     let files = paginate_file_list(&all_files, *offset);
-                    RemoteReply::FileList { request_id: request_id.clone(), files, total }
+                    RemoteReply::MusicFileList { request_id: request_id.clone(), files, total }
                 }
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
         }
-        RemoteRequest::FilePull { request_id, target_id, folder, name, offset, .. } => {
+        RemoteRequest::MusicFilePull { request_id, target_id, name, offset, .. } => {
             let Some(ip) = target_ip(ctx, target_id) else {
                 return RemoteReply::Error {
                     request_id: request_id.clone(),
                     message: format!("目標裝置不存在: {target_id}"),
                 };
             };
-            if safe_file_path(folder, name).is_none() {
+            if safe_music_copy_path(name).is_none() {
                 return RemoteReply::Error {
                     request_id: request_id.clone(),
-                    message: format!("不支援的資料夾或檔名: {folder}/{name}"),
+                    message: format!("不支援的檔名: {name}"),
                 };
             }
-            match fetch_file_chunk(&ip, folder, name, *offset) {
+            match fetch_file_chunk(&ip, name, *offset) {
                 Ok(data) => RemoteReply::FileChunk { request_id: request_id.clone(), data },
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
         }
-        RemoteRequest::FilePush { request_id, target_id, folder, name, offset, data, .. } => {
+        RemoteRequest::MusicFilePush { request_id, target_id, name, offset, data, .. } => {
             let Some(ip) = target_ip(ctx, target_id) else {
                 return RemoteReply::Error {
                     request_id: request_id.clone(),
                     message: format!("目標裝置不存在: {target_id}"),
                 };
             };
-            if safe_file_path(folder, name).is_none() {
+            if safe_music_copy_path(name).is_none() {
                 return RemoteReply::Error {
                     request_id: request_id.clone(),
-                    message: format!("不支援的資料夾或檔名: {folder}/{name}"),
+                    message: format!("不支援的檔名: {name}"),
                 };
             }
-            match push_file_chunk(&ip, folder, name, *offset, data) {
+            match push_file_chunk(&ip, name, *offset, data) {
                 Ok(()) => RemoteReply::FilePushAck { request_id: request_id.clone() },
                 Err(err) => RemoteReply::Error { request_id: request_id.clone(), message: format!("{err:#}") },
             }
@@ -590,9 +584,9 @@ fn request_kind(request: &RemoteRequest) -> &'static str {
     match request {
         RemoteRequest::Exec { .. } => "Exec",
         RemoteRequest::Panel { .. } => "Panel",
-        RemoteRequest::FileList { .. } => "FileList",
-        RemoteRequest::FilePull { .. } => "FilePull",
-        RemoteRequest::FilePush { .. } => "FilePush",
+        RemoteRequest::MusicFileList { .. } => "MusicFileList",
+        RemoteRequest::MusicFilePull { .. } => "MusicFilePull",
+        RemoteRequest::MusicFilePush { .. } => "MusicFilePush",
         RemoteRequest::StorageManifest { .. } => "StorageManifest",
         RemoteRequest::StorageFilePull { .. } => "StorageFilePull",
         RemoteRequest::StorageFilePush { .. } => "StorageFilePush",
@@ -606,10 +600,11 @@ fn target_ip(ctx: &SharedContext, target_id: &str) -> Option<String> {
     ctx.lock().unwrap().devices.get(target_id).map(|entry| entry.report.ip.clone())
 }
 
-/// 中繼一次 `FileList` 請求：對 `target_id` 那台裝置既有的 `GET /api/files/{folder}`
-/// 端點查一次，跟 `fetch_panel_text_once` 一樣透過 `curl` 子行程打 HTTP。
-fn fetch_remote_file_list(ip: &str, folder: &str) -> Result<Vec<FileMeta>> {
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}");
+/// 中繼一次 `MusicFileList` 請求：對 `target_id` 那台裝置既有的
+/// `GET /api/music/copy` 端點查一次，跟 `fetch_panel_text_once` 一樣透過
+/// `curl` 子行程打 HTTP。
+fn fetch_remote_file_list(ip: &str) -> Result<Vec<FileMeta>> {
+    let url = format!("http://{ip}:{PORT}/api/music/copy");
     let output = Command::new("curl")
         .args(["--silent", "--fail", "--max-time", "10", &url])
         .output()
@@ -625,7 +620,7 @@ fn fetch_remote_file_list(ip: &str, folder: &str) -> Result<Vec<FileMeta>> {
 /// 估算，`+ 24` 粗抓 `size` 數字跟 JSON 標點的開銷）一旦會超過
 /// `FILE_LIST_PAGE_BUDGET` 就切下一頁——用 `>` 而不是 `>=`，且第一筆一定收，
 /// 這樣就算單一檔名長到自己就超過預算，也不會回傳空頁面卡住呼叫端的分頁
-/// 迴圈（見 `plugins::files::list_remote_files_mqtt`）。
+/// 迴圈（見 `plugins::music::list_remote_files_mqtt`）。
 fn paginate_file_list(all: &[FileMeta], offset: usize) -> Vec<FileMeta> {
     let mut page = Vec::new();
     let mut size = 0usize;
@@ -640,17 +635,17 @@ fn paginate_file_list(all: &[FileMeta], offset: usize) -> Vec<FileMeta> {
     page
 }
 
-/// 中繼一次 `FilePull` 請求：對 `target_id` 那台裝置既有的
-/// `GET /api/files/{folder}/{name}` 端點送一個 `Range` 請求，只拿 `offset` 開始
+/// 中繼一次 `MusicFilePull` 請求：對 `target_id` 那台裝置既有的
+/// `GET /api/music/copy/{name}` 端點送一個 `Range` 請求，只拿 `offset` 開始
 /// 的一個 chunk（見 `plugin::FILE_CHUNK_SIZE`），不用整個檔案讀進記憶體。
 /// `actix_files::NamedFile`（`web.rs` 那個端點的實作）本來就支援 `Range`，一個
 /// 超出檔案實際範圍的 range 會回傳「從 offset 到真正檔尾」那一段（不是錯誤）——
-/// `plugins::files::pull_file_mqtt` 靠事先知道的檔案大小判斷要不要再要下一個
+/// `plugins::music::pull_file_mqtt` 靠事先知道的檔案大小判斷要不要再要下一個
 /// chunk，不會真的送出一個完全落在檔案範圍外的請求，所以這裡不需要特別處理
 /// 416 那種情況。
-fn fetch_file_chunk(ip: &str, folder: &str, name: &str, offset: u64) -> Result<String> {
+fn fetch_file_chunk(ip: &str, name: &str, offset: u64) -> Result<String> {
     let end = offset + FILE_CHUNK_SIZE as u64 - 1;
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{}", url_encode_filename(name));
+    let url = format!("http://{ip}:{PORT}/api/music/copy/{}", url_encode_filename(name));
     let output = Command::new("curl")
         .args(["--silent", "--fail", "--max-time", "10", "--range", &format!("{offset}-{end}"), &url])
         .output()
@@ -661,12 +656,12 @@ fn fetch_file_chunk(ip: &str, folder: &str, name: &str, offset: u64) -> Result<S
     Ok(BASE64.encode(&output.stdout))
 }
 
-/// 中繼一次 `FilePush` 請求：把 `data`（base64）解碼後的原始位元組轉送給
-/// `target_id` 那台裝置既有的 `POST /api/files/{folder}/{name}?offset=<offset>`
-/// 端點，由那個端點負責寫入正確的位置（見 `web.rs` 的 `files_upload`）。
-fn push_file_chunk(ip: &str, folder: &str, name: &str, offset: u64, data: &str) -> Result<()> {
+/// 中繼一次 `MusicFilePush` 請求：把 `data`（base64）解碼後的原始位元組轉送給
+/// `target_id` 那台裝置既有的 `POST /api/music/copy/{name}?offset=<offset>`
+/// 端點，由那個端點負責寫入正確的位置（見 `web.rs` 的 `music_copy_upload`）。
+fn push_file_chunk(ip: &str, name: &str, offset: u64, data: &str) -> Result<()> {
     let bytes = BASE64.decode(data.as_bytes()).context("chunk 不是合法的 base64")?;
-    let url = format!("http://{ip}:{PORT}/api/files/{folder}/{}?offset={offset}", url_encode_filename(name));
+    let url = format!("http://{ip}:{PORT}/api/music/copy/{}?offset={offset}", url_encode_filename(name));
     let output = Command::new("curl")
         .args(["--silent", "--fail", "--max-time", "10", "-X", "POST", "--data-binary", "@-", &url])
         .stdin(std::process::Stdio::piped())

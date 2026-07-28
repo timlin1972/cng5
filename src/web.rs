@@ -20,7 +20,7 @@ use crate::plugin::{
     APP_VERSION,
 };
 use crate::plugins::{
-    list_dir, make_dir, remove, rename_path, safe_file_path, safe_storage_path, walk_with_hashes, ALLOWED_FOLDERS,
+    list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
     DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
@@ -98,9 +98,9 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/device/list", web::get().to(device_list))
             .route("/api/global/list", web::get().to(global_list))
             .route("/api/remote/cross-relay", web::post().to(remote_cross_relay))
-            .route("/api/files/{folder}", web::get().to(files_list))
-            .route("/api/files/{folder}/{name}", web::get().to(files_download))
-            .route("/api/files/{folder}/{name}", web::post().to(files_upload))
+            .route("/api/music/copy", web::get().to(music_copy_list))
+            .route("/api/music/copy/{name}", web::get().to(music_copy_download))
+            .route("/api/music/copy/{name}", web::post().to(music_copy_upload))
             .route("/api/storage/list", web::get().to(storage_list))
             .route("/api/storage/download", web::get().to(storage_download))
             .route("/api/storage/upload", web::post().to(storage_upload))
@@ -177,21 +177,17 @@ async fn remote_cross_relay(body: web::Json<CrossRelayRequest>, ctx: web::Data<S
     }
 }
 
-/// `GET /api/files/{folder}`：`plugins::files` 的 `copy ... from <id>` 同網域
-/// 版本用這個查詢目標裝置某個資料夾裡有哪些檔案（連同大小，讓對方能靠已知的
-/// 檔案大小判斷拉到哪裡算拉完，不需要伺服器另外回報「這是不是最後一塊」）。
-/// `folder` 沒過白名單、或資料夾還不存在，都當作空清單，不報錯——跟
-/// `music_files` 判斷資料夾不存在時的容錯邏輯一致。
+/// `GET /api/music/copy`：`plugins::music` 的 `copy ... from <id>` 同網域
+/// 版本用這個查詢目標裝置 `music/` 資料夾裡有哪些檔案（連同大小，讓對方能靠
+/// 已知的檔案大小判斷拉到哪裡算拉完，不需要伺服器另外回報「這是不是最後
+/// 一塊」）。`music/` 資料夾還不存在就當作空清單，不報錯——跟 `music_files`
+/// 判斷資料夾不存在時的容錯邏輯一致。
 ///
 /// 依檔名排序回傳：`global.rs` 的 `fetch_remote_file_list` 分頁時（見
 /// `paginate_file_list`）每一頁都是各自重新呼叫這個端點，`fs::read_dir` 本身
 /// 不保證每次呼叫順序一致，沒排序的話跨頁可能漏掉或重複某些檔案。
-async fn files_list(path: web::Path<String>) -> impl Responder {
-    let folder = path.into_inner();
-    if !ALLOWED_FOLDERS.contains(&folder.as_str()) {
-        return HttpResponse::BadRequest().finish();
-    }
-    let mut files: Vec<FileMeta> = std::fs::read_dir(&folder)
+async fn music_copy_list() -> impl Responder {
+    let mut files: Vec<FileMeta> = std::fs::read_dir(MUSIC_DIR)
         .map(|entries| {
             entries
                 .filter_map(|entry| entry.ok())
@@ -208,14 +204,14 @@ async fn files_list(path: web::Path<String>) -> impl Responder {
     HttpResponse::Ok().json(files)
 }
 
-/// `GET /api/files/{folder}/{name}`：下載一個檔案的原始位元組。用
+/// `GET /api/music/copy/{name}`：下載一個檔案的原始位元組。用
 /// `actix_files::NamedFile` 是因為它會自動處理 `Range` 請求（跟
 /// `music_file_audio` 同樣的理由）——跨 domain 中繼（`global.rs` 的
 /// `fetch_file_chunk`）就是靠對這個端點送 `Range` 請求，一次只拿一個 chunk，
 /// 不用整個檔案讀進記憶體再自己切。
-async fn files_download(path: web::Path<(String, String)>, req: HttpRequest) -> HttpResponse {
-    let (folder, name) = path.into_inner();
-    let Some(file_path) = safe_file_path(&folder, &name) else {
+async fn music_copy_download(path: web::Path<String>, req: HttpRequest) -> HttpResponse {
+    let name = path.into_inner();
+    let Some(file_path) = safe_music_copy_path(&name) else {
         return HttpResponse::BadRequest().finish();
     };
     match actix_files::NamedFile::open(&file_path) {
@@ -224,29 +220,29 @@ async fn files_download(path: web::Path<(String, String)>, req: HttpRequest) -> 
     }
 }
 
-/// `POST /api/files/{folder}/{name}?offset=<n>`：把 request body 的原始位元組
+/// `POST /api/music/copy/{name}?offset=<n>`：把 request body 的原始位元組
 /// 寫進檔案的 `offset` 位置。`offset` 沒帶就當 0（同網域直接整檔上傳的簡單
-/// 情境，見 `plugins::files::push_file_http`——一次 POST、body 是整個檔案）；
+/// 情境，見 `plugins::music::push_file_http`——一次 POST、body 是整個檔案）；
 /// 跨 domain 中繼（`global.rs` 的 `push_file_chunk`）則是每個 chunk 各自帶自己
 /// 的 `offset`，靠這個組回原本的檔案，不需要另外一個「這是不是最後一塊」的
 /// 參數——`offset == 0` 那一次順便建立/清空檔案（同一個檔案的第一個 chunk
-/// 保證一定是 offset 0，因為 `plugins::files` 是照順序、等前一個 chunk 的
+/// 保證一定是 offset 0，因為 `plugins::music` 是照順序、等前一個 chunk 的
 /// 回應之後才送下一個），之後的 chunk 只要 seek 到對的位置寫入即可。
 #[derive(Deserialize)]
-struct FilesUploadQuery {
+struct MusicCopyUploadQuery {
     offset: Option<u64>,
 }
 
-async fn files_upload(
-    path: web::Path<(String, String)>,
-    query: web::Query<FilesUploadQuery>,
+async fn music_copy_upload(
+    path: web::Path<String>,
+    query: web::Query<MusicCopyUploadQuery>,
     body: web::Bytes,
 ) -> HttpResponse {
-    let (folder, name) = path.into_inner();
-    let Some(file_path) = safe_file_path(&folder, &name) else {
+    let name = path.into_inner();
+    let Some(file_path) = safe_music_copy_path(&name) else {
         return HttpResponse::BadRequest().finish();
     };
-    if std::fs::create_dir_all(&folder).is_err() {
+    if std::fs::create_dir_all(MUSIC_DIR).is_err() {
         return HttpResponse::InternalServerError().finish();
     }
     let offset = query.offset.unwrap_or(0);
@@ -288,7 +284,7 @@ async fn storage_list(query: web::Query<StoragePathQuery>) -> HttpResponse {
 
 /// `GET /api/storage/download?path=<相對檔案路徑>`：下載單一檔案。用
 /// `actix_files::NamedFile` 是因為它會自動處理 `Range` 請求，跟現有
-/// `files_download`/`music_file_audio` 同樣的理由——大檔案/影片也能拖拉進度。
+/// `music_copy_download`/`music_file_audio` 同樣的理由——大檔案/影片也能拖拉進度。
 async fn storage_download(query: web::Query<StoragePathQuery>, req: HttpRequest) -> HttpResponse {
     let Some(file_path) = safe_storage_path(Path::new(STORAGE_DIR), &query.path) else {
         return HttpResponse::BadRequest().finish();
@@ -372,7 +368,7 @@ async fn storage_rename(query: web::Query<StorageRenameQuery>) -> HttpResponse {
 /// 檔案的 hash）攤平後的清單，同網域的 `sync` plugin 用這個端點取得對方的完
 /// 整清單去跟本機清單、baseline 比對。同網域走 HTTP，沒有 MQTT 那種單則訊息
 /// 大小限制，所以不分頁，直接回傳全部，跟這個檔案裡其他既有的
-/// `storage_list`/`files_list`/`music_files` 端點一樣不分頁。
+/// `storage_list`/`music_copy_list`/`music_files` 端點一樣不分頁。
 async fn storage_sync_manifest() -> HttpResponse {
     match walk_with_hashes(Path::new(STORAGE_DIR)) {
         Ok(entries) => HttpResponse::Ok().json(entries),

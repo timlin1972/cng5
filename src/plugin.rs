@@ -14,7 +14,7 @@ use crate::output::OutputBuffer;
 /// 常數）。之後要發新版本時，**只需要改這一行**：`system` plugin 的
 /// `version` 指令/panel、`DeviceReport`（因此 `device`/`global` 的清單也一
 /// 起）、`/api/version` 都是讀這裡，不用到處改。
-pub const APP_VERSION: &str = "1.6.0";
+pub const APP_VERSION: &str = "1.7.0";
 
 /// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
 /// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
@@ -100,7 +100,7 @@ pub fn global_registry_key(domain: &str, id: &str) -> String {
     format!("{domain}/{id}")
 }
 
-/// `plugins::files` 一個 chunk 送多少原始位元組（base64 編碼、包上 JSON/AEAD
+/// `plugins::music` 一個 chunk 送多少原始位元組（base64 編碼、包上 JSON/AEAD
 /// 之前）。跨 domain 檔案傳輸是一個 chunk 一次 MQTT 請求/回覆的往返（見
 /// `shell::send_cross_domain_request`），不是整個檔案塞進一則訊息——公開
 /// broker 對單則訊息大小有限制。
@@ -109,7 +109,7 @@ pub fn global_registry_key(domain: &str, id: &str) -> String {
 /// payload，10000 bytes 收得到，11000 bytes 以上完全收不到（既不是連線出錯、
 /// 也不是 publish() 呼叫本身失敗，就是悄悄不見了——broker 端直接丟棄，沒有
 /// 任何錯誤回報）。原本設 16 KiB（base64 編碼後膨脹到約 22 KiB，加密+JSON
-/// 包裝前）遠遠超過這個門檻，導致每個 `FilePull`/`FilePush` 回覆都被
+/// 包裝前）遠遠超過這個門檻，導致每個 `MusicFilePull`/`MusicFilePush` 回覆都被
 /// broker 悄悄丟掉，發起端只能眼睜睜等到逾時——這正是曾經發生過的實際 bug
 /// （跨 domain copy 永遠卡在逾時，不管把逾時時間調多長都一樣，因為根本沒有
 /// 回覆會抵達）。4 KiB 原始資料 base64 編碼後約 5.5 KiB，加上 JSON/AEAD 的
@@ -119,17 +119,17 @@ pub fn global_registry_key(domain: &str, id: &str) -> String {
 /// 檔案傳輸「可能要切檔慢慢傳」，換取「真的傳得成」比「傳快一點」更重要。
 pub const FILE_CHUNK_SIZE: usize = 4 * 1024;
 
-/// 一則 `FileList` 回覆最多塞多少原始位元組（以檔名長度估算，不含 JSON/AEAD
-/// 包裝開銷）——資料夾檔案一多，整份清單一次塞進一則 MQTT 回覆一樣會被
-/// broker 悄悄丟掉（跟 `FILE_CHUNK_SIZE` 要解決的是同一個門檻問題，只是這裡
-/// 撐爆訊息大小的是「檔案數量」而不是「單一檔案內容」）。收到請求那一端
-/// （`global.rs` 的 `build_remote_reply`）把完整清單依這個預算切成一頁一頁，
-/// 呼叫端（`plugins::files::list_remote_files_mqtt`）用回覆帶的 `total` 判斷
-/// 還有沒有下一頁，逐頁把 `offset` 往前推，直到湊滿 `total` 筆。
+/// 一則 `MusicFileList` 回覆最多塞多少原始位元組（以檔名長度估算，不含
+/// JSON/AEAD 包裝開銷）——資料夾檔案一多，整份清單一次塞進一則 MQTT 回覆
+/// 一樣會被 broker 悄悄丟掉（跟 `FILE_CHUNK_SIZE` 要解決的是同一個門檻問題，
+/// 只是這裡撐爆訊息大小的是「檔案數量」而不是「單一檔案內容」）。收到請求
+/// 那一端（`global.rs` 的 `build_remote_reply`）把完整清單依這個預算切成
+/// 一頁一頁，呼叫端（`plugins::music::list_remote_files_mqtt`）用回覆帶的
+/// `total` 判斷還有沒有下一頁，逐頁把 `offset` 往前推，直到湊滿 `total` 筆。
 pub const FILE_LIST_PAGE_BUDGET: usize = 4 * 1024;
 
-/// 一個檔案的基本資訊，`FileList` 回覆裡每個檔案一筆，`plugins::files` 用來
-/// 算「這次 copy 總共幾個檔案」；也是 `GET /api/files/{folder}` 的 JSON 回應
+/// 一個檔案的基本資訊，`MusicFileList` 回覆裡每個檔案一筆，`plugins::music`
+/// 用來算「這次 copy 總共幾個檔案」；也是 `GET /api/music/copy` 的 JSON 回應
 /// 形狀，同網域跟跨 domain 兩條路徑共用同一個型別。
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FileMeta {
@@ -139,32 +139,33 @@ pub struct FileMeta {
 
 /// `shell::send_cross_domain_request` 要送出的內容，不含 `request_id`/
 /// `source_domain`——這兩個要等真正發布出去那一刻才由該函式填上（見它的
-/// 說明），呼叫端（`shell.rs`/`plugins::remote_output`/`plugins::files`）不用、
+/// 說明），呼叫端（`shell.rs`/`plugins::remote_output`/`plugins::music`）不用、
 /// 也不應該自己決定這兩個值。同時也是 `web.rs` 的 `/api/remote/cross-relay`
 /// 端點收 client 中繼請求時的 body 格式。
 ///
-/// `FileList`/`FilePull`/`FilePush` 是 `plugins::files` 的 `copy` 指令跨
-/// domain 時用的：`FileList` 查目標裝置某個資料夾有哪些檔案（順便拿到每個
-/// 檔案的大小，`plugins::files` 靠這個算「拉到 offset 有沒有超過檔案大小」，
-/// 不需要伺服器另外回報「這是不是最後一塊」），`FilePull` 跟目標要某個檔案
-/// 某個位移開始的一個 chunk（見 `FILE_CHUNK_SIZE`），`FilePush` 反過來把本機
-/// 的一個 chunk 送給目標寫入（是不是最後一塊發送端自己知道——讀本機檔案時
-/// 就知道總長度了，不需要告訴接收端，接收端只需要照 `offset` 寫入）。
-/// `folder` 收到那一端一定要驗證過在允許清單裡（見 `plugins::files::ALLOWED_FOLDERS`），
-/// 不能只因為請求通過了 AEAD 解密就信任內容——加密只保證「這是持有同一把
-/// key 的裝置送的」，不代表內容本身沒有問題（例如打錯字的資料夾名稱，或
-/// 未來版本間協定不一致）。
+/// `MusicFileList`/`MusicFilePull`/`MusicFilePush` 是 `plugins::music` 的
+/// `copy` 指令跨 domain 時用的：`MusicFileList` 查目標裝置 `music/` 資料夾有
+/// 哪些檔案（順便拿到每個檔案的大小，`plugins::music` 靠這個算「拉到 offset
+/// 有沒有超過檔案大小」，不需要伺服器另外回報「這是不是最後一塊」），
+/// `MusicFilePull` 跟目標要某個檔案某個位移開始的一個 chunk（見
+/// `FILE_CHUNK_SIZE`），`MusicFilePush` 反過來把本機的一個 chunk 送給目標寫入
+/// （是不是最後一塊發送端自己知道——讀本機檔案時就知道總長度了，不需要告訴
+/// 接收端，接收端只需要照 `offset` 寫入）。`name` 收到那一端一定要驗證過是
+/// 單純檔名（見 `plugins::music::safe_music_copy_path`），不能只因為請求通過
+/// 了 AEAD 解密就信任內容——加密只保證「這是持有同一把 key 的裝置送的」，
+/// 不代表內容本身沒有問題（例如夾帶路徑跳脫字元，或未來版本間協定不一致）。
 ///
-/// `FileList` 的 `offset` 是「清單裡第幾筆開始」（不是位元組位移，跟
-/// `FilePull`/`FilePush` 的 `offset` 意義不同）——資料夾檔案數量多時一頁裝
-/// 不下（見 `FILE_LIST_PAGE_BUDGET`），要像 `FilePull` 分 chunk 一樣分頁拉。
+/// `MusicFileList` 的 `offset` 是「清單裡第幾筆開始」（不是位元組位移，跟
+/// `MusicFilePull`/`MusicFilePush` 的 `offset` 意義不同）——資料夾檔案數量多
+/// 時一頁裝不下（見 `FILE_LIST_PAGE_BUDGET`），要像 `MusicFilePull` 分 chunk
+/// 一樣分頁拉。
 #[derive(Clone, Serialize, Deserialize)]
 pub enum CrossDomainAsk {
     Exec { target_id: String, line: String },
     Panel { target_id: String, panel_name: String },
-    FileList { target_id: String, folder: String, offset: usize },
-    FilePull { target_id: String, folder: String, name: String, offset: u64 },
-    FilePush { target_id: String, folder: String, name: String, offset: u64, data: String },
+    MusicFileList { target_id: String, offset: usize },
+    MusicFilePull { target_id: String, name: String, offset: u64 },
+    MusicFilePush { target_id: String, name: String, offset: u64, data: String },
     StorageManifest { offset: usize },
     StorageFilePull { path: String, offset: u64 },
     StorageFilePush { path: String, offset: u64, data: String },
@@ -190,9 +191,9 @@ pub enum CrossDomainAsk {
 pub enum RemoteRequest {
     Exec { request_id: String, source_domain: String, target_id: String, line: String },
     Panel { request_id: String, source_domain: String, target_id: String, panel_name: String },
-    FileList { request_id: String, source_domain: String, target_id: String, folder: String, offset: usize },
-    FilePull { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64 },
-    FilePush { request_id: String, source_domain: String, target_id: String, folder: String, name: String, offset: u64, data: String },
+    MusicFileList { request_id: String, source_domain: String, target_id: String, offset: usize },
+    MusicFilePull { request_id: String, source_domain: String, target_id: String, name: String, offset: u64 },
+    MusicFilePush { request_id: String, source_domain: String, target_id: String, name: String, offset: u64, data: String },
     StorageManifest { request_id: String, source_domain: String, offset: usize },
     StorageFilePull { request_id: String, source_domain: String, path: String, offset: u64 },
     StorageFilePush { request_id: String, source_domain: String, path: String, offset: u64, data: String },
@@ -206,9 +207,9 @@ impl RemoteRequest {
         match self {
             RemoteRequest::Exec { source_domain, .. }
             | RemoteRequest::Panel { source_domain, .. }
-            | RemoteRequest::FileList { source_domain, .. }
-            | RemoteRequest::FilePull { source_domain, .. }
-            | RemoteRequest::FilePush { source_domain, .. }
+            | RemoteRequest::MusicFileList { source_domain, .. }
+            | RemoteRequest::MusicFilePull { source_domain, .. }
+            | RemoteRequest::MusicFilePush { source_domain, .. }
             | RemoteRequest::StorageManifest { source_domain, .. }
             | RemoteRequest::StorageFilePull { source_domain, .. }
             | RemoteRequest::StorageFilePush { source_domain, .. }
@@ -227,7 +228,7 @@ pub enum RemoteReply {
     Exec { request_id: String, prompt: String, error: Option<String> },
     Panel { request_id: String, text: Option<String> },
     Error { request_id: String, message: String },
-    FileList { request_id: String, files: Vec<FileMeta>, total: usize },
+    MusicFileList { request_id: String, files: Vec<FileMeta>, total: usize },
     FileChunk { request_id: String, data: String },
     FilePushAck { request_id: String },
     StorageManifest { request_id: String, entries: Vec<crate::plugins::SyncEntry>, total: usize },
@@ -240,7 +241,7 @@ impl RemoteReply {
             RemoteReply::Exec { request_id, .. }
             | RemoteReply::Panel { request_id, .. }
             | RemoteReply::Error { request_id, .. }
-            | RemoteReply::FileList { request_id, .. }
+            | RemoteReply::MusicFileList { request_id, .. }
             | RemoteReply::FileChunk { request_id, .. }
             | RemoteReply::FilePushAck { request_id, .. }
             | RemoteReply::StorageManifest { request_id, .. }

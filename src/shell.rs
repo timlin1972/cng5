@@ -395,9 +395,9 @@ pub(crate) fn send_cross_domain_request(ctx: &SharedContext, target_domain: &str
 fn cross_domain_timeout(ask: &CrossDomainAsk) -> Duration {
     match ask {
         CrossDomainAsk::Exec { .. } | CrossDomainAsk::Panel { .. } => Duration::from_secs(5),
-        CrossDomainAsk::FileList { .. }
-        | CrossDomainAsk::FilePull { .. }
-        | CrossDomainAsk::FilePush { .. }
+        CrossDomainAsk::MusicFileList { .. }
+        | CrossDomainAsk::MusicFilePull { .. }
+        | CrossDomainAsk::MusicFilePush { .. }
         | CrossDomainAsk::StorageManifest { .. }
         | CrossDomainAsk::StorageFilePull { .. }
         | CrossDomainAsk::StorageFilePush { .. }
@@ -437,14 +437,14 @@ fn send_via_mqtt(
         CrossDomainAsk::Panel { target_id, panel_name } => {
             RemoteRequest::Panel { request_id: request_id.clone(), source_domain, target_id, panel_name }
         }
-        CrossDomainAsk::FileList { target_id, folder, offset } => {
-            RemoteRequest::FileList { request_id: request_id.clone(), source_domain, target_id, folder, offset }
+        CrossDomainAsk::MusicFileList { target_id, offset } => {
+            RemoteRequest::MusicFileList { request_id: request_id.clone(), source_domain, target_id, offset }
         }
-        CrossDomainAsk::FilePull { target_id, folder, name, offset } => {
-            RemoteRequest::FilePull { request_id: request_id.clone(), source_domain, target_id, folder, name, offset }
+        CrossDomainAsk::MusicFilePull { target_id, name, offset } => {
+            RemoteRequest::MusicFilePull { request_id: request_id.clone(), source_domain, target_id, name, offset }
         }
-        CrossDomainAsk::FilePush { target_id, folder, name, offset, data } => {
-            RemoteRequest::FilePush { request_id: request_id.clone(), source_domain, target_id, folder, name, offset, data }
+        CrossDomainAsk::MusicFilePush { target_id, name, offset, data } => {
+            RemoteRequest::MusicFilePush { request_id: request_id.clone(), source_domain, target_id, name, offset, data }
         }
         CrossDomainAsk::StorageManifest { offset } => {
             RemoteRequest::StorageManifest { request_id: request_id.clone(), source_domain, offset }

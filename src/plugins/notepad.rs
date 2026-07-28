@@ -9,8 +9,9 @@ use crate::plugin::{Plugin, SharedContext};
 
 /// 筆記檔案都放在 `storage` plugin 管理的樹底下（`storage/notepad`），這樣
 /// `storage` plugin 的檔案總管跟 `sync` plugin 的跨裝置同步都會自動涵蓋筆記
-/// 檔案，不用再靠 `files` plugin 的 `ALLOWED_FOLDERS` 手動複製機制。web 那邊
-/// 的編輯功能（見 `web.rs`）直接讀寫這個資料夾（固定操作
+/// 檔案，不用再靠手動複製機制（那套機制現在只剩 `music` plugin 的
+/// `copy to/from <id>` 在用）。web 那邊的編輯功能（見 `web.rs`）直接讀寫這個
+/// 資料夾（固定操作
 /// `DEFAULT_NOTEPAD_FILE`），不透過 `Shell`/`NotepadPlugin`。
 pub(crate) const NOTEPAD_DIR: &str = "storage/notepad";
 
