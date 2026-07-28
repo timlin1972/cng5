@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,9 +22,11 @@ gitrepo：監控本機一堆 git repo 有沒有異動，手動 scan 一次，不
 每個子目錄各自是一個 repo」（例如 buildroot/dl）。add 的時候不用自己分辨是哪一
 種，程式會自動判斷。「有異動」只要中以下任一種就算：
   - 有未提交的變更（git status，untracked 的新檔案也算）。
-  - 目前 checkout 的 branch，跟第一次看到這個 repo時（add 當下、或後續 scan
-    才發現的新 repo）記住的 branch 不一樣——抓「AI 幫忙開了新 branch 並直接
-    commit 過去」這種工作目錄本身乾淨、但其實有東西的情況。
+  - 目前 checkout 的 branch不是 develop——包括真的切到別的 branch、或
+    detached HEAD 但剛好在別的 remote branch tip 上；如果是 detached HEAD
+    且剛好在 origin/develop 的 tip 上，視同在 develop 上，不算異動。抓「AI
+    幫忙開了新 branch 並直接 commit 過去」這種工作目錄本身乾淨、但其實有
+    東西的情況。
   - 目前 branch 領先它的 upstream 至少一個 commit（本地已經 commit，但還沒
     push）——抓「AI 直接 commit 在原本的 branch，但還沒 push」的情況。
 
@@ -41,10 +43,8 @@ gitrepo：監控本機一堆 git repo 有沒有異動，手動 scan 一次，不
   - add/remove 之後、下一次 scan 完成之前，list 只會顯示「目錄有更動，等待
     scan...」，不顯示舊資料，因為那已經不代表目前這份監控目錄清單了。
   - scan 進行中如果又 add/remove，這一輪 scan 的結果會作廢，等於中途停止。
-  - 「基準 branch」只存在記憶體裡，不會存檔：重開程式後，下一次 add 會用當下
-    checkout 的 branch 重新當基準，如果在你發現之前程式剛好重開過，這一輪就
-    偵測不到「branch 換過」了（未提交變更、領先 upstream 這兩種偵測不受
-    影響）。
+  - 預期的 branch 名稱（develop）是寫死的常數，適用所有監控目錄底下的每個
+    repo，不能個別指定。
 ";
 
 /// 平行掃描 repo 的執行緒數上限。先設成 1（等於循序執行）是使用者刻意選的保守
@@ -52,18 +52,25 @@ gitrepo：監控本機一堆 git repo 有沒有異動，手動 scan 一次，不
 /// 調高這裡就會自動變成平行掃描，不需要改其他程式碼。
 const MAX_CONCURRENCY: usize = 1;
 
+/// 所有監控目錄底下每個 repo「正常」時應該在的 branch，寫死的常數，不能個別
+/// 指定——使用者刻意要求：不管是哪個 repo，只要不是這條 branch（或 detached
+/// HEAD 剛好在它的 remote tip 上），就算異動，不要再靠「第一次看到這個 repo
+/// 當下記住的 branch」當基準（那個舊規格會讓每個 repo 記住不同的基準，沒辦法
+/// 一眼看出「這個 repo 現在到底該不該在 develop 上」）。
+const EXPECTED_BRANCH: &str = "develop";
+
 /// 一次 `scan` 掃出來「有異動」的 repo，三種情況只要中一種就會出現在這裡：
-/// 有未提交變更、branch 跟基準不一樣、或領先 upstream 還沒 push。`error`
-/// 標記 `git status` 執行失敗（例如 `.git` 損毀、git 指令找不到）的情況——這種
-/// 也列出來讓使用者知道，不悄悄當成乾淨略過。
+/// 有未提交變更、branch 不是 `EXPECTED_BRANCH`、或領先 upstream 還沒 push。
+/// `error` 標記 `git status` 執行失敗（例如 `.git` 損毀、git 指令找不到）的
+/// 情況——這種也列出來讓使用者知道，不悄悄當成乾淨略過。
 struct FlaggedRepo {
     path: PathBuf,
     error: bool,
     uncommitted: bool,
-    /// `Some((基準, 目前))`：branch 跟第一次看到這個 repo 時記住的基準不一樣
-    /// （含 detached HEAD，這種情況基準固定顯示成 `(有 branch)`、目前顯示成
-    /// `(detached HEAD)`）。
-    branch_changed: Option<(String, String)>,
+    /// `Some(目前的 branch 名稱)`：跟 `EXPECTED_BRANCH` 不一樣。完全解析不出
+    /// branch 名稱的 detached HEAD（不在任何 remote branch 的 tip 上）用
+    /// `"(detached HEAD)"` 表示。
+    branch_changed: Option<String>,
     /// 目前 branch 領先它的 upstream 幾個 commit；0 表示沒有這個情況。
     ahead: usize,
 }
@@ -79,8 +86,8 @@ fn describe_reasons(entry: &FlaggedRepo) -> String {
     if entry.uncommitted {
         reasons.push("未提交變更".to_string());
     }
-    if let Some((baseline, current)) = &entry.branch_changed {
-        reasons.push(format!("branch 從 {baseline} 換成 {current}"));
+    if let Some(current) = &entry.branch_changed {
+        reasons.push(format!("branch 是 {current}，不是 {EXPECTED_BRANCH}"));
     }
     if entry.ahead > 0 {
         reasons.push(format!("領先 upstream {} 個 commit 還沒 push", entry.ahead));
@@ -122,14 +129,6 @@ pub struct GitRepoPlugin {
     /// 這就是「停止 scan」的實作方式——沒辦法真的中斷已經在跑的 `git status`
     /// 子行程，但不會再啟動新的。
     generation: Arc<AtomicU64>,
-    /// 每個 repo 第一次被看到（`add` 當下，或後續 scan 才發現的新 repo）時
-    /// 記住的 branch，當作「正常」的基準——之後 scan 時目前 branch 只要跟這裡
-    /// 記的不一樣，就算「有異動」（例如 AI 開了新 branch 並切過去）。純記憶體
-    /// 內，不落地存檔，跟 `watched` 本身一致（見
-    /// `2026-07-26-remove-gitrepo-wol-persistence` 那次拿掉磁碟持久化的決定）
-    /// ——重開程式後，這裡會用重開當下的 branch 重新當作基準，這是刻意的
-    /// 取捨，見 `2026-07-28-gitrepo-branch-detection-design.md`「已知限制」。
-    baseline_branches: Arc<Mutex<HashMap<PathBuf, String>>>,
 }
 
 /// 使用者家目錄，`canonicalize` 過（`HOME` 環境變數本身可能含符號連結，跟
@@ -299,12 +298,7 @@ impl GitRepoPlugin {
         // 用同一個 `Stale` 表示，不用另外分兩種訊息。監控目錄清單不做磁碟
         // 持久化——使用者改成把 `add` 指令寫進 `script-local.cli`，每次啟動
         // 都會重新執行，這裡直接從空清單開始就好。
-        Self {
-            watched: Vec::new(),
-            scan: Arc::new(Mutex::new(ScanState::Stale)),
-            generation: Arc::new(AtomicU64::new(0)),
-            baseline_branches: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { watched: Vec::new(), scan: Arc::new(Mutex::new(ScanState::Stale)), generation: Arc::new(AtomicU64::new(0)) }
     }
 
     /// `add`/`remove` 真的改動了監控目錄清單之後呼叫：上一次的 scan 結果（不管
@@ -312,30 +306,6 @@ impl GitRepoPlugin {
     fn mark_stale(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         *self.scan.lock().unwrap() = ScanState::Stale;
-    }
-
-    /// 第一次看到某個 repo（`add` 當下、或後續 scan 才發現的新 repo）就記住
-    /// 目前 checkout 的 branch 當基準；已經記過的不覆蓋——不然使用者自己手動
-    /// 切 branch 也會被誤當成新基準，之後真的被 AI 換掉反而偵測不出來（見
-    /// `2026-07-28-gitrepo-branch-detection-design.md` 的取捨說明）。
-    /// `repo_state` 失敗（例如 repo 損毀）或是 detached HEAD（沒有 branch 名稱
-    /// 可記）就先不記，等下次有機會成功時再補。
-    fn record_baseline_if_missing(&self, repo: &Path) {
-        let mut baselines = self.baseline_branches.lock().unwrap();
-        if baselines.contains_key(repo) {
-            return;
-        }
-        if let Ok(RepoState { branch: Some(branch), .. }) = repo_state(repo) {
-            baselines.insert(repo.to_path_buf(), branch);
-        }
-    }
-
-    /// `remove`/`clear` 之後，把不再屬於任何監控目錄底下的 repo 的基準資料
-    /// 丟掉——不然移除又重新加回同一個目錄時，會誤用很久以前記住的舊基準，
-    /// 跟「基準是第一次看到當下的 branch」這個設計初衷不符。
-    fn prune_baselines(&self) {
-        let valid: HashSet<PathBuf> = self.watched.iter().flat_map(|dir| repos_under(dir)).collect();
-        self.baseline_branches.lock().unwrap().retain(|path, _| valid.contains(path));
     }
 
     fn add(&mut self, dir: &str, out: &OutputBuffer) -> Result<()> {
@@ -351,11 +321,8 @@ impl GitRepoPlugin {
         }
         self.watched.push(canonical.clone());
         self.mark_stale();
-        let repos = repos_under(&canonical);
-        for repo in &repos {
-            self.record_baseline_if_missing(repo);
-        }
-        out.push(&format!("已加入監控目錄: {} ({} 個 git repo)\n", display_path(&canonical), repos.len()));
+        let count = repos_under(&canonical).len();
+        out.push(&format!("已加入監控目錄: {} ({count} 個 git repo)\n", display_path(&canonical)));
         Ok(())
     }
 
@@ -370,7 +337,6 @@ impl GitRepoPlugin {
             bail!("沒有監控這個目錄: {}", display_path(&canonical));
         }
         self.mark_stale();
-        self.prune_baselines();
         out.push(&format!("已移除監控目錄: {}\n", display_path(&canonical)));
         Ok(())
     }
@@ -382,7 +348,6 @@ impl GitRepoPlugin {
         }
         self.watched.clear();
         self.mark_stale();
-        self.baseline_branches.lock().unwrap().clear();
         out.push("已清除所有監控目錄\n");
         Ok(())
     }
@@ -461,7 +426,6 @@ impl GitRepoPlugin {
         *self.scan.lock().unwrap() = ScanState::Running { done: Arc::clone(&done), total };
         let scan = Arc::clone(&self.scan);
         let generation = Arc::clone(&self.generation);
-        let baseline_branches = Arc::clone(&self.baseline_branches);
         thread::spawn(move || {
             let queue = Arc::new(Mutex::new(VecDeque::from(repos)));
             let flagged = Arc::new(Mutex::new(Vec::new()));
@@ -476,7 +440,6 @@ impl GitRepoPlugin {
                     let flagged = Arc::clone(&flagged);
                     let generation = Arc::clone(&generation);
                     let done = Arc::clone(&done);
-                    let baseline_branches = Arc::clone(&baseline_branches);
                     thread::spawn(move || loop {
                         if generation.load(Ordering::SeqCst) != my_generation {
                             break;
@@ -485,28 +448,10 @@ impl GitRepoPlugin {
                         let Some(repo) = next else { break };
                         match repo_state(&repo) {
                             Ok(state) => {
-                                // branch 跟基準的比對／記錄要在同一次拿鎖裡做完，
-                                // 避免兩個 worker 同時對第一次看到的同一個 repo
-                                // 各自插入不同的基準（`repos` 已經去重過，理論上
-                                // 不會真的撞到同一個 repo，但同一次拿鎖仍然是最
-                                // 直接、不用另外論證安全性的寫法）。
-                                let branch_changed = {
-                                    let mut baselines = baseline_branches.lock().unwrap();
-                                    match (&state.branch, baselines.get(&repo).cloned()) {
-                                        (Some(current), Some(baseline)) if *current != baseline => {
-                                            Some((baseline, current.clone()))
-                                        }
-                                        (Some(current), None) => {
-                                            // 第一次看到這個 repo（例如 dl 底下事後才新增的子
-                                            // repo），記錄現在的 branch 當基準，這一輪不算換過。
-                                            baselines.insert(repo.clone(), current.clone());
-                                            None
-                                        }
-                                        (None, _) => {
-                                            Some(("(有 branch)".to_string(), "(detached HEAD)".to_string()))
-                                        }
-                                        _ => None,
-                                    }
+                                let branch_changed = match &state.branch {
+                                    Some(current) if current == EXPECTED_BRANCH => None,
+                                    Some(current) => Some(current.clone()),
+                                    None => Some("(detached HEAD)".to_string()),
                                 };
                                 if state.uncommitted || branch_changed.is_some() || state.ahead > 0 {
                                     flagged.lock().unwrap().push(FlaggedRepo {

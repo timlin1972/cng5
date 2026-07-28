@@ -901,12 +901,134 @@ fn repo_state(repo: &Path) -> Result<RepoState> {
 Run: `cargo build 2>&1 | tail -30`（clean）
 Run: `cargo test 2>&1 | tail -30`（全過，含新增的 `short_branch_name_strips_remote_prefix`）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/plugins/gitrepo.rs docs/superpowers/specs/2026-07-28-gitrepo-branch-detection-design.md docs/superpowers/plans/2026-07-28-gitrepo-branch-detection.md
 git commit -m "$(cat <<'EOF'
 gitrepo：detached HEAD 剛好在 remote branch tip 上時視同該 branch，不算異動
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+Committed as `3bb2a96`，已 push 到 origin/main。
+
+---
+
+### Task 7（追加，2026-07-28）：拿掉「第一次看到的基準」，改成寫死 `develop`
+
+**背景：** 使用者重新校準規格，決定不要「每個 repo 各自記住第一次看到時的
+branch」這套機制，改成單一寫死的 `EXPECTED_BRANCH = "develop"`，套用到所有
+監控目錄底下的每個 repo。理由：規則更簡單、不用擔心「重開程式基準被重設」這
+種邊界情況，代價是沒辦法針對個別 repo 指定不同的預期 branch（使用者確認接受
+這個取捨）。見 design doc 的「「正常」的 branch 是寫死的 `develop`」一節。
+
+**Files:**
+- Modify: `src/plugins/gitrepo.rs`
+
+**Interfaces：**
+- 新增常數 `const EXPECTED_BRANCH: &str = "develop";`。
+- **移除**：`GitRepoPlugin.baseline_branches` 欄位、
+  `record_baseline_if_missing`/`prune_baselines` 方法、`use std::collections::HashMap`/
+  `HashSet` import（不再需要）。
+- `FlaggedRepo.branch_changed` 型別從 `Option<(String, String)>` 改成
+  `Option<String>`。
+
+- [x] **Step 1: 拿掉 `HashMap`/`HashSet` import**
+
+```rust
+use std::collections::VecDeque;
+```
+
+- [x] **Step 2: 新增 `EXPECTED_BRANCH` 常數，簡化 `FlaggedRepo`/`describe_reasons`**
+
+```rust
+const EXPECTED_BRANCH: &str = "develop";
+
+struct FlaggedRepo {
+    path: PathBuf,
+    error: bool,
+    uncommitted: bool,
+    branch_changed: Option<String>,
+    ahead: usize,
+}
+
+fn describe_reasons(entry: &FlaggedRepo) -> String {
+    if entry.error {
+        return " (git status 失敗)".to_string();
+    }
+    let mut reasons = Vec::new();
+    if entry.uncommitted {
+        reasons.push("未提交變更".to_string());
+    }
+    if let Some(current) = &entry.branch_changed {
+        reasons.push(format!("branch 是 {current}，不是 {EXPECTED_BRANCH}"));
+    }
+    if entry.ahead > 0 {
+        reasons.push(format!("領先 upstream {} 個 commit 還沒 push", entry.ahead));
+    }
+    if reasons.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", reasons.join("、"))
+    }
+}
+```
+
+- [x] **Step 3: `GitRepoPlugin` 移除 `baseline_branches` 欄位跟相關方法**
+
+`struct GitRepoPlugin` 只剩 `watched`/`scan`/`generation` 三個欄位；`new()`
+恢復成單行 `Self { watched: Vec::new(), scan: ..., generation: ... }`；刪除
+`record_baseline_if_missing`/`prune_baselines` 兩個方法；`add()` 拿掉
+`for repo in &repos { self.record_baseline_if_missing(repo); }` 那段，恢復
+成單純 `let count = repos_under(&canonical).len();`；`remove()` 拿掉
+`self.prune_baselines();`；`clear()` 拿掉
+`self.baseline_branches.lock().unwrap().clear();`。
+
+- [x] **Step 4: `scan()` 背景執行緒簡化**
+
+原本要拿 `baseline_branches` 這個 `Arc<Mutex<HashMap<...>>>` 的鎖去查/記基準，
+改成單純比較：
+
+```rust
+let branch_changed = match &state.branch {
+    Some(current) if current == EXPECTED_BRANCH => None,
+    Some(current) => Some(current.clone()),
+    None => Some("(detached HEAD)".to_string()),
+};
+```
+
+`scan()` 開頭跟 worker 閉包裡 `Arc::clone(&self.baseline_branches)`/
+`Arc::clone(&baseline_branches)` 這兩處 clone 整個拿掉。
+
+- [x] **Step 5: 更新 `MANUAL_TEXT`**
+
+「有異動」第二條規則的說明文字改成「目前 checkout 的 branch 不是
+develop……」，注意事項拿掉「基準 branch 不落地存檔」那條，改成「預期的
+branch 名稱（develop）是寫死的常數，適用所有監控目錄底下的每個 repo，不能
+個別指定」。
+
+- [x] **Step 6: Build + 測試**
+
+Run: `cargo build 2>&1 | tail -60`（clean）
+Run: `cargo test gitrepo 2>&1 | tail -20` 跟 `cargo test 2>&1 | tail -6`（全過，
+123 個測試，沒有因為拿掉 baseline 機制而需要調整既有的
+`status_parsing_tests`）。
+
+另外拿一個丟棄式的真實 git repo 手動確認：在 `develop` 上、工作目錄乾淨 →
+`git status --porcelain=v2 --branch` 印出 `# branch.head develop`（符合預期，
+不會被列為異動）；切到 `feature/x`、工作目錄一樣乾淨 → 印出
+`# branch.head feature/x`（跟 `EXPECTED_BRANCH` 不同，會被列為異動）。驗證
+完刪除測試用的 repo，不留痕跡。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/plugins/gitrepo.rs docs/superpowers/specs/2026-07-28-gitrepo-branch-detection-design.md docs/superpowers/plans/2026-07-28-gitrepo-branch-detection.md
+git commit -m "$(cat <<'EOF'
+gitrepo：拿掉「第一次看到的基準」，改成單一寫死的 develop
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF

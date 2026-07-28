@@ -1,4 +1,4 @@
-# gitrepo：把「branch 換過」「commit 但還沒 push」也算進「有異動」
+# gitrepo：把「branch 不是 develop」「commit 但還沒 push」也算進「有異動」
 
 日期：2026-07-28
 
@@ -10,28 +10,30 @@
 一旦 commit 完成，工作目錄就變乾淨，`is_dirty` 回傳 `false`，這個 repo 就從
 「有異動」清單裡消失，即使它其實有使用者還沒看過的新東西。
 
-這次要把「有異動」的定義從單純「有未提交的變更」擴大成三種情況，中一種就算：
+把「有異動」的定義從單純「有未提交的變更」擴大成三種情況，中一種就算：
 
 1. 有未提交的變更（含 untracked 的新檔案）——沿用原本的判斷。
-2. 目前 checkout 的 branch，跟第一次看到這個 repo 時記住的 branch 不一樣——抓
-   「AI 開了新 branch 並切過去」的情況。
+2. 目前 checkout 的 branch 不是 `develop`——抓「AI 開了新 branch 並切過去」的
+   情況。
 3. 目前 branch 領先它的 upstream 至少一個 commit（本地已經 commit，但還沒
    push）——抓「AI 直接 commit 在原本的 branch，但還沒 push」的情況。
 
-## 「基準 branch」怎麼決定
+## 「正常」的 branch 是寫死的 `develop`，不是每個 repo 各自記住的基準
 
-用「第一次看到這個 repo 當下記住的 branch」當基準，不是寫死 `main`/`master`
-這種固定名稱——因為監控目錄底下的 repo（尤其是 `buildroot/dl` 這種一層一堆
-repo 的情況）預設 branch 名稱不見得都一樣。
+這個規格經過一次重新校準：一開始的版本是「用第一次看到這個 repo 當下記住的
+branch」當基準（每個 repo 各自記自己的），後來使用者明確要求拿掉這個機制，改
+成單一寫死的 `EXPECTED_BRANCH = "develop"` 常數，套用到所有監控目錄底下的
+每一個 repo——不管是哪個 repo，只要目前不是 `develop`，就算異動，不再有
+「這個 repo 本來就習慣待在別的 branch，所以不算」這種例外。
 
-「第一次看到」有兩種時機都算：
-- `add` 一個目錄的當下，對它底下（透過 `repos_under`）找到的每個 repo。
-- 後續 `scan` 才第一次發現的新 repo（例如 `dl` 底下事後才新增的子目錄）——
-  這種在被發現的那一次 scan，就用當下的 branch 當基準，那一輪不算「換過」。
+這個決定的取捨很清楚：如果之後監控目錄裡出現一個原本就該待在別的 branch
+（例如 `main`）的 repo，它會一直被列成「有異動」，沒有辦法個別排除——使用者
+確認過這是可以接受的，比起維護一份「每個目錄該對應哪個預期 branch」的設定更
+簡單。
 
-已經記過基準的 repo，之後不會被覆蓋——即使使用者自己手動切了 branch，也會被
-當成「換過」列出來（沒辦法區分是使用者自己切的還是 AI 切的，這是設計上刻意
-接受的取捨：抓到永遠比漏掉安全）。
+好處是這個規則完全是無狀態的：不需要記住任何東西，`scan` 每次都用同一個固定
+基準比對，程式重開、`add`/`remove`/`clear` 怎麼操作都不影響判斷結果——先前
+版本「基準只存在記憶體、重開程式會被重設」那個限制，這次直接不存在了。
 
 ## Detached HEAD 恰好在某個 remote branch 的 tip 上，視同該 branch
 
@@ -40,76 +42,71 @@ detached HEAD，但這其實就是「在 develop 上」，不是異常狀態。�
 detached HEAD 時，額外查一次 `git for-each-ref --points-at=HEAD ... refs/remotes/`
 ——如果目前這個 commit 剛好是某個 remote branch 的最新 commit，就把這個狀態
 當成「checkout 在 `<branch>`」（remote 名稱前綴去掉，例如 `origin/develop` 視同
-`develop`），跟基準比對的邏輯完全比照一般 branch，不特別處理。真正查不到任何
-remote branch 對得上這個 commit（例如卡在某個歷史 commit、或 bisect 中途）才
-維持原本「一律當作跟基準不一樣」的處理。
+`develop`），再拿去跟 `EXPECTED_BRANCH` 比對，跟一般 branch 完全相同的邏輯，
+不特別處理。真正查不到任何 remote branch 對得上這個 commit（例如卡在某個歷史
+commit、或 bisect 中途）才算「異動」（顯示成 `(detached HEAD)`）。
 
-多個 remote 的 branch 剛好指到同一個 commit時，優先選 `origin/*`，找不到才選
+多個 remote 的 branch 剛好指到同一個 commit 時，優先選 `origin/*`，找不到才選
 字母排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
 
 ## 已知限制（刻意的取捨，不是之後要修的 bug）
 
-- 基準 branch 只存在記憶體裡，不落地存檔，跟 `watched` 清單本身一致（見
-  `2026-07-26-remove-gitrepo-wol-persistence-design.md` 那次拿掉磁碟持久化的
-  決定，這次不重新引入）。代價：如果 AI 建立新 branch 並 commit 之後，在
-  使用者發現之前程式剛好重開過（`script-local.cli` 重新跑一次 `add`），基準
-  會被重設成重開當下的 branch，這一輪就偵測不到「branch 換過」了——但「未
-  提交變更」「領先 upstream」這兩種偵測不受影響，仍然抓得到。
-- Detached HEAD 且查不到任何 remote branch 對得上目前 commit（見上一節）才
-  一律當作「跟基準不一樣」處理，不特別記錄／比對基準——這種狀態本身就值得
-  使用者注意。
+- `EXPECTED_BRANCH` 是單一寫死的常數（`"develop"`），套用到所有監控目錄底下
+  的所有 repo，不能個別指定。如果某個 repo 本來就該待在別的 branch，它會一直
+  顯示成「有異動」——使用者明確要求這樣做，換取規則簡單、不用維護額外設定。
+- Detached HEAD 且查不到任何 remote branch 對得上目前 commit（見上一節）才算
+  異動——這種狀態本身就值得使用者注意。
 - 不處理 rebase/merge 進行中之類的中繼狀態，`git status --porcelain=v2` 印出
   什麼就是什麼，不特別分類成不同的錯誤訊息。
 - 「領先 upstream」只在這個 branch 有設定 upstream（tracking branch）時才有
   意義；沒有 upstream 的 branch（例如從來沒 push 過的全新 branch）這一項恆為
-  0，只靠「branch 跟基準不同」這條規則去抓。
+  0，只靠「branch 不是 develop」這條規則去抓。
 
 ## 範圍
 
 - `src/plugins/gitrepo.rs`：
-  - 新增 `RepoState`（一次 `git status --porcelain=v2 --branch` 解析出的
-    branch/ahead/uncommitted）跟解析函式 `parse_status_v2`/`repo_state`，
-    取代原本只跑 `git status --porcelain` 的 `is_dirty`——一個 repo 一次
-    subprocess 呼叫拿到全部需要的資訊，不會因為多加了兩個判斷就多開兩倍的
-    `git` 子行程（`buildroot/dl` 底下可能上百個 repo，這點很重要）。
-  - `DirtyRepo` 換成 `FlaggedRepo`（多了 `uncommitted`/`branch_changed`/
-    `ahead` 欄位，取代單純的「是不是 dirty」布林值），`ScanState::Idle` 存的
-    型別跟著換。
-  - `GitRepoPlugin` 新增 `baseline_branches: Arc<Mutex<HashMap<PathBuf,
-    String>>>` 欄位；`new()` 從空的 `HashMap` 開始。
-  - `add()`：加入監控目錄之後，對底下每個 repo 呼叫新增的
-    `record_baseline_if_missing`，記錄目前的 branch 當基準。
-  - `remove()`/`clear()`：把不再屬於任何監控目錄的 repo 的基準資料丟掉
-    （`prune_baselines`/直接 `clear`），避免移除又重新加回同一個目錄時，
-    誤用很久以前記住的舊基準。
-  - `scan()` 背景執行緒：改成呼叫 `repo_state`，比對/記錄基準
-    branch，任何一種情況成立就記進 `flagged`；`git status` 執行失敗的情況
-    照舊記錄（`error: true`）。
-  - `status_text()`：`Idle` 分支改成列出「有異動的 repo」，每個 repo 後面
-    用頓號列出實際中了哪幾種原因（可能同時中好幾種）。
-  - `MANUAL_TEXT`：更新「不乾淨」的定義說明成三種情況，並在注意事項補上
-    「基準 branch 不落地存檔」這條限制。
+  - `RepoState`/`parse_status_v2`/`repo_state`/`resolve_detached_branch`/
+    `short_branch_name` 維持不變（一次 `git status --porcelain=v2 --branch`
+    拿到 branch/ahead/uncommitted，detached 時額外解析 remote branch tip）。
+  - 新增 `EXPECTED_BRANCH: &str = "develop"` 常數。
+  - **移除**先前版本新增的 `baseline_branches` 欄位跟
+    `record_baseline_if_missing`/`prune_baselines` 方法——不再需要記住任何
+    per-repo 的狀態，`GitRepoPlugin` 回到只有 `watched`/`scan`/`generation`
+    三個欄位。`add()`/`remove()`/`clear()` 也拿掉對應的呼叫，恢復成原本的
+    簡單版本。
+  - `FlaggedRepo.branch_changed` 型別從 `Option<(String, String)>`（基準,
+    目前）簡化成 `Option<String>`（只需要記「目前是什麼」，因為預期值永遠是
+    同一個 `EXPECTED_BRANCH`，不用重複存）。
+  - `scan()` 背景執行緒：branch 比對邏輯從「查/更新 per-repo 基準表」簡化成
+    單純比較 `state.branch` 跟 `EXPECTED_BRANCH` 是否相等，不再需要
+    `baseline_branches` 這個 `Arc<Mutex<HashMap<...>>>`，也不用再拿額外的鎖。
+  - `describe_reasons`：顯示文字從「branch 從 X 換成 Y」改成「branch 是 X，
+    不是 develop」。
+  - `MANUAL_TEXT`：更新成新的三條規則說明，拿掉「基準 branch 不落地存檔」這條
+    （已經不適用，規則本身無狀態）。
 
 ## 不做的事
 
 - 不對 `wol`/其他 plugin 做任何改動。
-- 不新增磁碟持久化——基準 branch 維持純記憶體，重開程式會重新建立（見上面
-  「已知限制」）。
 - 不做「push」或任何會寫入 repo 的動作，這個 plugin 純粹只讀取狀態。
 - 不特別處理 rebase/merge 等中繼狀態的分類顯示。
 - 不改變 `add`/`remove`/`clear`/`list`/`scan` 這幾個指令本身的介面（參數、
   用法不變），只改內部判斷邏輯跟顯示內容。
+- 不讓 `EXPECTED_BRANCH` 可設定（不做「每個監控目錄各自指定預期 branch」這種
+  彈性）——使用者明確要求維持單一寫死的值，見上面「已知限制」。
 
 ## 測試
 
-- 新增 `#[cfg(test)]` 模組，針對純函式 `parse_status_v2` 寫單元測試（不需要
-  真的建立 git repo）：
+- `#[cfg(test)]` 模組裡針對純函式 `parse_status_v2`/`short_branch_name` 的
+  單元測試維持不變（不需要真的建立 git repo）：
   - 乾淨、沒有 upstream 的 repo → `branch = Some("main")`、`ahead = 0`、
     `uncommitted = false`。
   - 有 upstream 且領先幾個 commit → 正確解出 `ahead`。
   - 有未提交變更（含 untracked）→ `uncommitted = true`。
   - detached HEAD → `branch = None`。
+  - `short_branch_name` 正確去掉 remote 名稱前綴。
 - 其餘（`add`/`scan`/`status_text` 顯示格式）沒有既有測試模組，這次也不新增
   ——跟這個 plugin 一直以來的做法一致，靠 `cargo build`/`cargo test` 確認
-  無回歸，加上手動操作（`add` 一個 repo、故意開一個新 branch 並 commit、
-  `scan`、確認 `list` 有把它列出來且原因正確）驗證行為。
+  無回歸，加上手動操作（在真實 git repo 分別驗證「在 develop 上、乾淨」「在
+  別的 branch 上、乾淨」「detached 在 origin/develop 的 tip 上」三種情況，
+  確認 `scan`/`list` 的判斷結果符合預期）驗證行為。
