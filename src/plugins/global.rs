@@ -263,20 +263,26 @@ impl GlobalPlugin {
         }
         items.sort_by(|a, b| (&a.domain, &a.report.id).cmp(&(&b.domain, &b.report.id)));
 
-        let headers = [
-            "domain", "id", "ip", "os", "version", "mode", "device uptime", "app uptime", "disk", "alive",
-        ];
-        let rows: Vec<[String; 10]> = items
+        let headers = ["id", "ip", "os", "version", "mode", "device uptime", "app uptime", "disk", "alive"];
+        let rows: Vec<[String; 9]> = items
             .into_iter()
             .map(|item| {
                 let alive = item.age_secs < ALIVE_TTL.as_secs_f64();
+                // mode 縮寫成單一字元，省表格寬度：s=server、c=client、
+                // -=standalone（還沒設過 mode 的預設值）。查不到對應值（未來
+                // 版本間協定不一致）就照原字串顯示，不讓表格憑空消失一欄。
+                let mode = match item.report.mode.as_str() {
+                    "server" => "s".to_string(),
+                    "client" => "c".to_string(),
+                    "standalone" => "-".to_string(),
+                    other => other.to_string(),
+                };
                 [
-                    item.domain,
-                    item.report.id,
+                    format!("{}/{}", item.domain, item.report.id),
                     item.report.ip,
                     item.report.os,
                     item.report.version,
-                    item.report.mode,
+                    mode,
                     sysinfo::format_uptime(item.report.device_uptime_secs),
                     sysinfo::format_uptime(item.report.app_uptime_secs),
                     sysinfo::format_disk_usage(item.report.disk_free_bytes, item.report.disk_total_bytes),
@@ -777,7 +783,7 @@ fn clear_retained_topic(topic: &str) -> Result<()> {
 /// 組一個純文字表格，跟 `DevicePlugin` 的 `render_table` 是同一個寫法（欄寬依
 /// 這一欄裡最寬的內容決定，用 `UnicodeWidthStr` 對齊），各 plugin 各自維護一份
 /// 精簡版而不是共用，理由見 `plugins::device` 的同名函式。
-fn render_table(headers: &[&str], rows: &[[String; 10]]) -> String {
+fn render_table(headers: &[&str], rows: &[[String; 9]]) -> String {
     let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(*h)).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {

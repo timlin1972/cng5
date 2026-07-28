@@ -66,13 +66,22 @@ impl DevicePlugin {
                 } else {
                     format!("  {}", entry.report.id)
                 };
+                // mode 縮寫成單一字元，省表格寬度：s=server、c=client、
+                // -=standalone（還沒設過 mode 的預設值）。查不到對應值（未來
+                // 版本間協定不一致）就照原字串顯示，不讓表格憑空消失一欄。
+                let mode = match entry.report.mode.as_str() {
+                    "server" => "s".to_string(),
+                    "client" => "c".to_string(),
+                    "standalone" => "-".to_string(),
+                    other => other.to_string(),
+                };
                 [
                     id_cell,
                     entry.report.ip.clone(),
                     entry.report.os.clone(),
                     entry.report.version.clone(),
                     yes_no(entry.report.tailscale),
-                    entry.report.mode.clone(),
+                    mode,
                     sysinfo::format_uptime(entry.report.device_uptime_secs),
                     sysinfo::format_uptime(entry.report.app_uptime_secs),
                     sysinfo::format_disk_usage(entry.report.disk_free_bytes, entry.report.disk_total_bytes),
