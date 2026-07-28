@@ -46,8 +46,12 @@ detached HEAD 時，額外查一次 `git for-each-ref --points-at=HEAD ... refs/
 不特別處理。真正查不到任何 remote branch 對得上這個 commit（例如卡在某個歷史
 commit、或 bisect 中途）才算「異動」（顯示成 `(detached HEAD)`）。
 
-多個 remote 的 branch 剛好指到同一個 commit 時，優先選 `origin/*`，找不到才選
-字母排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
+多個 remote 的 branch 剛好指到同一個 commit 時，只要其中有一個剛好就是
+`EXPECTED_BRANCH`（例如 `origin/develop`），就直接認定「在 develop 上」，不管
+還有沒有其他巧合也指到同一個 commit 的 branch——vendor/3rdparty 這類 repo
+常見同一個 commit 同時是好幾個 release branch 的起點（見下面「踩到的真實
+bug」）。真的沒有任何候選是 `EXPECTED_BRANCH` 才需要挑一個代表性的名稱顯示
+在「有異動」的原因裡：優先選 `origin/*`，找不到才選字母排序第一個。
 
 **踩到的真實 bug（已修正）：** `git for-each-ref --points-at=HEAD ... refs/remotes/`
 也會列出 remote 自己的 `HEAD` symref（指向該 remote 預設 branch的指標，不是
@@ -58,6 +62,19 @@ commit、或 bisect 中途）才算「異動」（顯示成 `(detached HEAD)`）
 被誤判成「branch 是 HEAD，不是 develop」。修法：`pick_detached_branch_name`
 （拆出來的純函式，方便測試）明確濾掉沒有 `/` 的候選跟結尾是 `/HEAD` 的候選，
 兩種 git 版本的行為都排除掉。
+
+**第二個踩到的真實 bug（已修正）：** 修完上面那個之後，緊接著遇到另一個案例
+——`3rdparty_cpss` 這種 vendor repo，同一個 commit 同時是 `origin/develop`
+跟其他好幾個產品線專用 release branch（例如
+`origin/MDS-G4000-4XGS_v5.0.2_develop`）的起點。原本「多個候選排序後選
+`origin/*` 裡字母排序第一個」這條規則，因為大寫字母在 ASCII 排序中排在小寫
+字母前面，選到了 `MDS-G4000-4XGS_v5.0.2_develop`，而不是 `develop`——即使
+`git status` 明確顯示 `HEAD detached at origin/develop`。使用者確認的期望
+行為：只要 `git status` 顯示 detached 在 `origin/develop` 上，就該算是在
+develop 上，不管同一個 commit 上還掛著多少其他巧合的 branch。修法：
+`pick_detached_branch_name` 先檢查候選裡有沒有任何一個剛好是
+`EXPECTED_BRANCH`，有就直接回傳，不受其他候選字母排序影響；真的沒有才落回
+「選 `origin/*` 裡字母排序第一個」這條規則去挑一個顯示用的名稱。
 
 ## 已知限制（刻意的取捨，不是之後要修的 bug）
 

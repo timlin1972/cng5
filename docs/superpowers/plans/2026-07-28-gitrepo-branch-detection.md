@@ -1153,3 +1153,72 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF
 )"
 ```
+
+Committed as `07cb235`，已 push 到 origin/main。
+
+---
+
+### Task 9（追加，2026-07-28）：多個候選 branch 同指一個 commit 時，develop 要贏
+
+**背景：** Task 8 修完之後，使用者立刻回報另一個真實案例：
+`buildroot/dl/3rdparty_cpss` 被列成「branch 是
+MDS-G4000-4XGS_v5.0.2_develop，不是 develop」，但 `git status` 明確顯示
+`HEAD detached at origin/develop`、工作目錄乾淨。原因是 vendor/3rdparty repo
+常見同一個 commit 同時是 `origin/develop` 跟其他產品線專用 release branch
+的起點；原本「排序後選 `origin/*` 裡字母排序第一個」這條規則因為大寫字母在
+ASCII 排序排在小寫字母前面，選到了
+`MDS-G4000-4XGS_v5.0.2_develop`。使用者明確要求：只要 `git status` 顯示
+detached 在 `origin/develop` 上，就該算是在 develop 上，不管同一個 commit 上
+還掛著多少其他巧合的 branch。
+
+**Files:**
+- Modify: `src/plugins/gitrepo.rs`
+
+- [x] **Step 1: `pick_detached_branch_name` 優先匹配 `EXPECTED_BRANCH`**
+
+```rust
+fn pick_detached_branch_name(stdout: &str) -> Option<String> {
+    let names: Vec<&str> =
+        stdout.lines().filter(|l| !l.is_empty() && l.contains('/') && !l.ends_with("/HEAD")).collect();
+    if names.is_empty() {
+        return None;
+    }
+    if names.iter().any(|n| short_branch_name(n) == EXPECTED_BRANCH) {
+        return Some(EXPECTED_BRANCH.to_string());
+    }
+    let mut names = names;
+    names.sort();
+    let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
+    Some(short_branch_name(chosen).to_string())
+}
+```
+
+- [x] **Step 2: 加上重現這次真實 bug 的單元測試**
+
+```rust
+    #[test]
+    fn pick_detached_branch_name_prefers_develop_over_alphabetically_earlier_sibling() {
+        assert_eq!(
+            pick_detached_branch_name("origin/MDS-G4000-4XGS_v5.0.2_develop\norigin/develop\n"),
+            Some("develop".to_string())
+        );
+    }
+```
+
+- [x] **Step 3: Build + 測試**
+
+Run: `cargo build 2>&1 | tail -40`（clean）
+Run: `cargo test gitrepo 2>&1 | tail -30`（13 個 gitrepo 測試全過）
+Run: `cargo test 2>&1 | tail -6`（全專案 130 個測試全過）
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/plugins/gitrepo.rs docs/superpowers/specs/2026-07-28-gitrepo-branch-detection-design.md docs/superpowers/plans/2026-07-28-gitrepo-branch-detection.md
+git commit -m "$(cat <<'EOF'
+gitrepo：多個候選 branch 同指一個 commit 時，develop 優先
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+EOF
+)"
+```

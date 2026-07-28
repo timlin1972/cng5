@@ -255,11 +255,21 @@ fn short_branch_name(remote_ref: &str) -> &str {
 /// 第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。純字串處理，
 /// 不呼叫 git，方便寫單元測試。
 fn pick_detached_branch_name(stdout: &str) -> Option<String> {
-    let mut names: Vec<&str> =
+    let names: Vec<&str> =
         stdout.lines().filter(|l| !l.is_empty() && l.contains('/') && !l.ends_with("/HEAD")).collect();
     if names.is_empty() {
         return None;
     }
+    // vendor/3rdparty 這類 repo 常見同一個 commit 同時是好幾個 release
+    // branch（例如某個產品線專用的 branch）的起點，跟 `EXPECTED_BRANCH`
+    // 剛好也指到同一個 commit——這種情況要直接認定「在 develop 上」，不能因為
+    // 其他巧合也指到同一個 commit 的 branch 名稱排序比較前面，就蓋掉真正的
+    // develop（實測遇到的真實案例：`MDS-G4000-4XGS_v5.0.2_develop` 字母排序
+    // 排在 `develop` 前面，被誤選成「目前的 branch」）。
+    if names.iter().any(|n| short_branch_name(n) == EXPECTED_BRANCH) {
+        return Some(EXPECTED_BRANCH.to_string());
+    }
+    let mut names = names;
     names.sort();
     let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
     Some(short_branch_name(chosen).to_string())
@@ -622,6 +632,20 @@ mod status_parsing_tests {
     fn pick_detached_branch_name_prefers_origin_over_other_remotes() {
         assert_eq!(
             pick_detached_branch_name("upstream/develop\norigin/develop\n"),
+            Some("develop".to_string())
+        );
+    }
+
+    /// vendor/3rdparty repo 常見同一個 commit 同時是好幾個 release branch 的
+    /// 起點——`origin/develop` 也指到這個 commit 時，不能因為另一個 branch
+    /// 名稱字母排序比較前面（大寫字母在 ASCII 排序中排在小寫字母前面）就蓋掉
+    /// 真正的 develop。這是實測遇到的真實 bug：
+    /// `MDS-G4000-4XGS_v5.0.2_develop` 排在 `develop` 前面，被誤判成目前的
+    /// branch，即使 `git status` 明確顯示 `HEAD detached at origin/develop`。
+    #[test]
+    fn pick_detached_branch_name_prefers_develop_over_alphabetically_earlier_sibling() {
+        assert_eq!(
+            pick_detached_branch_name("origin/MDS-G4000-4XGS_v5.0.2_develop\norigin/develop\n"),
             Some("develop".to_string())
         );
     }
