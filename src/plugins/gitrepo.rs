@@ -237,7 +237,45 @@ fn parse_status_v2(stdout: &str) -> RepoState {
     RepoState { branch, ahead, uncommitted }
 }
 
+/// `"origin/develop"` → `"develop"`：去掉 remote 名稱那一段前綴，沒有 `/`
+/// 就照原樣傳回。純字串處理，不呼叫 git，方便寫單元測試。
+fn short_branch_name(remote_ref: &str) -> &str {
+    remote_ref.split_once('/').map(|(_, rest)| rest).unwrap_or(remote_ref)
+}
+
+/// detached HEAD 時，查目前這個 commit 是不是剛好是某個 remote branch 的最新
+/// commit（CI/build 流程常見的 `git checkout origin/develop` 就是這種情況，
+/// 這其實就是「在 develop 上」，不是異常）——如果是，回傳去掉 remote 前綴的
+/// branch 名稱，視同 checkout 在那個 branch 上，用一般 branch 的邏輯去跟基準
+/// 比對；查不到任何對得上的 remote branch 就回傳 `None`（真正意義上的
+/// detached，例如卡在某個歷史 commit），維持「跟基準不一樣」的判斷。
+///
+/// 多個 remote 剛好都指到同一個 commit 時，優先選 `origin/*`，找不到就選字母
+/// 排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
+fn resolve_detached_branch(repo: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["for-each-ref", "--points-at=HEAD", "--format=%(refname:short)", "refs/remotes/"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut names: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
+    Some(short_branch_name(chosen).to_string())
+}
+
 /// 對 `repo` 跑一次 `git status --porcelain=v2 --branch`，解析成 `RepoState`。
+/// detached HEAD（`branch` 解析成 `None`）時多查一次
+/// `resolve_detached_branch`，只在真的 detached 時才多花這次 git 呼叫，不影響
+/// 一般有 branch 的 repo 的效能。
 fn repo_state(repo: &Path) -> Result<RepoState> {
     let output = Command::new("git")
         .arg("-C")
@@ -248,7 +286,11 @@ fn repo_state(repo: &Path) -> Result<RepoState> {
     if !output.status.success() {
         bail!("git status 回傳非 0: {}", repo.display());
     }
-    Ok(parse_status_v2(&String::from_utf8_lossy(&output.stdout)))
+    let mut state = parse_status_v2(&String::from_utf8_lossy(&output.stdout));
+    if state.branch.is_none() {
+        state.branch = resolve_detached_branch(repo);
+    }
+    Ok(state)
 }
 
 impl GitRepoPlugin {
@@ -584,5 +626,14 @@ mod status_parsing_tests {
     fn detached_head_has_no_branch() {
         let state = parse_status_v2("# branch.oid abc123\n# branch.head (detached)\n");
         assert_eq!(state.branch, None);
+    }
+
+    /// `resolve_detached_branch` 找到 remote branch 之後，要去掉 remote 名稱
+    /// 那一段前綴——`"origin/develop"` 視同 `"develop"`。
+    #[test]
+    fn short_branch_name_strips_remote_prefix() {
+        assert_eq!(short_branch_name("origin/develop"), "develop");
+        assert_eq!(short_branch_name("upstream/feature/x"), "feature/x");
+        assert_eq!(short_branch_name("no-remote-prefix"), "no-remote-prefix");
     }
 }

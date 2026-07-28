@@ -763,12 +763,150 @@ branch），確認 `scan`/`list` 顯示「領先 upstream N 個 commit 還沒 pu
 這個測試 repo 有設定 upstream 的話；沒有 upstream 的話這條規則不會觸發，只有
 branch 名稱不同才會被抓到，這是預期行為，見 design doc 的已知限制）。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add src/plugins/gitrepo.rs
 git commit -m "$(cat <<'EOF'
 gitrepo：把 branch 換過、commit 但還沒 push 也算進「有異動」
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+EOF
+)"
+```
+
+Pushed to origin/main as `f8eed2b`.
+
+---
+
+### Task 6（追加，2026-07-28）：detached HEAD 剛好在 remote branch tip 上時視同該 branch
+
+**背景：** 上線後發現，CI/build 流程常見的 `git checkout origin/develop` 會讓
+repo 進入 detached HEAD 狀態，但這不是異常——就是「在 develop 上」。Task 3
+當時的實作把所有 detached HEAD 一律當成「跟基準不一樣」，導致這些其實沒有
+真的被改過的 repo 全部被列進「有異動」，是誤判，不是預期行為。見 design doc
+新增的「Detached HEAD 恰好在某個 remote branch 的 tip 上，視同該 branch」一節。
+
+**Files:**
+- Modify: `src/plugins/gitrepo.rs`
+
+**Interfaces:**
+- 新函式 `short_branch_name(remote_ref: &str) -> &str`：純字串處理（去掉
+  remote 名稱前綴，例如 `"origin/develop"` → `"develop"`），可單元測試。
+- 新函式 `resolve_detached_branch(repo: &Path) -> Option<String>`：呼叫
+  `git for-each-ref --points-at=HEAD --format=%(refname:short) refs/remotes/`，
+  查目前這個 commit 是不是剛好是某個 remote branch 的 tip。
+- `repo_state` 改成：`parse_status_v2` 解出 `branch: None`（detached）時，多
+  呼叫一次 `resolve_detached_branch` 嘗試解出對應的 branch 名稱。
+
+- [x] **Step 1: 新增 `short_branch_name`/`resolve_detached_branch`**
+
+在 `repo_state` 前面插入：
+
+```rust
+/// `"origin/develop"` → `"develop"`：去掉 remote 名稱那一段前綴，沒有 `/`
+/// 就照原樣傳回。純字串處理，不呼叫 git，方便寫單元測試。
+fn short_branch_name(remote_ref: &str) -> &str {
+    remote_ref.split_once('/').map(|(_, rest)| rest).unwrap_or(remote_ref)
+}
+
+/// detached HEAD 時，查目前這個 commit 是不是剛好是某個 remote branch 的最新
+/// commit（CI/build 流程常見的 `git checkout origin/develop` 就是這種情況）
+/// ——如果是，回傳去掉 remote 前綴的 branch 名稱，視同 checkout 在那個 branch
+/// 上；查不到任何對得上的 remote branch 就回傳 `None`（真正意義上的 detached，
+/// 例如卡在某個歷史 commit），維持「跟基準不一樣」的原本判斷。
+///
+/// 多個 remote 剛好都指到同一個 commit 時，優先選 `origin/*`，找不到就選字母
+/// 排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
+fn resolve_detached_branch(repo: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["for-each-ref", "--points-at=HEAD", "--format=%(refname:short)", "refs/remotes/"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut names: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    if names.is_empty() {
+        return None;
+    }
+    names.sort();
+    let chosen = names.iter().find(|n| n.starts_with("origin/")).copied().unwrap_or(names[0]);
+    Some(short_branch_name(chosen).to_string())
+}
+```
+
+- [x] **Step 2: `repo_state` 補上 detached 的額外解析**
+
+原本：
+
+```rust
+fn repo_state(repo: &Path) -> Result<RepoState> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain=v2", "--branch"])
+        .output()
+        .with_context(|| format!("執行 git status 失敗: {}", repo.display()))?;
+    if !output.status.success() {
+        bail!("git status 回傳非 0: {}", repo.display());
+    }
+    Ok(parse_status_v2(&String::from_utf8_lossy(&output.stdout)))
+}
+```
+
+改成：
+
+```rust
+fn repo_state(repo: &Path) -> Result<RepoState> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["status", "--porcelain=v2", "--branch"])
+        .output()
+        .with_context(|| format!("執行 git status 失敗: {}", repo.display()))?;
+    if !output.status.success() {
+        bail!("git status 回傳非 0: {}", repo.display());
+    }
+    let mut state = parse_status_v2(&String::from_utf8_lossy(&output.stdout));
+    if state.branch.is_none() {
+        state.branch = resolve_detached_branch(repo);
+    }
+    Ok(state)
+}
+```
+
+（`parse_status_v2` 本身不變，純粹解析 `git status` 輸出的 `branch: None` 仍然
+代表「這次輸出沒有具體 branch 名稱」——`resolve_detached_branch` 是額外一層，
+只在真的 detached 時才多跑一次 git 指令，不影響一般有 branch 的 repo 的效能。）
+
+- [x] **Step 3: 加上 `short_branch_name` 的單元測試**
+
+在 `status_parsing_tests` 模組裡加：
+
+```rust
+    #[test]
+    fn short_branch_name_strips_remote_prefix() {
+        assert_eq!(short_branch_name("origin/develop"), "develop");
+        assert_eq!(short_branch_name("upstream/feature/x"), "feature/x");
+        assert_eq!(short_branch_name("no-remote-prefix"), "no-remote-prefix");
+    }
+```
+
+- [x] **Step 4: Build + 測試**
+
+Run: `cargo build 2>&1 | tail -30`（clean）
+Run: `cargo test 2>&1 | tail -30`（全過，含新增的 `short_branch_name_strips_remote_prefix`）
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/plugins/gitrepo.rs docs/superpowers/specs/2026-07-28-gitrepo-branch-detection-design.md docs/superpowers/plans/2026-07-28-gitrepo-branch-detection.md
+git commit -m "$(cat <<'EOF'
+gitrepo：detached HEAD 剛好在 remote branch tip 上時視同該 branch，不算異動
 
 Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
 EOF

@@ -33,6 +33,20 @@ repo 的情況）預設 branch 名稱不見得都一樣。
 當成「換過」列出來（沒辦法區分是使用者自己切的還是 AI 切的，這是設計上刻意
 接受的取捨：抓到永遠比漏掉安全）。
 
+## Detached HEAD 恰好在某個 remote branch 的 tip 上，視同該 branch
+
+CI/build 流程常見的操作是 `git checkout origin/develop` 之類的指令，結果是
+detached HEAD，但這其實就是「在 develop 上」，不是異常狀態。所以偵測到
+detached HEAD 時，額外查一次 `git for-each-ref --points-at=HEAD ... refs/remotes/`
+——如果目前這個 commit 剛好是某個 remote branch 的最新 commit，就把這個狀態
+當成「checkout 在 `<branch>`」（remote 名稱前綴去掉，例如 `origin/develop` 視同
+`develop`），跟基準比對的邏輯完全比照一般 branch，不特別處理。真正查不到任何
+remote branch 對得上這個 commit（例如卡在某個歷史 commit、或 bisect 中途）才
+維持原本「一律當作跟基準不一樣」的處理。
+
+多個 remote 的 branch 剛好指到同一個 commit時，優先選 `origin/*`，找不到才選
+字母排序第一個——多數情況只有一個 remote，這條規則只是避免結果不確定。
+
 ## 已知限制（刻意的取捨，不是之後要修的 bug）
 
 - 基準 branch 只存在記憶體裡，不落地存檔，跟 `watched` 清單本身一致（見
@@ -41,8 +55,9 @@ repo 的情況）預設 branch 名稱不見得都一樣。
   使用者發現之前程式剛好重開過（`script-local.cli` 重新跑一次 `add`），基準
   會被重設成重開當下的 branch，這一輪就偵測不到「branch 換過」了——但「未
   提交變更」「領先 upstream」這兩種偵測不受影響，仍然抓得到。
-- Detached HEAD（不在任何 branch 上）一律當作「跟基準不一樣」處理，不特別
-  記錄／比對基準——這種狀態本身就值得使用者注意。
+- Detached HEAD 且查不到任何 remote branch 對得上目前 commit（見上一節）才
+  一律當作「跟基準不一樣」處理，不特別記錄／比對基準——這種狀態本身就值得
+  使用者注意。
 - 不處理 rebase/merge 進行中之類的中繼狀態，`git status --porcelain=v2` 印出
   什麼就是什麼，不特別分類成不同的錯誤訊息。
 - 「領先 upstream」只在這個 branch 有設定 upstream（tracking branch）時才有
