@@ -12,6 +12,7 @@ mod remote_output;
 mod storage;
 mod sync;
 mod sync_baseline;
+mod table_diff;
 mod system;
 mod weather;
 mod wol;
@@ -37,6 +38,8 @@ pub use remote_output::RemoteOutputPlugin;
 pub use storage::StoragePlugin;
 pub use sync::SyncPlugin;
 pub(crate) use system::REPORT_INTERVAL;
+#[allow(unused_imports)]
+pub(crate) use table_diff::{RowDiffTracker, TableSnapshot};
 pub use system::SystemPlugin;
 pub use weather::WeatherPlugin;
 pub use wol::WolPlugin;
