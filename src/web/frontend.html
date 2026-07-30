@@ -632,7 +632,12 @@
      panel 時，多出來的空間留白在下面，不會被攤進每一列。 */
   .data-table-scroll { flex: 1; overflow: auto; }
   .data-table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  .data-table th, .data-table td { padding: 4px 10px; border-top: 1px solid #262a33; white-space: nowrap; text-align: left; }
+  /* `device` 的 id 欄位（跟表頭）靠 CLI/TUI 那套「`* ` 開頭是自己，`  `
+     （兩個空白）開頭不是」的文字前綴對齊，不是靠 CSS 排版——`white-space:
+     nowrap` 會把這種前導空白摺疊掉，變成 web 上看不出對齊；`pre` 原樣保留
+     空白字元，效果跟 CLI/TUI 一致（頁面本身用等寬字型），同時跟 `nowrap`
+     一樣不會自動換行。 */
+  .data-table th, .data-table td { padding: 4px 10px; border-top: 1px solid #262a33; white-space: pre; text-align: left; }
   .data-table th { color: #9aa4b8; font-weight: normal; border-top: none; border-bottom: 1px solid #3a4150; }
   @keyframes cellFlash {
     from { background-color: rgba(255, 255, 255, 0.35); }
