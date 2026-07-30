@@ -623,6 +623,16 @@
     margin-left: 6px;
   }
   .storage-table button:hover { color: #d8dee9; }
+  .data-table-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .data-table-empty { padding: 8px; color: #9aa4b8; }
+  .data-table { flex: 1; overflow: auto; border-collapse: collapse; width: 100%; font-size: 12px; }
+  .data-table th, .data-table td { padding: 4px 10px; border-top: 1px solid #262a33; white-space: nowrap; text-align: left; }
+  .data-table th { color: #9aa4b8; font-weight: normal; border-top: none; border-bottom: 1px solid #3a4150; }
+  @keyframes cellFlash {
+    from { background-color: rgba(255, 255, 255, 0.35); }
+    to { background-color: transparent; }
+  }
+  .cell-flash { animation: cellFlash 1s ease-out; }
 </style>
 <style>
 /* 內嵌的 xterm.js 樣式（版本 5.5.0，從 jsdelivr 抓下來原封不動貼上，
@@ -1595,6 +1605,48 @@
     return html;
   }
 
+  // `global`／`device` panel 專用：把後端送來的逐格 snapshot（見 `web.rs` 的
+  // `table_snapshot_json`）畫成一個真正的 `<table>`。用 `textContent` 逐格
+  // 填值（不是拼 HTML 字串），這樣任何欄位內容（`global` 的資料有一部分是
+  // 其他 domain 透過公開 MQTT broker 回報的字串，不能假設乾淨）都會被瀏覽器
+  // 自動跳脫，不會被當成 HTML 解析。`thead`/`tbody` 每次都整個重新建立，所以
+  // 剛變化的格子掛的 `cell-flash` class 每次都是全新 DOM node——如果單純用
+  // `animation-delay: 0s`，每次重建都會把還在播放中的動畫打斷、跳回全白重新
+  // 開始，肉眼看起來閃爍時間比設計的 1 秒短很多（後端 300ms 一個 tick 就可能
+  // 重建一次）。改用負的 `animation-delay: -Xs`（`X = flash_ms / 1000`），
+  // 讓瀏覽器把這個新 node 的動畫直接當成「已經播到第 X 秒」來算，這樣即使
+  // node 本身是全新的，淡出效果在視覺上仍然是從變化發生的那一刻算起、連續
+  // 播完整整 1 秒，不會被每次 tbody 重建打斷。
+  function renderTableSnapshot(ui, snapshot) {
+    const hasRows = snapshot.rows.length > 0;
+    ui.empty.style.display = hasRows ? "none" : "";
+    ui.table.style.display = hasRows ? "" : "none";
+
+    ui.thead.innerHTML = "";
+    const headRow = document.createElement("tr");
+    for (const header of snapshot.headers) {
+      const th = document.createElement("th");
+      th.textContent = header;
+      headRow.appendChild(th);
+    }
+    ui.thead.appendChild(headRow);
+
+    ui.tbody.innerHTML = "";
+    for (const row of snapshot.rows) {
+      const tr = document.createElement("tr");
+      for (const cell of row.cells) {
+        const td = document.createElement("td");
+        td.textContent = cell.text;
+        if (cell.flash_ms !== null && cell.flash_ms !== undefined) {
+          td.className = "cell-flash";
+          td.style.animationDelay = `-${cell.flash_ms / 1000}s`;
+        }
+        tr.appendChild(td);
+      }
+      ui.tbody.appendChild(tr);
+    }
+  }
+
   // 開一個 panel：畫出可拖拉/縮放的框，並訂閱後端 `/api/panel/<name>/stream`
   // 這個 SSE，內容一有變化後端就會推播過來，不用自己去 poll。
   function openPanel(name) {
@@ -1647,6 +1699,7 @@
     let shellUi = null;
     let notepadUi = null;
     let storageUi = null;
+    let dataTableUi = null;
     if (name === "player") {
       // 跟任何 plugin 都無關的獨立播放器：不訂閱 SSE（`body` 保持 `undefined`），
       // 左邊檔案清單＋下載列，右邊封面＋播放控制。
@@ -2559,6 +2612,26 @@
       refresh();
 
       storageUi = { container };
+    } else if (name === "global" || name === "device") {
+      panel.style.width = "640px";
+      panel.style.height = "320px";
+
+      const container = document.createElement("div");
+      container.className = "data-table-body";
+      const table = document.createElement("table");
+      table.className = "data-table";
+      table.style.display = "none";
+      const thead = document.createElement("thead");
+      const tbody = document.createElement("tbody");
+      table.appendChild(thead);
+      table.appendChild(tbody);
+      const empty = document.createElement("div");
+      empty.className = "data-table-empty";
+      empty.textContent = "(等待資料...)";
+      container.appendChild(table);
+      container.appendChild(empty);
+
+      dataTableUi = { container, table, thead, tbody, empty };
     } else {
       body = document.createElement("pre");
       body.className = "panel-body";
@@ -2579,6 +2652,8 @@
         ? notepadUi.container
         : storageUi
         ? storageUi.container
+        : dataTableUi
+        ? dataTableUi.container
         : body
     );
     panel.appendChild(handle);
@@ -2658,8 +2733,24 @@
     // panel 不用自己寫 retry。
     let es = null;
     if (name !== "player" && name !== "shell" && name !== "notepad" && name !== "storage") {
-      es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
+      // `global`／`device` 走專屬的 `/snapshot-stream`（結構化 JSON，給逐格
+      // 閃爍表格用），其餘 panel 走原本的 `/stream`（純文字）——兩條路後端
+      // 各自獨立比對/快取，見 `web.rs` 的 `snapshot_broadcast_ticker`。
+      const streamPath = dataTableUi ? "snapshot-stream" : "stream";
+      es = new EventSource(`/api/panel/${encodeURIComponent(name)}/${streamPath}`);
       es.onmessage = (e) => {
+        if (dataTableUi) {
+          // `web.rs` 的 `table_snapshot_json` 送的是「JSON 物件字串」，經過
+          // `sse_frame` 又整個包了一層 JSON 字串編碼，所以要解兩層。
+          let snapshot;
+          try {
+            snapshot = JSON.parse(JSON.parse(e.data));
+          } catch (_err) {
+            return;
+          }
+          renderTableSnapshot(dataTableUi, snapshot);
+          return;
+        }
         // 使用者如果往上捲去看舊內容，不要硬把它拉回底部；只有原本就在（或接近）
         // 最底下時，新內容進來才跟著捲到最新，跟終端機 tail 的習慣一致。
         const wasNearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 24;

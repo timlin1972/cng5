@@ -21,7 +21,7 @@ use crate::plugin::{
 };
 use crate::plugins::{
     list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
-    DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    DevicePlugin, GlobalPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 
@@ -42,6 +42,14 @@ const FRONTEND_HTML: &str = include_str!("web/frontend.html");
 struct PanelHub {
     channels: HashMap<String, broadcast::Sender<String>>,
     cache: Mutex<HashMap<String, String>>,
+    /// `global`／`device` 專用的結構化 JSON snapshot 頻道／快取，跟上面
+    /// `channels`/`cache`（純文字）分開——那組是既有的公用端點
+    /// （`/api/panel/{name}/stream`），`remote_output`（跨機器鏡射）跟
+    /// `global` plugin 的跨 domain `Panel` 查詢都在訂閱／讀取，硬改成 JSON
+    /// payload 會讓它們顯示出未預期的原始 JSON 字串（曾經真的這樣改過，
+    /// 這次修正就是拆成獨立的一組）。
+    snapshot_channels: HashMap<String, broadcast::Sender<String>>,
+    snapshot_cache: Mutex<HashMap<String, String>>,
 }
 type Hub = Arc<PanelHub>;
 
@@ -65,9 +73,22 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
         .iter()
         .map(|name| (name.clone(), broadcast::channel(16).0))
         .collect();
-    let hub: Hub = Arc::new(PanelHub { channels, cache: Mutex::new(HashMap::new()) });
+    // `global`／`device` 另外開一組獨立頻道，專門推結構化 JSON snapshot 給
+    // web 前端的逐格閃爍效果用，理由見 `PanelHub` 的欄位註解。
+    let snapshot_names: Vec<String> = vec!["global".to_string(), "device".to_string()];
+    let snapshot_channels = snapshot_names
+        .iter()
+        .map(|name| (name.clone(), broadcast::channel(16).0))
+        .collect();
+    let hub: Hub = Arc::new(PanelHub {
+        channels,
+        cache: Mutex::new(HashMap::new()),
+        snapshot_channels,
+        snapshot_cache: Mutex::new(HashMap::new()),
+    });
 
     tokio::spawn(broadcast_ticker(shell.clone(), output.clone(), hub.clone(), names));
+    tokio::spawn(snapshot_broadcast_ticker(shell.clone(), hub.clone(), snapshot_names));
 
     HttpServer::new(move || {
         let activity_ctx = ctx.clone();
@@ -84,6 +105,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/plugins", web::get().to(api_plugins))
             .route("/api/version", web::get().to(api_version))
             .route("/api/panel/{name}/stream", web::get().to(panel_stream))
+            .route("/api/panel/{name}/snapshot-stream", web::get().to(panel_snapshot_stream))
             .route("/api/prompt", web::get().to(prompt))
             .route("/api/exec", web::post().to(exec))
             .route("/api/shell/ws", web::get().to(shell_ws))
@@ -426,6 +448,62 @@ fn panel_text_for(shell: &Mutex<Shell>, output: &OutputBuffer, name: &str) -> St
     }
 }
 
+/// 跟 `broadcast_ticker` 同樣的節奏／比對邏輯，但只服務 `global`／`device`
+/// 這兩個名字，推的是 `table_snapshot_json` 算出來的 JSON 字串，走獨立的
+/// `hub.snapshot_channels`／`hub.snapshot_cache`，不影響 `channels`／`cache`
+/// 那組既有純文字頻道的消費者（`remote_output`、跨 domain `Panel` 查詢）。
+async fn snapshot_broadcast_ticker(shell: Arc<Mutex<Shell>>, hub: Hub, names: Vec<String>) {
+    let mut interval = tokio::time::interval(TICK);
+    loop {
+        interval.tick().await;
+        let shell = shell.clone();
+        let names = names.clone();
+        let texts = tokio::task::spawn_blocking(move || {
+            names
+                .into_iter()
+                .map(|name| {
+                    let text = table_snapshot_json(&shell, &name);
+                    (name, text)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await;
+        let Ok(texts) = texts else { continue };
+        let mut cache = hub.snapshot_cache.lock().unwrap();
+        for (name, text) in texts {
+            if cache.get(&name) == Some(&text) {
+                continue;
+            }
+            if let Some(tx) = hub.snapshot_channels.get(&name) {
+                let _ = tx.send(text.clone());
+            }
+            cache.insert(name, text);
+        }
+    }
+}
+
+/// `global`／`device` 這兩個 panel 在 web 這邊不是推純文字，是推結構化的
+/// JSON（表頭＋每一格的文字＋「這一格剛剛變了沒」），讓前端能逐格套用閃爍
+/// 效果，見 `frontend.html` 的 `renderTableSnapshot`。跟 `gui.rs` 的
+/// `with_global`／`with_device` 是同一個「向下轉型拿具體型別」的做法，只是
+/// 這裡要的是 web 專用的那份 `web_snapshot()`（TUI／web 各自獨立的比對狀態，
+/// 見 `table_diff::RowDiffTracker` 的說明）。由 `snapshot_broadcast_ticker`
+/// 呼叫，走獨立的 `/api/panel/{name}/snapshot-stream`，不再是
+/// `panel_text_for`／既有的 `/stream` 端點（見該函式的說明）。
+fn table_snapshot_json(shell: &Mutex<Shell>, name: &str) -> String {
+    let mut sh = lock_shell(shell);
+    let snapshot = if name == "global" {
+        sh.plugin_mut("global").and_then(|p| p.as_any_mut().downcast_mut::<GlobalPlugin>()).map(|g| g.web_snapshot())
+    } else {
+        sh.plugin_mut("device").and_then(|p| p.as_any_mut().downcast_mut::<DevicePlugin>()).map(|d| d.web_snapshot())
+    };
+    drop(sh);
+    match snapshot {
+        Some(snapshot) => serde_json::to_string(&snapshot.to_json()).unwrap_or_default(),
+        None => String::new(),
+    }
+}
+
 async fn index() -> impl Responder {
     HttpResponse::Ok().content_type("text/html; charset=utf-8").body(FRONTEND_HTML)
 }
@@ -676,6 +754,33 @@ async fn panel_stream(path: web::Path<String>, hub: web::Data<Hub>) -> impl Resp
     };
     let mut rx = tx.subscribe();
     let initial = hub.cache.lock().unwrap().get(&name).cloned();
+
+    let body = stream! {
+        if let Some(text) = initial {
+            yield Ok::<_, actix_web::Error>(sse_frame(&text));
+        }
+        loop {
+            match rx.recv().await {
+                Ok(text) => yield Ok(sse_frame(&text)),
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    HttpResponse::Ok().content_type("text/event-stream").streaming(body)
+}
+
+/// `GET /api/panel/{name}/snapshot-stream`：跟 `panel_stream` 同樣的「先送
+/// 一次快取內容、之後有變化再推」邏輯，但只有 `global`／`device` 有對應的
+/// channel（其他名字回 404），送的是結構化 JSON snapshot，給
+/// `frontend.html` 的逐格閃爍表格用。
+async fn panel_snapshot_stream(path: web::Path<String>, hub: web::Data<Hub>) -> impl Responder {
+    let name = path.into_inner();
+    let Some(tx) = hub.snapshot_channels.get(&name).cloned() else {
+        return HttpResponse::NotFound().finish();
+    };
+    let mut rx = tx.subscribe();
+    let initial = hub.snapshot_cache.lock().unwrap().get(&name).cloned();
 
     let body = stream! {
         if let Some(text) = initial {

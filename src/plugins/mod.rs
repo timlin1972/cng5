@@ -13,6 +13,7 @@ mod storage;
 mod sync;
 mod sync_baseline;
 mod system;
+mod table_diff;
 mod weather;
 mod wol;
 
@@ -38,5 +39,6 @@ pub use storage::StoragePlugin;
 pub use sync::SyncPlugin;
 pub(crate) use system::REPORT_INTERVAL;
 pub use system::SystemPlugin;
+pub(crate) use table_diff::{RowDiffTracker, TableSnapshot};
 pub use weather::WeatherPlugin;
 pub use wol::WolPlugin;
