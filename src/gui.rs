@@ -15,7 +15,7 @@ use ratatui::Terminal;
 use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
-use crate::plugins::{NotepadPlugin, QrPlugin};
+use crate::plugins::{DevicePlugin, GlobalPlugin, NotepadPlugin, QrPlugin, TableSnapshot};
 use crate::shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PanelState, Shell};
 
 /// 借出 `notepad` plugin 的具體型別可變參考執行 `f`：`Shell::plugin_mut` 只給
@@ -39,6 +39,68 @@ fn with_qr<R>(shell: &Arc<Mutex<Shell>>, f: impl FnOnce(&mut QrPlugin) -> R) -> 
     let plugin = sh.plugin_mut("qr")?;
     let qr = plugin.as_any_mut().downcast_mut::<QrPlugin>()?;
     Some(f(qr))
+}
+
+/// 跟 `with_notepad`同一個套路，借出 `global` plugin 的具體型別可變參考，
+/// 讓 GUI 能呼叫 `tui_snapshot()` 拿逐格資料。
+fn with_global<R>(shell: &Arc<Mutex<Shell>>, f: impl FnOnce(&mut GlobalPlugin) -> R) -> Option<R> {
+    let mut sh = lock_shell(shell);
+    let plugin = sh.plugin_mut("global")?;
+    let global = plugin.as_any_mut().downcast_mut::<GlobalPlugin>()?;
+    Some(f(global))
+}
+
+/// 跟 `with_global` 同一個套路，借出 `device` plugin。
+fn with_device<R>(shell: &Arc<Mutex<Shell>>, f: impl FnOnce(&mut DevicePlugin) -> R) -> Option<R> {
+    let mut sh = lock_shell(shell);
+    let plugin = sh.plugin_mut("device")?;
+    let device = plugin.as_any_mut().downcast_mut::<DevicePlugin>()?;
+    Some(f(device))
+}
+
+/// 逐格閃爍：剛好偵測到變化的那一刻先用白底，接著兩段更暗的灰階模擬淡出，
+/// 1 秒後完全恢復預設樣式。只用 ratatui 內建的具名顏色（不用 truecolor），
+/// 不是每個終端機都保證支援任意 RGB 顏色。
+fn flash_style(elapsed: Duration) -> Style {
+    if elapsed < Duration::from_millis(333) {
+        Style::default().bg(Color::White).fg(Color::Black)
+    } else if elapsed < Duration::from_millis(666) {
+        Style::default().bg(Color::Gray).fg(Color::Black)
+    } else if elapsed < Duration::from_secs(1) {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else {
+        Style::default()
+    }
+}
+
+/// 把一份 `TableSnapshot` 畫成對齊好的逐格 `Line`：表頭／分隔線排版邏輯跟
+/// `global.rs`/`device.rs` 的 `render_table` 一致，每一格再依 `flash_style`
+/// 套上樣式。
+fn render_table_snapshot(snapshot: &TableSnapshot) -> Vec<Line<'static>> {
+    let widths = snapshot.column_widths();
+    let pad = |s: &str, w: usize| format!("{s}{}", " ".repeat(w.saturating_sub(UnicodeWidthStr::width(s))));
+
+    let mut header_spans = Vec::new();
+    for (i, (h, w)) in snapshot.headers.iter().zip(&widths).enumerate() {
+        if i > 0 {
+            header_spans.push(Span::raw(" | "));
+        }
+        header_spans.push(Span::raw(pad(h, *w)));
+    }
+    let separator = widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("-+-");
+
+    let mut lines = vec![Line::from(header_spans), Line::raw(separator)];
+    for row in &snapshot.rows {
+        let mut spans = Vec::new();
+        for (i, (cell, w)) in row.cells.iter().zip(&widths).enumerate() {
+            if i > 0 {
+                spans.push(Span::raw(" | "));
+            }
+            spans.push(Span::styled(pad(&cell.text, *w), flash_style(cell.changed_at.elapsed())));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
 }
 
 /// `line` 是不是標題（`#`..`######` 開頭接空白），是的話回傳 `#` 的個數
@@ -1092,6 +1154,31 @@ fn run_loop(
                                 }
                             }
                         }
+                    }
+                } else if name == "global" || name == "device" {
+                    let inner = block.inner(rect);
+                    frame.render_widget(block, rect);
+                    if inner.height > 0 {
+                        let body_height = inner.height.saturating_sub(1);
+                        let hint_area = Rect { x: inner.x, y: inner.y + body_height, width: inner.width, height: 1 };
+                        let body_area = Rect { x: inner.x, y: inner.y, width: inner.width, height: body_height };
+                        let snapshot = if name == "global" {
+                            with_global(shell, |g| g.tui_snapshot())
+                        } else {
+                            with_device(shell, |d| d.tui_snapshot())
+                        };
+                        let lines: Vec<Line> = match snapshot.filter(|s| !s.rows.is_empty()) {
+                            Some(snapshot) => render_table_snapshot(&snapshot),
+                            None => {
+                                let text = lock_shell(shell).plugin_panel_text(name).unwrap_or_default();
+                                text.lines().map(|l| Line::raw(l.to_string())).collect()
+                            }
+                        };
+                        let start = lines.len().saturating_sub(body_area.height as usize);
+                        let visible: Vec<Line> = lines[start..].to_vec();
+                        frame.render_widget(Paragraph::new(visible), body_area);
+                        let hint_style = Style::default().fg(Color::DarkGray);
+                        frame.render_widget(Paragraph::new(PANEL_HINT).style(hint_style), hint_area);
                     }
                 } else if let Some(text) = lock_shell(shell).plugin_panel_text(name) {
                     let inner = block.inner(rect);
