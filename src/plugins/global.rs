@@ -18,7 +18,7 @@ use crate::plugin::{
 };
 use crate::plugins::{
     make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_music_copy_path, safe_storage_path,
-    url_encode_filename, walk_with_hashes, write_chunk, REPORT_INTERVAL, STORAGE_DIR,
+    url_encode_filename, walk_with_hashes, write_chunk, RowDiffTracker, TableSnapshot, REPORT_INTERVAL, STORAGE_DIR,
 };
 use crate::shell;
 use crate::sysinfo;
@@ -32,6 +32,8 @@ const BROKER_PORT: u16 = 1883;
 /// 同一個理由，設成回報間隔（`REPORT_INTERVAL`，publish/pull 都用這個週期）的
 /// 3 倍，容許偶爾漏一兩次還不算離線。
 const ALIVE_TTL: Duration = Duration::from_secs(REPORT_INTERVAL.as_secs() * 3);
+
+const HEADERS: [&str; 9] = ["id", "ip", "os", "version", "mode", "device uptime", "app uptime", "disk", "alive"];
 
 const MANUAL_TEXT: &str = "\
 global：串連好幾個「domain」互相知道對方存在。一個 domain 是一台 system server + \
@@ -96,6 +98,11 @@ pub struct GlobalPlugin {
     /// `Shell` 鎖），跟 `MusicPlugin.downloads` 是同樣的做法：背景執行緒只更新
     /// 這個共用狀態，使用者用 `status` 查看結果。
     clear_status: Arc<Mutex<Option<String>>>,
+    /// TUI 用的逐格變化比對狀態，跟 `web_diff` 分開存的理由見
+    /// `table_diff::RowDiffTracker` 的說明——TUI／web 兩邊重繪頻率不同，共用
+    /// 一份會有其中一邊讀到「已經被另一邊消費掉的變化」而漏閃的 race。
+    tui_diff: Mutex<RowDiffTracker>,
+    web_diff: Mutex<RowDiffTracker>,
 }
 
 impl GlobalPlugin {
@@ -103,7 +110,14 @@ impl GlobalPlugin {
         let bridge = Arc::new(Mutex::new(None));
         let connected = Arc::new(Mutex::new(false));
         Self::spawn_supervisor(ctx.clone(), bridge.clone(), connected.clone());
-        Self { ctx, bridge, connected, clear_status: Arc::new(Mutex::new(None)) }
+        Self {
+            ctx,
+            bridge,
+            connected,
+            clear_status: Arc::new(Mutex::new(None)),
+            tui_diff: Mutex::new(RowDiffTracker::new()),
+            web_diff: Mutex::new(RowDiffTracker::new()),
+        }
     }
 
     /// 背景監督執行緒，整個程式活著期間持續跑，每 `REPORT_INTERVAL` 檢查一次
@@ -254,17 +268,13 @@ impl GlobalPlugin {
         s
     }
 
-    fn table_text(&self) -> String {
+    /// 組出目前每一列的 (row key, 每一欄的文字)，`table_text()`／
+    /// `tui_snapshot()`／`web_snapshot()` 共用同一份，只是後續分別拿去排版
+    /// 成純文字表格，或是餵給 diff tracker 算出「哪一格剛好跟上次不一樣」。
+    fn rows(&self) -> Vec<(String, Vec<String>)> {
         let mut items = merged_global_view(&self.ctx.lock().unwrap());
-        if items.is_empty() {
-            return "(還沒有任何跨 domain 裝置資料——確認 domain/bridge 有沒有設定，\n\
-                     或這台機器目前是不是 client 角色、它的 server 有沒有設定過)"
-                .to_string();
-        }
         items.sort_by(|a, b| (&a.domain, &a.report.id).cmp(&(&b.domain, &b.report.id)));
-
-        let headers = ["id", "ip", "os", "version", "mode", "device uptime", "app uptime", "disk", "alive"];
-        let rows: Vec<[String; 9]> = items
+        items
             .into_iter()
             .map(|item| {
                 let alive = item.age_secs < ALIVE_TTL.as_secs_f64();
@@ -277,8 +287,9 @@ impl GlobalPlugin {
                     "standalone" => "-".to_string(),
                     other => other.to_string(),
                 };
-                [
-                    format!("{}/{}", item.domain, item.report.id),
+                let key = format!("{}/{}", item.domain, item.report.id);
+                let cells = vec![
+                    key.clone(),
                     item.report.ip,
                     item.report.os,
                     item.report.version,
@@ -287,10 +298,31 @@ impl GlobalPlugin {
                     sysinfo::format_uptime(item.report.app_uptime_secs),
                     sysinfo::format_disk_usage(item.report.disk_free_bytes, item.report.disk_total_bytes),
                     if alive { "*".to_string() } else { String::new() },
-                ]
+                ];
+                (key, cells)
             })
-            .collect();
-        render_table(&headers, &rows)
+            .collect()
+    }
+
+    fn table_text(&self) -> String {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return "(還沒有任何跨 domain 裝置資料——確認 domain/bridge 有沒有設定，\n\
+                     或這台機器目前是不是 client 角色、它的 server 有沒有設定過)"
+                .to_string();
+        }
+        let row_values: Vec<Vec<String>> = rows.into_iter().map(|(_, cells)| cells).collect();
+        render_table(&HEADERS, &row_values)
+    }
+
+    /// 給 TUI 用的逐格 snapshot，`gui.rs` 的 `with_global` 會呼叫這個。
+    pub(crate) fn tui_snapshot(&self) -> TableSnapshot {
+        self.tui_diff.lock().unwrap().snapshot(&HEADERS, self.rows())
+    }
+
+    /// 給 web SSE 用的逐格 snapshot，`web.rs` 呼叫後轉成 JSON 推播。
+    pub(crate) fn web_snapshot(&self) -> TableSnapshot {
+        self.web_diff.lock().unwrap().snapshot(&HEADERS, self.rows())
     }
 }
 
@@ -783,7 +815,7 @@ fn clear_retained_topic(topic: &str) -> Result<()> {
 /// 組一個純文字表格，跟 `DevicePlugin` 的 `render_table` 是同一個寫法（欄寬依
 /// 這一欄裡最寬的內容決定，用 `UnicodeWidthStr` 對齊），各 plugin 各自維護一份
 /// 精簡版而不是共用，理由見 `plugins::device` 的同名函式。
-fn render_table(headers: &[&str], rows: &[[String; 9]]) -> String {
+fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(*h)).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {
