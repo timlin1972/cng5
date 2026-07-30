@@ -574,8 +574,8 @@ impl SyncTransport for CrossDomainTransport {
 }
 
 /// 從 unix epoch 秒數算出 UTC 曆法日期字串 `YYYY-MM-DD`，純算術、不依賴任何
-/// 時間函式庫——沿用這個專案 `build.rs` 算編譯時間戳同樣的原則：不為了這裡
-/// 需要一個日期字串就額外引入日期時間 crate。演算法出處：Howard Hinnant 的
+/// 時間函式庫——不為了這裡需要一個日期字串就額外引入日期時間 crate。演算法
+/// 出處：Howard Hinnant 的
 /// `civil_from_days`（把「距離 1970-01-01 過了幾天」換算成西曆年月日，是這個
 /// 換算方向被廣泛驗證過的標準寫法）。
 pub(crate) fn epoch_to_utc_date(epoch_secs: u64) -> String {
