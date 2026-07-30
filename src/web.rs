@@ -21,7 +21,7 @@ use crate::plugin::{
 };
 use crate::plugins::{
     list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
-    DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    DevicePlugin, GlobalPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 
@@ -421,8 +421,30 @@ fn panel_text_for(shell: &Mutex<Shell>, output: &OutputBuffer, name: &str) -> St
         let lines = output.all();
         let start = lines.len().saturating_sub(OUTPUT_TAIL_LINES);
         lines[start..].join("\n")
+    } else if name == "global" || name == "device" {
+        table_snapshot_json(shell, name)
     } else {
         lock_shell(shell).plugin_panel_text(name).unwrap_or_default()
+    }
+}
+
+/// `global`／`device` 這兩個 panel 在 web 這邊不是推純文字，是推結構化的
+/// JSON（表頭＋每一格的文字＋「這一格剛剛變了沒」），讓前端能逐格套用閃爍
+/// 效果，見 `frontend.html` 的 `renderTableSnapshot`。跟 `gui.rs` 的
+/// `with_global`／`with_device` 是同一個「向下轉型拿具體型別」的做法，只是
+/// 這裡要的是 web 專用的那份 `web_snapshot()`（TUI／web 各自獨立的比對狀態，
+/// 見 `table_diff::RowDiffTracker` 的說明）。
+fn table_snapshot_json(shell: &Mutex<Shell>, name: &str) -> String {
+    let mut sh = lock_shell(shell);
+    let snapshot = if name == "global" {
+        sh.plugin_mut("global").and_then(|p| p.as_any_mut().downcast_mut::<GlobalPlugin>()).map(|g| g.web_snapshot())
+    } else {
+        sh.plugin_mut("device").and_then(|p| p.as_any_mut().downcast_mut::<DevicePlugin>()).map(|d| d.web_snapshot())
+    };
+    drop(sh);
+    match snapshot {
+        Some(snapshot) => serde_json::to_string(&snapshot.to_json()).unwrap_or_default(),
+        None => String::new(),
     }
 }
 
