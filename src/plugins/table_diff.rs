@@ -1,9 +1,13 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use unicode_width::UnicodeWidthStr;
+
+/// web 前端 CSS `@keyframes cellFlash` 動畫的長度（`frontend.html` 的
+/// `.cell-flash { animation: cellFlash 1s ease-out; }`），這裡跟那邊必須
+/// 保持一致，否則 `flash_ms` 判斷「過期」的時間點跟前端動畫實際播完的時間
+/// 對不上。
+const FLASH_DURATION: Duration = Duration::from_secs(1);
 
 /// 一個表格欄位目前的文字，以及「最近一次偵測到跟上一輪不一樣」的時間點。
 /// 因為 `RowDiffTracker` 把「這個 row 是第一次出現」也算進「有變化」，一個
@@ -19,10 +23,9 @@ pub(crate) struct TableRow {
 }
 
 /// 一次「目前這個 viewer 看到的表格長什麼樣子」。`computed_at` 是這次呼叫
-/// `RowDiffTracker::snapshot` 當下的時間，用來判斷哪些格子是「這一次剛好
-/// 變化」（給 web 的 `changed` 布林值用，見 `to_json`）；TUI 端要的是持續
-/// 淡出的效果，直接用每個 `TableCell::changed_at.elapsed()`，不需要
-/// `computed_at`。
+/// `RowDiffTracker::snapshot` 當下的時間，用來算每一格的 `flash_ms`（見
+/// `to_json`）；TUI 端要的是持續淡出的效果，直接用每個
+/// `TableCell::changed_at.elapsed()`，不需要 `computed_at`。
 pub(crate) struct TableSnapshot {
     pub headers: Vec<String>,
     pub rows: Vec<TableRow>,
@@ -43,9 +46,10 @@ impl TableSnapshot {
         widths
     }
 
-    /// 轉成給 web 用的 JSON 可序列化版本：`Instant` 不能序列化，改成單純的
-    /// `changed` 布林值——`true` 代表這一格在這次 snapshot 裡剛好被偵測到
-    /// 變化（`changed_at` 剛好等於這次呼叫的 `computed_at`）。
+    /// 轉成給 web 用的 JSON 可序列化版本：`Instant` 不能序列化，改成「距離
+    /// 最近一次變化過了多少毫秒」（`flash_ms`，`None` 代表已經超過
+    /// `FLASH_DURATION`）。前端用這個算 CSS `animation-delay`，見
+    /// `JsonTableCell::flash_ms` 的說明。
     pub(crate) fn to_json(&self) -> JsonTableSnapshot {
         JsonTableSnapshot {
             headers: self.headers.clone(),
@@ -56,9 +60,10 @@ impl TableSnapshot {
                     cells: row
                         .cells
                         .iter()
-                        .map(|cell| JsonTableCell {
-                            text: cell.text.clone(),
-                            changed: cell.changed_at == self.computed_at,
+                        .map(|cell| {
+                            let elapsed = self.computed_at.duration_since(cell.changed_at);
+                            let flash_ms = (elapsed < FLASH_DURATION).then(|| elapsed.as_millis() as u64);
+                            JsonTableCell { text: cell.text.clone(), flash_ms }
                         })
                         .collect(),
                 })
@@ -81,7 +86,14 @@ pub(crate) struct JsonTableRow {
 #[derive(serde::Serialize)]
 pub(crate) struct JsonTableCell {
     pub text: String,
-    pub changed: bool,
+    /// 這一格距離最近一次偵測到變化過了多少毫秒；`None` 代表已經超過
+    /// `FLASH_DURATION`（閃爍窗口已過，或這一格從沒變化過——理論上不會發生，
+    /// 因為 `TableSnapshot` 裡的格子必定至少變化過一次，見 `TableCell` 的
+    /// 說明）。前端用這個算 CSS `animation-delay`，讓 `<tbody>` 每次 tick
+    /// 都整個重建、DOM node 全部換新的情況下，動畫還能從正確的時間點接續
+    /// 播放，不會每次重建都被打斷、跳回全白重新開始（`flash_ms` 是
+    /// `Some(0)` 代表這一格剛好在這次 snapshot 被偵測到變化）。
+    pub flash_ms: Option<u64>,
 }
 
 /// 記錄「這個 viewer 上一次看到的表格長什麼樣子」，每次呼叫 `snapshot()`
@@ -143,7 +155,7 @@ mod tests {
         let json = snapshot.to_json();
         assert_eq!(json.headers, vec!["a", "b"]);
         assert_eq!(json.rows.len(), 1);
-        assert!(json.rows[0].cells.iter().all(|c| c.changed));
+        assert!(json.rows[0].cells.iter().all(|c| c.flash_ms == Some(0)));
     }
 
     #[test]
@@ -153,17 +165,18 @@ mod tests {
         let first_changed_at = first.rows[0].cells[0].changed_at;
         let second = tracker.snapshot(&["a"], vec![("k1".to_string(), vec!["1".to_string()])]);
         assert_eq!(second.rows[0].cells[0].changed_at, first_changed_at);
-        assert!(!second.to_json().rows[0].cells[0].changed);
     }
 
     #[test]
     fn only_the_differing_column_updates() {
         let mut tracker = RowDiffTracker::new();
-        tracker.snapshot(&["a", "b"], vec![("k1".to_string(), vec!["1".to_string(), "x".to_string()])]);
-        let second = tracker.snapshot(&["a", "b"], vec![("k1".to_string(), vec!["1".to_string(), "y".to_string()])]);
-        let json = second.to_json();
-        assert!(!json.rows[0].cells[0].changed);
-        assert!(json.rows[0].cells[1].changed);
+        let first =
+            tracker.snapshot(&["a", "b"], vec![("k1".to_string(), vec!["1".to_string(), "x".to_string()])]);
+        let first_col0_changed_at = first.rows[0].cells[0].changed_at;
+        let second =
+            tracker.snapshot(&["a", "b"], vec![("k1".to_string(), vec!["1".to_string(), "y".to_string()])]);
+        assert_eq!(second.rows[0].cells[0].changed_at, first_col0_changed_at);
+        assert_ne!(second.rows[0].cells[1].changed_at, first_col0_changed_at);
     }
 
     #[test]
@@ -172,6 +185,22 @@ mod tests {
         tracker.snapshot(&["a"], vec![("k1".to_string(), vec!["1".to_string()])]);
         tracker.snapshot(&["a"], vec![]); // k1 這一輪沒出現，等同消失
         let third = tracker.snapshot(&["a"], vec![("k1".to_string(), vec!["1".to_string()])]);
-        assert!(third.to_json().rows[0].cells[0].changed);
+        assert_eq!(third.to_json().rows[0].cells[0].flash_ms, Some(0));
+    }
+
+    #[test]
+    fn flash_ms_expires_after_flash_duration() {
+        // 驗證超過 `FLASH_DURATION` 之後 `flash_ms` 會變成 `None`——直接建構
+        // 一個「很久以前變化過」的 `TableSnapshot`（`computed_at`/`changed_at`
+        // 都是私有欄位，這裡是同一個 module 底下的子 module 所以能直接組），
+        // 不用真的 sleep 一整秒拖慢測試套件。
+        let now = Instant::now();
+        let old_change = now.checked_sub(Duration::from_millis(1500)).expect("測試環境時鐘異常");
+        let snapshot = TableSnapshot {
+            headers: vec!["a".to_string()],
+            rows: vec![TableRow { cells: vec![TableCell { text: "1".to_string(), changed_at: old_change }] }],
+            computed_at: now,
+        };
+        assert_eq!(snapshot.to_json().rows[0].cells[0].flash_ms, None);
     }
 }

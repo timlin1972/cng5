@@ -1609,9 +1609,14 @@
   // `table_snapshot_json`）畫成一個真正的 `<table>`。用 `textContent` 逐格
   // 填值（不是拼 HTML 字串），這樣任何欄位內容（`global` 的資料有一部分是
   // 其他 domain 透過公開 MQTT broker 回報的字串，不能假設乾淨）都會被瀏覽器
-  // 自動跳脫，不會被當成 HTML 解析。`thead`/`tbody` 每次都整個重新建立，
-  // 所以剛變化的格子掛的 `cell-flash` class 每次都是全新 DOM node，CSS
-  // 動畫自然會重新播放一次，不用額外處理「同一個 class 不會重播」的問題。
+  // 自動跳脫，不會被當成 HTML 解析。`thead`/`tbody` 每次都整個重新建立，所以
+  // 剛變化的格子掛的 `cell-flash` class 每次都是全新 DOM node——如果單純用
+  // `animation-delay: 0s`，每次重建都會把還在播放中的動畫打斷、跳回全白重新
+  // 開始，肉眼看起來閃爍時間比設計的 1 秒短很多（後端 300ms 一個 tick 就可能
+  // 重建一次）。改用負的 `animation-delay: -Xs`（`X = flash_ms / 1000`），
+  // 讓瀏覽器把這個新 node 的動畫直接當成「已經播到第 X 秒」來算，這樣即使
+  // node 本身是全新的，淡出效果在視覺上仍然是從變化發生的那一刻算起、連續
+  // 播完整整 1 秒，不會被每次 tbody 重建打斷。
   function renderTableSnapshot(ui, snapshot) {
     const hasRows = snapshot.rows.length > 0;
     ui.empty.style.display = hasRows ? "none" : "";
@@ -1632,7 +1637,10 @@
       for (const cell of row.cells) {
         const td = document.createElement("td");
         td.textContent = cell.text;
-        if (cell.changed) td.className = "cell-flash";
+        if (cell.flash_ms !== null && cell.flash_ms !== undefined) {
+          td.className = "cell-flash";
+          td.style.animationDelay = `-${cell.flash_ms / 1000}s`;
+        }
         tr.appendChild(td);
       }
       ui.tbody.appendChild(tr);
@@ -2725,7 +2733,11 @@
     // panel 不用自己寫 retry。
     let es = null;
     if (name !== "player" && name !== "shell" && name !== "notepad" && name !== "storage") {
-      es = new EventSource(`/api/panel/${encodeURIComponent(name)}/stream`);
+      // `global`／`device` 走專屬的 `/snapshot-stream`（結構化 JSON，給逐格
+      // 閃爍表格用），其餘 panel 走原本的 `/stream`（純文字）——兩條路後端
+      // 各自獨立比對/快取，見 `web.rs` 的 `snapshot_broadcast_ticker`。
+      const streamPath = dataTableUi ? "snapshot-stream" : "stream";
+      es = new EventSource(`/api/panel/${encodeURIComponent(name)}/${streamPath}`);
       es.onmessage = (e) => {
         if (dataTableUi) {
           // `web.rs` 的 `table_snapshot_json` 送的是「JSON 物件字串」，經過
