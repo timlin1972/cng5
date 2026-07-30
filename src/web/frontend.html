@@ -625,7 +625,13 @@
   .storage-table button:hover { color: #d8dee9; }
   .data-table-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
   .data-table-empty { padding: 8px; color: #9aa4b8; }
-  .data-table { flex: 1; overflow: auto; border-collapse: collapse; width: 100%; font-size: 12px; }
+  /* `flex: 1`／`overflow: auto` 掛在這層包住 `<table>` 的 div，不是掛在
+     `<table>` 本身——`<table>` 如果直接被撐高到填滿剩下的高度，瀏覽器會把
+     多出來的高度分攤到每一列（`<tr>`）上，造成資料筆數少的時候每一列反而
+     比筆數多的時候還高。表格本身維持自然高度（每列固定高度），筆數不夠塞滿
+     panel 時，多出來的空間留白在下面，不會被攤進每一列。 */
+  .data-table-scroll { flex: 1; overflow: auto; }
+  .data-table { border-collapse: collapse; width: 100%; font-size: 12px; }
   .data-table th, .data-table td { padding: 4px 10px; border-top: 1px solid #262a33; white-space: nowrap; text-align: left; }
   .data-table th { color: #9aa4b8; font-weight: normal; border-top: none; border-bottom: 1px solid #3a4150; }
   @keyframes cellFlash {
@@ -1620,7 +1626,7 @@
   function renderTableSnapshot(ui, snapshot) {
     const hasRows = snapshot.rows.length > 0;
     ui.empty.style.display = hasRows ? "none" : "";
-    ui.table.style.display = hasRows ? "" : "none";
+    ui.scroll.style.display = hasRows ? "" : "none";
 
     ui.thead.innerHTML = "";
     const headRow = document.createElement("tr");
@@ -2618,20 +2624,23 @@
 
       const container = document.createElement("div");
       container.className = "data-table-body";
+      const scroll = document.createElement("div");
+      scroll.className = "data-table-scroll";
+      scroll.style.display = "none";
       const table = document.createElement("table");
       table.className = "data-table";
-      table.style.display = "none";
       const thead = document.createElement("thead");
       const tbody = document.createElement("tbody");
       table.appendChild(thead);
       table.appendChild(tbody);
+      scroll.appendChild(table);
       const empty = document.createElement("div");
       empty.className = "data-table-empty";
       empty.textContent = "(等待資料...)";
-      container.appendChild(table);
+      container.appendChild(scroll);
       container.appendChild(empty);
 
-      dataTableUi = { container, table, thead, tbody, empty };
+      dataTableUi = { container, scroll, table, thead, tbody, empty };
     } else {
       body = document.createElement("pre");
       body.className = "panel-body";
