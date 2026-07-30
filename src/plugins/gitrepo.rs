@@ -418,6 +418,21 @@ impl GitRepoPlugin {
                         s.push_str(&format!("  {}{}\n", display_path(&entry.path), describe_reasons(entry)));
                     }
                 }
+                s.push('\n');
+                // 獨立於上面那份（含 branch/ahead 判斷）的清單之外，另外只看
+                // `git status` 本身是不是乾淨——`uncommitted` 已經是「有沒有未
+                // 提交變更（含 untracked）」的判斷結果，這裡直接濾用，不用另外
+                // 再跑一次 git。git status 失敗（`error`）的 repo 不算進來，那是
+                // 另一種問題（沒辦法判斷乾不乾淨），已經在上面那份清單標出來了。
+                let dirty: Vec<&FlaggedRepo> = flagged.iter().filter(|entry| entry.uncommitted).collect();
+                if dirty.is_empty() {
+                    s.push_str("(尚未發現 working tree 未乾淨的 repo)\n");
+                } else {
+                    s.push_str("working tree 未乾淨的 repo（git status 不是 clean）:\n");
+                    for entry in dirty {
+                        s.push_str(&format!("  {}\n", display_path(&entry.path)));
+                    }
+                }
                 s
             }
         }
