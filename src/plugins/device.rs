@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
@@ -5,13 +6,16 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::output::OutputBuffer;
 use crate::plugin::{Plugin, SharedContext};
-use crate::plugins::REPORT_INTERVAL;
+use crate::plugins::{RowDiffTracker, TableSnapshot, REPORT_INTERVAL};
 use crate::sysinfo;
 
 /// 裝置多久沒回報就視為離線（不是刪掉資料，只是 alive 顯示 false，`report`
 /// 保留最後一次收到的內容）。設成回報間隔（`REPORT_INTERVAL`）的 3 倍，容許
 /// 偶爾漏個一兩次（網路一時不通、server 忙）還不會被判定離線。
 const ALIVE_TTL: Duration = Duration::from_secs(REPORT_INTERVAL.as_secs() * 3);
+
+const HEADERS: [&str; 10] =
+    ["  id", "ip", "os", "version", "tailscale", "mode", "device uptime", "app uptime", "disk", "alive"];
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
@@ -28,36 +32,26 @@ alive 是「多久沒回報就視為離線」（回報間隔的 3 倍），不�
 
 pub struct DevicePlugin {
     ctx: SharedContext,
+    /// TUI 用的逐格變化比對狀態，跟 `web_diff` 分開存的理由見
+    /// `table_diff::RowDiffTracker` 的說明——TUI／web 兩邊重繪頻率不同，共用
+    /// 一份會有其中一邊讀到「已經被另一邊消費掉的變化」而漏閃的 race。
+    tui_diff: Mutex<RowDiffTracker>,
+    web_diff: Mutex<RowDiffTracker>,
 }
 
 impl DevicePlugin {
     pub fn new(ctx: SharedContext) -> Self {
-        Self { ctx }
+        Self { ctx, tui_diff: Mutex::new(RowDiffTracker::new()), web_diff: Mutex::new(RowDiffTracker::new()) }
     }
 
-    /// 把目前 registry 裡的每一筆組成一個文字表格：id/ip/os/tailscale/mode/
-    /// device uptime/app uptime/alive。是不是自己不再獨立成一欄，而是拿這一
-    /// 列的 id 跟本機的 `sysinfo::hostname()` 比對，是自己就在 id 前面加上
-    /// `* `，不是就補兩個空白，讓每一列的 id 都對齊——不管這筆資料是本機自己寫進 registry
-    /// 的、還是從 server 那邊拉回來的清單，判斷方式都一樣，對 server 端跟
-    /// client 端都成立（client 顯示「哪一列是自己」用的也是它自己的
-    /// hostname，不是相信伺服器回傳的任何欄位）。alive 欄位是活著就打
-    /// `*`，沒回報就留空白。
-    fn table_text(&self) -> String {
+    /// 組出目前每一列的 (row key＝裝置 id, 每一欄的文字)，`table_text()`／
+    /// `tui_snapshot()`／`web_snapshot()` 共用同一份。
+    fn rows(&self) -> Vec<(String, Vec<String>)> {
         let my_id = sysinfo::hostname();
         let inner = self.ctx.lock().unwrap();
-        if inner.devices.is_empty() {
-            return "(還沒有任何裝置資料)".to_string();
-        }
         let mut ids: Vec<&String> = inner.devices.keys().collect();
         ids.sort();
-
-        let headers = [
-            "  id", "ip", "os", "version", "tailscale", "mode", "device uptime", "app uptime", "disk",
-            "alive",
-        ];
-        let rows: Vec<[String; 10]> = ids
-            .into_iter()
+        ids.into_iter()
             .map(|id| {
                 let entry = &inner.devices[id];
                 let alive = entry.last_seen.elapsed() < ALIVE_TTL;
@@ -75,7 +69,7 @@ impl DevicePlugin {
                     "standalone" => "-".to_string(),
                     other => other.to_string(),
                 };
-                [
+                let cells = vec![
                     id_cell,
                     entry.report.ip.clone(),
                     entry.report.os.clone(),
@@ -86,10 +80,29 @@ impl DevicePlugin {
                     sysinfo::format_uptime(entry.report.app_uptime_secs),
                     sysinfo::format_disk_usage(entry.report.disk_free_bytes, entry.report.disk_total_bytes),
                     if alive { "*".to_string() } else { String::new() },
-                ]
+                ];
+                (id.clone(), cells)
             })
-            .collect();
-        render_table(&headers, &rows)
+            .collect()
+    }
+
+    fn table_text(&self) -> String {
+        let rows = self.rows();
+        if rows.is_empty() {
+            return "(還沒有任何裝置資料)".to_string();
+        }
+        let row_values: Vec<Vec<String>> = rows.into_iter().map(|(_, cells)| cells).collect();
+        render_table(&HEADERS, &row_values)
+    }
+
+    /// 給 TUI 用的逐格 snapshot，`gui.rs` 的 `with_device` 會呼叫這個。
+    pub(crate) fn tui_snapshot(&self) -> TableSnapshot {
+        self.tui_diff.lock().unwrap().snapshot(&HEADERS, self.rows())
+    }
+
+    /// 給 web SSE 用的逐格 snapshot，`web.rs` 呼叫後轉成 JSON 推播。
+    pub(crate) fn web_snapshot(&self) -> TableSnapshot {
+        self.web_diff.lock().unwrap().snapshot(&HEADERS, self.rows())
     }
 
     fn list(&mut self, out: &OutputBuffer) -> Result<()> {
@@ -116,7 +129,7 @@ fn yes_no(b: bool) -> String {
 /// 定，用 `UnicodeWidthStr` 對齊。跟 `WeatherPlugin` 的 `render_table`/`pad`
 /// 是同一個理由，但這裡的每個儲存格都只有單行內容，不需要它處理多行儲存格
 /// 那一層複雜度，所以另外寫一份精簡版而不是共用。
-fn render_table(headers: &[&str], rows: &[[String; 10]]) -> String {
+fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
     let mut widths: Vec<usize> = headers.iter().map(|h| UnicodeWidthStr::width(*h)).collect();
     for row in rows {
         for (width, cell) in widths.iter_mut().zip(row) {
