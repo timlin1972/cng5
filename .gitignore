@@ -40,3 +40,5 @@ target
 /remote-key
 
 /upgrade-respawn.log
+
+/.worktrees
