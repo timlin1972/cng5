@@ -46,6 +46,12 @@ impl DevicePlugin {
 
     /// 組出目前每一列的 (row key＝裝置 id, 每一欄的文字)，`table_text()`／
     /// `tui_snapshot()`／`web_snapshot()` 共用同一份。
+    ///
+    /// 是不是自己不再獨立成一欄，而是拿每一列的 id 跟本機的 `sysinfo::hostname()`
+    /// 比對，是自己就在 id 前面加上 `* `，不是就補兩個空白，讓每一列的 id 都對齊。
+    /// 重點是用本機 hostname 比對，不是相信伺服器回傳的任何欄位——不管這筆資料是
+    /// 本機自己寫進 registry 的、還是從 server 那邊拉回來的清單，判斷方式都一樣，
+    /// 對 server 端跟 client 端都成立。alive 欄位是活著就打 `*`，沒回報就留空白。
     fn rows(&self) -> Vec<(String, Vec<String>)> {
         let my_id = sysinfo::hostname();
         let inner = self.ctx.lock().unwrap();
