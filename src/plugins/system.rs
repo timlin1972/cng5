@@ -163,12 +163,12 @@ impl SystemPlugin {
     ) {
         thread::spawn(move || loop {
             let current_mode = *mode.lock().unwrap();
-            let report = Self::build_report(&id, &tailscale, current_mode);
-            let server_addr = {
+            let server_addr = ctx.lock().unwrap().server_addr.clone();
+            let report = Self::build_report(&id, &tailscale, current_mode, server_addr.clone());
+            {
                 let mut inner = ctx.lock().unwrap();
                 inner.devices.insert(id.clone(), DeviceEntry { report: report.clone(), last_seen: Instant::now() });
-                inner.server_addr.clone()
-            };
+            }
             if current_mode == SystemMode::Client
                 && let Some(addr) = server_addr
             {
@@ -181,7 +181,16 @@ impl SystemPlugin {
         });
     }
 
-    fn build_report(id: &str, tailscale: &TailscaleCache, mode: SystemMode) -> DeviceReport {
+    /// `server_addr` 只在 `mode == Client` 時才會真的寫進回報內容——`server`／
+    /// `standalone` 角色即使 `ContextInner.server_addr` 底下還留著舊值（例如
+    /// 使用者之前設過、後來切換角色但沒清掉），也一律回報成 `None`，避免
+    /// topology panel 誤判成「這台機器現在正在推播給誰」。
+    fn build_report(
+        id: &str,
+        tailscale: &TailscaleCache,
+        mode: SystemMode,
+        server_addr: Option<String>,
+    ) -> DeviceReport {
         let tailscale_ip = tailscale.get();
         let ip = tailscale_ip.clone().unwrap_or_else(sysinfo::local_ip);
         let (disk_free_bytes, disk_total_bytes) = sysinfo::disk_usage(Path::new(".")).unwrap_or((0, 0));
@@ -196,6 +205,7 @@ impl SystemPlugin {
             app_uptime_secs: sysinfo::app_uptime_secs(),
             disk_free_bytes,
             disk_total_bytes,
+            server_addr: if mode == SystemMode::Client { server_addr } else { None },
         }
     }
 

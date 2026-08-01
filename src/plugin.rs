@@ -48,6 +48,14 @@ pub struct DeviceReport {
     /// 同上，總共容量（bytes）。
     #[serde(default)]
     pub disk_total_bytes: u64,
+    /// mode 是 client 且設定過 `server <ip>` 時，是這個 client 目前要推播/
+    /// 拉清單的目標 ip；`server`／`standalone` 角色，或 client 還沒設定過
+    /// server，都是 `None`。給 web UI 的 topology panel 畫「client 連到哪個
+    /// server」那條線用（見 `system.rs` 的 `build_report`）。舊版（還沒有
+    /// 這個欄位的 build）傳過來的 JSON 缺這個 key 時解析成 `None`，跟其他
+    /// 欄位同一套「缺欄位不能讓整筆資料解析失敗」的理由。
+    #[serde(default)]
+    pub server_addr: Option<String>,
 }
 
 fn default_os() -> String {

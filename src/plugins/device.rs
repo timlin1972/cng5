@@ -198,6 +198,7 @@ mod tests {
             app_uptime_secs: 0,
             disk_free_bytes: 0,
             disk_total_bytes: 0,
+            server_addr: None,
         }
     }
 
