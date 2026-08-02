@@ -646,7 +646,7 @@
   .cell-flash { animation: cellFlash 1s ease-out; }
   .topology-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
   .topology-svg { flex: 1; width: 100%; height: 100%; }
-  .topology-node { cursor: default; }
+  .topology-node { cursor: grab; }
   .topology-node-label { font-size: 10px; fill: #d8dee9; text-anchor: middle; pointer-events: none; }
   .topology-domain-box { fill: none; stroke: #3a4150; stroke-width: 1; stroke-dasharray: 5,3; }
   .topology-domain-label { font-size: 10px; fill: #6b7280; }
@@ -1784,11 +1784,53 @@
     const domainEls = new Map();
     const edgeEls = new Map();
     const nodeEls = new Map();
+    // 拖曳中的節點 key／DOM 元素——拖曳期間 `tick()` 會跳過這個節點的力學
+    // 積分（見下面），完全交給滑鼠位置決定座標，放開滑鼠後才恢復正常物理。
+    let draggingKey = null;
+    let draggingEl = null;
 
     function panelSize() {
       const rect = svg.getBoundingClientRect();
       return { width: rect.width || 400, height: rect.height || 300 };
     }
+
+    // 把滑鼠事件的螢幕座標換成跟節點 `x`/`y` 同一套座標系（SVG 左上角為原點）。
+    function svgPoint(e) {
+      const rect = svg.getBoundingClientRect();
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    }
+
+    function onNodeMouseDown(key, group, e) {
+      e.preventDefault();
+      draggingKey = key;
+      draggingEl = group;
+      group.style.cursor = "grabbing";
+      const n = sim.nodes.get(key);
+      if (n) {
+        n.vx = 0;
+        n.vy = 0;
+      }
+    }
+
+    function onDocumentMouseMove(e) {
+      if (!draggingKey) return;
+      const n = sim.nodes.get(draggingKey);
+      if (!n) return;
+      const p = svgPoint(e);
+      n.x = p.x;
+      n.y = p.y;
+      n.vx = 0;
+      n.vy = 0;
+    }
+
+    function onDocumentMouseUp() {
+      if (draggingEl) draggingEl.style.cursor = "grab";
+      draggingKey = null;
+      draggingEl = null;
+    }
+
+    document.addEventListener("mousemove", onDocumentMouseMove);
+    document.addEventListener("mouseup", onDocumentMouseUp);
 
     function makeNode(isBroker) {
       const { width, height } = panelSize();
@@ -1823,6 +1865,7 @@
     function tick() {
       const { width, height } = panelSize();
       const entries = [...sim.nodes.values()];
+      const draggedNode = draggingKey ? sim.nodes.get(draggingKey) : null;
       for (const n of entries) {
         n.fx = 0;
         n.fy = 0;
@@ -1869,6 +1912,7 @@
       const CENTER_STRENGTH = 0.01;
       const DAMPING = 0.85;
       for (const n of entries) {
+        if (n === draggedNode) continue;
         n.fx += (width / 2 - n.x) * CENTER_STRENGTH;
         n.fy += (height / 2 - n.y) * CENTER_STRENGTH;
         n.vx = (n.vx + n.fx) * DAMPING;
@@ -1935,6 +1979,7 @@
       group.addEventListener("mouseenter", () => showTooltip(key));
       group.addEventListener("mousemove", positionTooltip);
       group.addEventListener("mouseleave", hideTooltip);
+      group.addEventListener("mousedown", (e) => onNodeMouseDown(key, group, e));
       return { group, shape, label };
     }
 
@@ -2062,6 +2107,8 @@
       stop() {
         clearInterval(intervalId);
         if (rafId) cancelAnimationFrame(rafId);
+        document.removeEventListener("mousemove", onDocumentMouseMove);
+        document.removeEventListener("mouseup", onDocumentMouseUp);
       },
     };
   }
