@@ -43,6 +43,30 @@
   .data-table th { color: #9aa4b8; font-weight: normal; border-top: none; border-bottom: 1px solid #3a4150; }
   .plain-panel { white-space: pre-wrap; font-size: 15px; line-height: 1.6; }
   .empty-hint { color: #9aa4b8; padding: 16px; font-size: 15px; }
+
+  /* topology 分頁專用，跟桌面版 frontend.html 的 `.topology-*` 是同一套
+     設計，這裡各自一份（這次刻意不共用 JS/CSS 模組，見 spec 的取捨說明）。 */
+  #topology-wrap { position: relative; height: 100%; }
+  .topology-svg { width: 100%; height: 100%; }
+  .topology-node { cursor: default; }
+  .topology-node-label { font-size: 12px; fill: #d8dee9; text-anchor: middle; pointer-events: none; }
+  .topology-domain-box { fill: none; stroke: #3a4150; stroke-width: 1; stroke-dasharray: 5,3; }
+  .topology-domain-label { font-size: 11px; fill: #6b7280; }
+  .topology-edge { stroke: #5a6272; stroke-width: 1.5; }
+  .topology-broker { fill: #1b1e26; stroke: #d8dee9; stroke-width: 2; }
+  .topology-tooltip {
+    position: absolute;
+    display: none;
+    pointer-events: none;
+    background: #1b1e26;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    padding: 8px 12px;
+    font-size: 13px;
+    color: #d8dee9;
+    white-space: pre;
+    z-index: 20;
+  }
 </style>
 </head>
 <body>
@@ -181,6 +205,360 @@
     };
   }
 
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const TOPOLOGY_POLL_MS = 2500;
+
+  // 合併 `/api/device/list`（本地 domain）跟 `/api/global/list`（`domain`
+  // 設定過的話包含本地 domain + 其他 domain 透過 MQTT 收到的）成一份節點
+  // 清單，跟桌面版 frontend.html 的 `fetchTopologyNodes` 同一份邏輯（這裡
+  // 各自一份，見 spec 的取捨說明）。
+  async function fetchTopologyNodes() {
+    let deviceList = [];
+    let globalList = [];
+    try {
+      [deviceList, globalList] = await Promise.all([
+        fetch("/api/device/list").then((r) => r.json()),
+        fetch("/api/global/list").then((r) => r.json()),
+      ]);
+    } catch (_err) {
+      return new Map();
+    }
+    const nodes = new Map();
+    for (const item of globalList) {
+      const key = `${item.domain}/${item.report.id}`;
+      nodes.set(key, { key, domain: item.domain, report: item.report, ageSecs: item.age_secs });
+    }
+    const idsFromGlobal = new Set([...nodes.values()].map((n) => n.report.id));
+    for (const item of deviceList) {
+      if (idsFromGlobal.has(item.report.id)) continue;
+      const key = `local/${item.report.id}`;
+      nodes.set(key, { key, domain: null, report: item.report, ageSecs: item.age_secs });
+    }
+    return nodes;
+  }
+
+  // 邊代表「設定上的關係」，不即時驗證真的連上：每個 `mode === "server"`
+  // 的節點都連去一個共用的 `"broker"` 節點；每個 `report.server_addr` 有值
+  // 的節點，連去 ip 等於那個值的節點（找不到就不畫這條線）。
+  function computeTopologyEdges(nodes) {
+    const byIp = new Map();
+    for (const n of nodes.values()) byIp.set(n.report.ip, n.key);
+    const edges = [];
+    let hasServer = false;
+    for (const n of nodes.values()) {
+      if (n.report.mode === "server") {
+        hasServer = true;
+        edges.push({ from: n.key, to: "broker" });
+      }
+      if (n.report.server_addr) {
+        const targetKey = byIp.get(n.report.server_addr);
+        if (targetKey && targetKey !== n.key) edges.push({ from: n.key, to: targetKey });
+      }
+    }
+    return { edges, hasServer };
+  }
+
+  // 建立 topology 分頁：定期 poll 上面兩個端點合併節點、跑一個手刻的簡化版
+  // 力導向模擬（節點互推、邊當彈簧、往中心的微弱向心力、每幀衰減速度），
+  // 用 SVG 逐幀更新座標。跟桌面版 topology panel 同一套演算法，唯一差異是
+  // **這次不支援手指拖動節點**（純瀏覽）。回傳 `stop` 函式，切分頁時呼叫，
+  // 清掉 interval／animation frame，不留背景在跑。
+  function startTopologyTab(container) {
+    const wrap = document.createElement("div");
+    wrap.id = "topology-wrap";
+    const svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("class", "topology-svg");
+    const domainLayer = document.createElementNS(SVGNS, "g");
+    const edgeLayer = document.createElementNS(SVGNS, "g");
+    const nodeLayer = document.createElementNS(SVGNS, "g");
+    svg.appendChild(domainLayer);
+    svg.appendChild(edgeLayer);
+    svg.appendChild(nodeLayer);
+    const tooltip = document.createElement("div");
+    tooltip.className = "topology-tooltip";
+    wrap.appendChild(svg);
+    wrap.appendChild(tooltip);
+    container.appendChild(wrap);
+
+    const sim = { nodes: new Map(), edges: [] };
+    const domainEls = new Map();
+    const edgeEls = new Map();
+    const nodeEls = new Map();
+
+    function panelSize() {
+      const rect = svg.getBoundingClientRect();
+      return { width: rect.width || 400, height: rect.height || 300 };
+    }
+
+    function makeNode(isBroker) {
+      const { width, height } = panelSize();
+      return {
+        x: width / 2 + (Math.random() - 0.5) * 60,
+        y: height / 2 + (Math.random() - 0.5) * 60,
+        vx: 0,
+        vy: 0,
+        fx: 0,
+        fy: 0,
+        isBroker,
+        data: null,
+      };
+    }
+
+    function applyPoll(nodesData, hasServer) {
+      const wanted = new Set(nodesData.keys());
+      if (hasServer) wanted.add("broker");
+      for (const key of [...sim.nodes.keys()]) {
+        if (!wanted.has(key)) sim.nodes.delete(key);
+      }
+      for (const key of wanted) {
+        let n = sim.nodes.get(key);
+        if (!n) {
+          n = makeNode(key === "broker");
+          sim.nodes.set(key, n);
+        }
+        if (key !== "broker") n.data = nodesData.get(key);
+      }
+    }
+
+    function tick() {
+      const { width, height } = panelSize();
+      const entries = [...sim.nodes.values()];
+      for (const n of entries) {
+        n.fx = 0;
+        n.fy = 0;
+      }
+
+      const REPULSION = 2200;
+      for (let i = 0; i < entries.length; i++) {
+        for (let j = i + 1; j < entries.length; j++) {
+          const a = entries[i];
+          const b = entries[j];
+          const dx = a.x - b.x;
+          const dy = a.y - b.y;
+          let distSq = dx * dx + dy * dy;
+          if (distSq < 1) distSq = 1;
+          const dist = Math.sqrt(distSq);
+          const force = REPULSION / distSq;
+          const fx = (dx / dist) * force;
+          const fy = (dy / dist) * force;
+          a.fx += fx;
+          a.fy += fy;
+          b.fx -= fx;
+          b.fy -= fy;
+        }
+      }
+
+      const SPRING_LENGTH = 90;
+      const SPRING_STRENGTH = 0.02;
+      for (const edge of sim.edges) {
+        const a = sim.nodes.get(edge.from);
+        const b = sim.nodes.get(edge.to);
+        if (!a || !b) continue;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        const stretch = dist - SPRING_LENGTH;
+        const fx = (dx / dist) * stretch * SPRING_STRENGTH;
+        const fy = (dy / dist) * stretch * SPRING_STRENGTH;
+        a.fx += fx;
+        a.fy += fy;
+        b.fx -= fx;
+        b.fy -= fy;
+      }
+
+      const CENTER_STRENGTH = 0.01;
+      const DAMPING = 0.85;
+      for (const n of entries) {
+        n.fx += (width / 2 - n.x) * CENTER_STRENGTH;
+        n.fy += (height / 2 - n.y) * CENTER_STRENGTH;
+        n.vx = (n.vx + n.fx) * DAMPING;
+        n.vy = (n.vy + n.fy) * DAMPING;
+        n.x += n.vx;
+        n.y += n.vy;
+      }
+    }
+
+    function isAlive(n) {
+      return !!n.data && n.data.ageSecs * 1000 < ALIVE_TTL_MS;
+    }
+
+    function roleColor(mode) {
+      if (mode === "server") return "#6f9dff";
+      if (mode === "client") return "#4caf7d";
+      return "#5a6272";
+    }
+
+    function showTooltip(key) {
+      const n = sim.nodes.get(key);
+      if (!n || n.isBroker || !n.data) {
+        tooltip.style.display = "none";
+        return;
+      }
+      const r = n.data.report;
+      const alive = isAlive(n) ? "是" : "否";
+      tooltip.textContent =
+        `id: ${r.id}\nip: ${r.ip}\nos: ${r.os}\nversion: ${r.version}\nmode: ${r.mode}\n` +
+        `device uptime: ${formatUptimeJs(r.device_uptime_secs)}\napp uptime: ${formatUptimeJs(r.app_uptime_secs)}\n` +
+        `disk: ${formatDiskJs(r.disk_free_bytes, r.disk_total_bytes)}\nalive: ${alive}`;
+      tooltip.style.display = "block";
+    }
+
+    function positionTooltip(e) {
+      if (tooltip.style.display !== "block") return;
+      const rect = wrap.getBoundingClientRect();
+      tooltip.style.left = `${e.clientX - rect.left + 12}px`;
+      tooltip.style.top = `${e.clientY - rect.top + 12}px`;
+    }
+
+    function hideTooltip() {
+      tooltip.style.display = "none";
+    }
+
+    function buildNodeEl(key, n) {
+      const group = document.createElementNS(SVGNS, "g");
+      group.setAttribute("class", "topology-node");
+      let shape;
+      if (n.isBroker) {
+        shape = document.createElementNS(SVGNS, "polygon");
+        shape.setAttribute("class", "topology-broker");
+        shape.setAttribute("points", "0,-20 17,-10 17,10 0,20 -17,10 -17,-10");
+      } else {
+        shape = document.createElementNS(SVGNS, "circle");
+        shape.setAttribute("r", "18");
+      }
+      group.appendChild(shape);
+      const label = document.createElementNS(SVGNS, "text");
+      label.setAttribute("class", "topology-node-label");
+      label.setAttribute("y", "32");
+      group.appendChild(label);
+      nodeLayer.appendChild(group);
+      group.addEventListener("mouseenter", () => showTooltip(key));
+      group.addEventListener("mousemove", positionTooltip);
+      group.addEventListener("mouseleave", hideTooltip);
+      return { group, shape, label };
+    }
+
+    function render() {
+      const groups = new Map();
+      for (const [, n] of sim.nodes) {
+        if (n.isBroker || !n.data || !n.data.domain) continue;
+        if (!groups.has(n.data.domain)) groups.set(n.data.domain, []);
+        groups.get(n.data.domain).push(n);
+      }
+      const seenDomains = new Set();
+      for (const [domain, members] of groups) {
+        seenDomains.add(domain);
+        const pad = 30;
+        const xs = members.map((m) => m.x);
+        const ys = members.map((m) => m.y);
+        const x = Math.min(...xs) - pad;
+        const y = Math.min(...ys) - pad;
+        const w = Math.max(...xs) - Math.min(...xs) + pad * 2;
+        const h = Math.max(...ys) - Math.min(...ys) + pad * 2;
+        let box = domainEls.get(domain);
+        if (!box) {
+          box = { rect: document.createElementNS(SVGNS, "rect"), label: document.createElementNS(SVGNS, "text") };
+          box.rect.setAttribute("class", "topology-domain-box");
+          box.label.setAttribute("class", "topology-domain-label");
+          domainLayer.appendChild(box.rect);
+          domainLayer.appendChild(box.label);
+          domainEls.set(domain, box);
+        }
+        box.rect.setAttribute("x", x);
+        box.rect.setAttribute("y", y);
+        box.rect.setAttribute("width", w);
+        box.rect.setAttribute("height", h);
+        box.rect.setAttribute("rx", 12);
+        box.label.setAttribute("x", x + 8);
+        box.label.setAttribute("y", y + 16);
+        box.label.textContent = domain;
+      }
+      for (const [domain, box] of [...domainEls]) {
+        if (!seenDomains.has(domain)) {
+          box.rect.remove();
+          box.label.remove();
+          domainEls.delete(domain);
+        }
+      }
+
+      const seenEdges = new Set();
+      for (const edge of sim.edges) {
+        const a = sim.nodes.get(edge.from);
+        const b = sim.nodes.get(edge.to);
+        if (!a || !b) continue;
+        const ekey = `${edge.from}|${edge.to}`;
+        seenEdges.add(ekey);
+        let line = edgeEls.get(ekey);
+        if (!line) {
+          line = document.createElementNS(SVGNS, "line");
+          line.setAttribute("class", "topology-edge");
+          edgeLayer.appendChild(line);
+          edgeEls.set(ekey, line);
+        }
+        line.setAttribute("x1", a.x);
+        line.setAttribute("y1", a.y);
+        line.setAttribute("x2", b.x);
+        line.setAttribute("y2", b.y);
+      }
+      for (const [ekey, line] of [...edgeEls]) {
+        if (!seenEdges.has(ekey)) {
+          line.remove();
+          edgeEls.delete(ekey);
+        }
+      }
+
+      const seenNodes = new Set();
+      for (const [key, n] of sim.nodes) {
+        seenNodes.add(key);
+        let el = nodeEls.get(key);
+        if (!el) {
+          el = buildNodeEl(key, n);
+          nodeEls.set(key, el);
+        }
+        el.group.setAttribute("transform", `translate(${n.x},${n.y})`);
+        if (n.isBroker) {
+          el.label.textContent = "MQTT broker";
+        } else if (n.data) {
+          const alive = isAlive(n);
+          el.shape.setAttribute("fill", alive ? roleColor(n.data.report.mode) : "#3a4150");
+          el.shape.setAttribute("stroke", alive ? "none" : "#6b7280");
+          el.shape.setAttribute("stroke-width", alive ? "0" : "2");
+          el.shape.setAttribute("stroke-dasharray", alive ? "0" : "3,3");
+          el.label.textContent = n.data.report.id;
+        }
+      }
+      for (const [key, el] of [...nodeEls]) {
+        if (!seenNodes.has(key)) {
+          el.group.remove();
+          nodeEls.delete(key);
+        }
+      }
+    }
+
+    async function pollOnce() {
+      const nodesData = await fetchTopologyNodes();
+      const { edges, hasServer } = computeTopologyEdges(nodesData);
+      applyPoll(nodesData, hasServer);
+      sim.edges = edges;
+    }
+
+    let rafId = null;
+    function loop() {
+      tick();
+      render();
+      rafId = requestAnimationFrame(loop);
+    }
+
+    pollOnce();
+    loop();
+    const intervalId = setInterval(pollOnce, TOPOLOGY_POLL_MS);
+
+    return function stop() {
+      clearInterval(intervalId);
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }
+
   const TABS = [
     { name: "device", icon: "📟", label: "device" },
     { name: "global", icon: "🌍", label: "global" },
@@ -195,15 +573,7 @@
   const TAB_MODULES = {
     device: { start: makeListTab("/api/device/list") },
     global: { start: makeListTab("/api/global/list") },
-    topology: {
-      start(container) {
-        const hint = document.createElement("div");
-        hint.className = "empty-hint";
-        hint.textContent = "(topology 分頁尚未實作)";
-        container.appendChild(hint);
-        return function stop() {};
-      },
-    },
+    topology: { start: startTopologyTab },
     weather: { start: makePlainPanelTab("weather") },
     system: { start: makePlainPanelTab("system") },
     player: {
