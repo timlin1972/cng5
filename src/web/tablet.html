@@ -67,6 +67,26 @@
     white-space: pre;
     z-index: 20;
   }
+
+  /* player 分頁：只有播放控制，沒有檔案清單/上傳/下載，版面比桌面版
+     player panel 簡單很多。按鈕做成 56px 圓形，觸控好按。 */
+  .player-tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; height: 100%; padding: 24px; }
+  .player-tab-track { font-size: 17px; text-align: center; word-break: break-all; }
+  .player-tab-seek-row { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 480px; }
+  .player-tab-seek-row input[type="range"] { flex: 1; }
+  .player-tab-time { font-size: 13px; color: #9aa4b8; white-space: nowrap; }
+  .player-tab-transport { display: flex; align-items: center; gap: 24px; }
+  .player-tab-transport button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    font-size: 22px;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    cursor: pointer;
+  }
+  .player-tab-transport button:active { background: #323844; }
 </style>
 </head>
 <body>
@@ -559,6 +579,128 @@
     };
   }
 
+  // 建立 player 分頁：只做播放控制（播放/暫停/上一首/下一首/拖進度），
+  // 不做檔案上傳/下載/刪除——假設歌曲已經在 `music/` 資料夾裡，這裡只是
+  // 讀現成的檔名清單當播放清單用。切走這個分頁時 `stop()` 會把音樂暫停，
+  // 不會留著在背景繼續播。
+  function startPlayerTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "player-tab";
+
+    const trackName = document.createElement("div");
+    trackName.className = "player-tab-track";
+    trackName.textContent = "(尚未載入歌曲)";
+
+    const seekRow = document.createElement("div");
+    seekRow.className = "player-tab-seek-row";
+    const seekBar = document.createElement("input");
+    seekBar.type = "range";
+    seekBar.min = "0";
+    seekBar.max = "0";
+    seekBar.value = "0";
+    seekBar.step = "0.1";
+    const timeLabel = document.createElement("span");
+    timeLabel.className = "player-tab-time";
+    timeLabel.textContent = "0:00/0:00";
+    seekRow.appendChild(seekBar);
+    seekRow.appendChild(timeLabel);
+
+    const transport = document.createElement("div");
+    transport.className = "player-tab-transport";
+    const prevBtn = document.createElement("button");
+    prevBtn.textContent = "⏮";
+    prevBtn.title = "上一首";
+    const playPauseBtn = document.createElement("button");
+    playPauseBtn.textContent = "▶";
+    playPauseBtn.title = "播放/暫停";
+    const nextBtn = document.createElement("button");
+    nextBtn.textContent = "⏭";
+    nextBtn.title = "下一首";
+    transport.appendChild(prevBtn);
+    transport.appendChild(playPauseBtn);
+    transport.appendChild(nextBtn);
+
+    wrap.appendChild(trackName);
+    wrap.appendChild(seekRow);
+    wrap.appendChild(transport);
+    container.appendChild(wrap);
+
+    const audio = document.createElement("audio");
+    container.appendChild(audio);
+
+    let files = [];
+    let index = -1;
+    let seeking = false;
+    let stopped = false;
+
+    function formatPlayerTime(seconds) {
+      if (!Number.isFinite(seconds)) return "0:00";
+      const total = Math.floor(seconds);
+      const m = Math.floor(total / 60);
+      const s = total % 60;
+      return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    function loadIndex(i, autoplay) {
+      if (files.length === 0) return;
+      index = ((i % files.length) + files.length) % files.length;
+      const name = files[index];
+      trackName.textContent = name;
+      audio.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
+      if (autoplay) audio.play();
+    }
+
+    prevBtn.addEventListener("click", () => loadIndex(index - 1, true));
+    nextBtn.addEventListener("click", () => loadIndex(index + 1, true));
+    playPauseBtn.addEventListener("click", () => {
+      if (index < 0) {
+        loadIndex(0, true);
+        return;
+      }
+      if (audio.paused) audio.play();
+      else audio.pause();
+    });
+
+    audio.addEventListener("play", () => {
+      playPauseBtn.textContent = "⏸";
+    });
+    audio.addEventListener("pause", () => {
+      playPauseBtn.textContent = "▶";
+    });
+    audio.addEventListener("ended", () => loadIndex(index + 1, true));
+    audio.addEventListener("loadedmetadata", () => {
+      seekBar.max = String(audio.duration || 0);
+    });
+    audio.addEventListener("timeupdate", () => {
+      if (!seeking) seekBar.value = String(audio.currentTime);
+      timeLabel.textContent = `${formatPlayerTime(audio.currentTime)}/${formatPlayerTime(audio.duration)}`;
+    });
+    seekBar.addEventListener("input", () => {
+      seeking = true;
+    });
+    seekBar.addEventListener("change", () => {
+      audio.currentTime = Number(seekBar.value);
+      seeking = false;
+    });
+
+    fetch("/api/music/files")
+      .then((r) => r.json())
+      .then((names) => {
+        if (stopped) return;
+        files = names;
+        if (files.length > 0) loadIndex(0, false);
+        else trackName.textContent = "(沒有歌曲檔案)";
+      })
+      .catch(() => {
+        if (!stopped) trackName.textContent = "(讀取歌曲清單失敗)";
+      });
+
+    return function stop() {
+      stopped = true;
+      audio.pause();
+    };
+  }
+
   const TABS = [
     { name: "device", icon: "📟", label: "device" },
     { name: "global", icon: "🌍", label: "global" },
@@ -576,15 +718,7 @@
     topology: { start: startTopologyTab },
     weather: { start: makePlainPanelTab("weather") },
     system: { start: makePlainPanelTab("system") },
-    player: {
-      start(container) {
-        const hint = document.createElement("div");
-        hint.className = "empty-hint";
-        hint.textContent = "(player 分頁尚未實作)";
-        container.appendChild(hint);
-        return function stop() {};
-      },
-    },
+    player: { start: startPlayerTab },
   };
 
   const content = document.getElementById("content");
