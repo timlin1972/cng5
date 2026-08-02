@@ -44,3 +44,11 @@ target
 /.worktrees
 
 /.superpowers
+
+# Android（tablet APK 子專案）
+/android/local.properties
+/android/.gradle
+/android/build
+/android/*/build
+/android/*.iml
+/android/.idea
