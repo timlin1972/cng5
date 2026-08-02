@@ -153,11 +153,16 @@
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    for (const item of items) {
+    const sorted = [...items].sort((a, b) => {
+      const keyA = a.domain ? `${a.domain}/${a.report.id}` : a.report.id;
+      const keyB = b.domain ? `${b.domain}/${b.report.id}` : b.report.id;
+      return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
+    });
+    for (const item of sorted) {
       const r = item.report;
       const alive = item.age_secs * 1000 < ALIVE_TTL_MS;
       const values = [
-        r.id,
+        item.domain ? `${item.domain}/${r.id}` : r.id,
         r.ip,
         r.os,
         r.version,
@@ -647,7 +652,7 @@
       const name = files[index];
       trackName.textContent = name;
       audio.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
-      if (autoplay) audio.play();
+      if (autoplay) audio.play().catch(() => {});
     }
 
     prevBtn.addEventListener("click", () => loadIndex(index - 1, true));
@@ -657,7 +662,7 @@
         loadIndex(0, true);
         return;
       }
-      if (audio.paused) audio.play();
+      if (audio.paused) audio.play().catch(() => {});
       else audio.pause();
     });
 
@@ -710,8 +715,9 @@
     { name: "player", icon: "🎵", label: "player" },
   ];
 
-  // topology／player 分頁在 Task 2／Task 3 才會實作，這裡先放佔位分頁，
-  // 避免點下去整個分頁系統壞掉。
+  // `TAB_MODULES` 把每個分頁名稱對應到一個模組：`start(container)` 掛上
+  // 內容並回傳 `stopFn`，切分頁時呼叫該 `stopFn` 清掉 interval／EventSource
+  // ／animation frame，不留背景在跑。
   const TAB_MODULES = {
     device: { start: makeListTab("/api/device/list") },
     global: { start: makeListTab("/api/global/list") },
@@ -732,12 +738,12 @@
       activeStop();
       activeStop = null;
     }
+    content.innerHTML = "";
+    activeStop = TAB_MODULES[name].start(content);
     activeName = name;
     for (const btn of tabbar.querySelectorAll("button")) {
       btn.classList.toggle("active", btn.dataset.name === name);
     }
-    content.innerHTML = "";
-    activeStop = TAB_MODULES[name].start(content);
   }
 
   for (const t of TABS) {
