@@ -67,6 +67,29 @@ class MainActivity : Activity() {
         } else {
             showSettings()
         }
+
+        setupCornerLongPress()
+    }
+
+    private fun setupCornerLongPress() {
+        val cornerIds = listOf(R.id.corner_tl, R.id.corner_tr, R.id.corner_bl, R.id.corner_br)
+        val longPressRunnable = Runnable { showSettings() }
+        for (id in cornerIds) {
+            findViewById<View>(id).setOnTouchListener { _, event ->
+                when (event.action) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        retryHandler.postDelayed(longPressRunnable, 2000)
+                        true
+                    }
+                    android.view.MotionEvent.ACTION_UP,
+                    android.view.MotionEvent.ACTION_CANCEL -> {
+                        retryHandler.removeCallbacks(longPressRunnable)
+                        true
+                    }
+                    else -> false
+                }
+            }
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -78,6 +101,7 @@ class MainActivity : Activity() {
 
     private fun showSettings() {
         retryHandler.removeCallbacks(retryRunnable)
+        urlInput.setText(prefs.get() ?: "")
         settingsView.visibility = View.VISIBLE
         webView.visibility = View.GONE
         errorText.visibility = View.GONE
