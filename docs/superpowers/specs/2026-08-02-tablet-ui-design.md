@@ -14,9 +14,12 @@
 
 ## 範圍（MVP）
 
-只做 5 個分頁：**device／global／topology／weather／system**。其他既有
-plugin（storage／notepad／music／shell／output／wol／gitrepo／sync／
-remote）這次不做，之後有需要再擴充。
+只做 6 個分頁：**device／global／topology／weather／system／player**。
+其他既有 plugin（storage／notepad／shell／output／wol／gitrepo／sync／
+remote）這次不做，之後有需要再擴充。`player` 分頁刻意大幅簡化：只做播放
+控制（播放/暫停/上一首/下一首/拖進度），不做檔案上傳/下載/刪除管理——
+假設歌曲已經在 `music/` 資料夾裡，跟桌面版 `player` panel（含檔案清單/
+下載/封面/歌詞）不是同一個等級的功能。
 
 ## 新路由與檔案
 
@@ -27,15 +30,17 @@ remote）這次不做，之後有需要再擴充。
   - `const TABLET_HTML: &str = include_str!("web/tablet.html");`
   - `async fn tablet_index() -> impl Responder { HttpResponse::Ok().content_type("text/html; charset=utf-8").body(TABLET_HTML) }`
   - 路由 `.route("/tablet", web::get().to(tablet_index))`。
-- 不新增任何其他後端端點——5 個分頁完全靠既有的 `/api/device/list`、
-  `/api/global/list`、`/api/panel/weather/stream`、`/api/panel/system/stream`。
+- 不新增任何其他後端端點——6 個分頁完全靠既有的 `/api/device/list`、
+  `/api/global/list`、`/api/panel/weather/stream`、`/api/panel/system/stream`、
+  `/api/music/files`、`/api/music/file/{name}/audio`。
 
 ## 版面
 
 - 畫面分兩塊：上面是內容區（填滿剩餘空間），下面固定一條分頁列（視覺化
   companion 確認過的方案：分頁列在下面，觸控裝置手持時拇指好按）。
-- 分頁列 5 個項目（device/global/topology/weather/system），點一個切一個，
-  同一時間只顯示一個分頁的內容——不像桌面版可以同時開好幾個浮動 panel。
+- 分頁列 6 個項目（device/global/topology/weather/system/player），點一個
+  切一個，同一時間只顯示一個分頁的內容——不像桌面版可以同時開好幾個浮動
+  panel。
 - 沒有拖拉/縮放/最小化這些桌面版才有的操作；字級、間距、可點擊區域都比
   桌面版大一些，符合觸控裝置的操作習慣。
 - 不做「自動偵測螢幕尺寸切換模式」——使用者直接用平板瀏覽器開
@@ -56,15 +61,20 @@ remote）這次不做，之後有需要再擴充。
 - **weather**／**system**：沿用桌面版現有的「純文字 panel」機制，訂閱
   `/api/panel/weather/stream`／`/api/panel/system/stream`，內容原樣顯示
   （跟桌面版這兩個 panel 顯示的文字一致）。
+- **player**：進分頁時讀一次 `/api/music/files`（現成的檔名清單，已排序）
+  當播放清單，`<audio>` 直接打 `/api/music/file/{name}/audio`。只有
+  播放/暫停/上一首/下一首/拖進度五個控制，沒有檔案清單 UI、上傳、下載、
+  刪除、封面、歌詞——這些都是桌面版 `player` panel 才有的功能，這次不做。
 
 ## 分頁切換的資源生命週期
 
 同一時間只有**目前顯示中**的分頁在跑背景工作（poll interval／SSE
-連線／topology 的 `requestAnimationFrame` 力導向迴圈）；切到別的分頁時，
-舊分頁要停掉自己的背景工作（跟桌面版 topology panel 關閉時呼叫 `stop()`
-是同一個理由——平板上背景耗電/流量比桌面瀏覽器更值得省，沒有理由讓 5 個
-分頁同時都在背景輪詢）。每個分頁模組對外提供 `start()`/`stop()` 兩個函式，
-切分頁時依序呼叫「舊分頁 `stop()` → 新分頁 `start()`」。
+連線／topology 的 `requestAnimationFrame` 力導向迴圈／player 的音訊播放）；
+切到別的分頁時，舊分頁要停掉自己的背景工作（跟桌面版 topology panel 關閉
+時呼叫 `stop()` 是同一個理由——平板上背景耗電/流量比桌面瀏覽器更值得省，
+沒有理由讓好幾個分頁同時都在背景輪詢，player 分頁切走後音樂也要跟著停，
+不能背景繼續播）。每個分頁模組對外提供 `start(container) -> stop` 這一個
+介面，切分頁時依序呼叫「舊分頁 `stop()` → 新分頁 `start()`」。
 
 ## 安全性
 
@@ -74,8 +84,10 @@ MQTT broker 收到的）的文字內容，一律用 `textContent` 填值，不�
 
 ## 不做的事
 
-- 不做 storage／notepad／music／shell／output／wol／gitrepo／sync／
-  remote 這些分頁——MVP 範圍只有前面列的 5 個。
+- 不做 storage／notepad／shell／output／wol／gitrepo／sync／remote 這些
+  分頁——MVP 範圍只有前面列的 6 個。
+- player 分頁不做檔案上傳/下載/刪除管理、不顯示封面/歌詞——只有播放
+  控制，見上面「分頁內容與資料來源」。
 - 不支援 topology 分頁的手指拖動節點——純瀏覽，之後有需要再加 touch
   事件處理。
 - 不做「自動偵測螢幕尺寸/裝置類型」在同一個網址切換桌面版/平板版
@@ -99,7 +111,7 @@ MQTT broker 收到的）的文字內容，一律用 `textContent` 填值，不�
   一樣沒有自動化測試，靠：
   - `node --check` 對主要 `<script>` 內容做語法檢查。
   - 手動操作：在瀏覽器（模擬平板尺寸的視窗，或實機）開
-    `http://<機器>:9759/tablet`，依序點 5 個分頁，確認每個分頁都顯示
+    `http://<機器>:9759/tablet`，依序點 6 個分頁，確認每個分頁都顯示
     正確內容、切分頁時舊分頁的背景工作確實停止（DevTools 觀察沒有殘留
     的 `setInterval`/`EventSource`/`requestAnimationFrame`）。
   - 確認 `/`（桌面版）跟 `/tablet`（平板版）互不影響——桌面版原有功能
