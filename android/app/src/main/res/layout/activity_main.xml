@@ -19,6 +19,8 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="http://192.168.1.10:9759/tablet"
+            android:textColor="#FFFFFF"
+            android:textColorHint="#8A8F98"
             android:inputType="textUri" />
 
         <Button
