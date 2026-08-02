@@ -35,6 +35,7 @@ const TICK: Duration = Duration::from_millis(300);
 const OUTPUT_TAIL_LINES: usize = 500;
 
 const FRONTEND_HTML: &str = include_str!("web/frontend.html");
+const TABLET_HTML: &str = include_str!("web/tablet.html");
 
 /// 每個 plugin 名稱（含 `output`）各自一條 broadcast channel 供 SSE 訂閱，加上
 /// 一份「目前最新內容」的快取——新連進來的分頁不用等下一次內容真的改變，
@@ -103,6 +104,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .app_data(web::Data::new(output.clone()))
             .app_data(web::Data::new(ctx.clone()))
             .route("/", web::get().to(index))
+            .route("/tablet", web::get().to(tablet_index))
             .route("/api/plugins", web::get().to(api_plugins))
             .route("/api/version", web::get().to(api_version))
             .route("/api/panel/{name}/stream", web::get().to(panel_stream))
@@ -507,6 +509,12 @@ fn table_snapshot_json(shell: &Mutex<Shell>, name: &str) -> String {
 
 async fn index() -> impl Responder {
     HttpResponse::Ok().content_type("text/html; charset=utf-8").body(FRONTEND_HTML)
+}
+
+/// `GET /tablet`：跟桌面版 `/` 完全獨立的平板/觸控用頁面（`src/web/tablet.html`），
+/// 打同一組既有 API，這個 handler 本身不需要 `ctx`/`hub` 之類的依賴。
+async fn tablet_index() -> impl Responder {
+    HttpResponse::Ok().content_type("text/html; charset=utf-8").body(TABLET_HTML)
 }
 
 async fn api_plugins(hub: web::Data<Hub>) -> impl Responder {

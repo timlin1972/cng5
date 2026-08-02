@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cng5 tablet</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Sarasa Term SC", "Sarasa Term TC", "Sarasa Mono SC", "Sarasa Mono TC", "Noto Sans Mono CJK SC",
+      "Noto Sans Mono CJK TC", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #111318;
+    color: #d8dee9;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  #content { flex: 1; overflow: auto; padding: 16px; }
+  #tabbar { display: flex; background: #1b1e26; border-top: 1px solid #3a4150; flex: none; }
+  #tabbar button {
+    flex: 1;
+    background: none;
+    border: none;
+    color: #9aa4b8;
+    font: inherit;
+    padding: 14px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+  }
+  #tabbar button.active { color: #6f9dff; background: #262a33; }
+  .tab-icon { font-size: 22px; }
+  .tab-label { font-size: 13px; }
+
+  .data-table { width: 100%; border-collapse: collapse; font-size: 15px; }
+  .data-table th, .data-table td { padding: 10px 12px; border-top: 1px solid #262a33; white-space: pre; text-align: left; }
+  .data-table th { color: #9aa4b8; font-weight: normal; border-top: none; border-bottom: 1px solid #3a4150; }
+  .plain-panel { white-space: pre-wrap; font-size: 15px; line-height: 1.6; }
+  .empty-hint { color: #9aa4b8; padding: 16px; font-size: 15px; }
+</style>
+</head>
+<body>
+<div id="content"></div>
+<div id="tabbar"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // 跟後端 device.rs/global.rs 的 ALIVE_TTL（REPORT_INTERVAL 10 秒 * 3）保持
+  // 一致——這裡沒有對應的 API 可以查，只能寫死並用註解註明依賴關係。跟桌面版
+  // frontend.html 的 TOPOLOGY_ALIVE_TTL_MS 是同一個值，這裡各自一份常數。
+  const ALIVE_TTL_MS = 30000;
+  const TABLE_POLL_MS = 2500;
+
+  // 跟 `sysinfo::format_uptime` 算法一致。
+  function formatUptimeJs(secs) {
+    const days = Math.floor(secs / 86400);
+    const hours = Math.floor((secs % 86400) / 3600);
+    const minutes = Math.floor((secs % 3600) / 60);
+    const seconds = Math.floor(secs % 60);
+    const pad = (n) => String(n).padStart(2, "0");
+    return days > 0 ? `${days}d ${pad(hours)}:${pad(minutes)}:${pad(seconds)}` : `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  // 跟 `sysinfo::format_disk_usage`/`format_bytes_short` 算法一致。
+  function formatDiskJs(free, total) {
+    if (total === 0) return "N/A";
+    const short = (bytes) => {
+      const units = ["B", "K", "M", "G", "T"];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+      }
+      return unit === 0 ? `${bytes}${units[0]}` : `${value.toFixed(0)}${units[unit]}`;
+    };
+    return `${short(free)}/${short(total)}`;
+  }
+
+  // `device`／`global` 兩個分頁共用：把 `/api/device/list`／`/api/global/list`
+  // 回應的清單畫成一個簡單表格。用 `textContent` 逐格填值（不是拼 HTML
+  // 字串），跟桌面版同一個理由——`global` 的資料有一部分是其他 domain 透過
+  // 公開 MQTT broker 回報的字串，不能假設乾淨。
+  function renderDeviceLikeTable(container, items) {
+    container.innerHTML = "";
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-hint";
+      empty.textContent = "(還沒有任何裝置資料)";
+      container.appendChild(empty);
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "data-table";
+    const thead = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    for (const h of ["id", "ip", "os", "version", "mode", "device uptime", "app uptime", "disk", "alive"]) {
+      const th = document.createElement("th");
+      th.textContent = h;
+      headRow.appendChild(th);
+    }
+    thead.appendChild(headRow);
+    const tbody = document.createElement("tbody");
+    for (const item of items) {
+      const r = item.report;
+      const alive = item.age_secs * 1000 < ALIVE_TTL_MS;
+      const values = [
+        r.id,
+        r.ip,
+        r.os,
+        r.version,
+        r.mode,
+        formatUptimeJs(r.device_uptime_secs),
+        formatUptimeJs(r.app_uptime_secs),
+        formatDiskJs(r.disk_free_bytes, r.disk_total_bytes),
+        alive ? "是" : "否",
+      ];
+      const tr = document.createElement("tr");
+      for (const v of values) {
+        const td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      }
+      tbody.appendChild(tr);
+    }
+    table.appendChild(thead);
+    table.appendChild(tbody);
+    container.appendChild(table);
+  }
+
+  // 通用的「定期 poll 一個回傳 JSON 陣列的端點，畫成表格」分頁工廠，
+  // `device`／`global` 分頁共用同一份邏輯，只是端點不同。
+  function makeListTab(url) {
+    return function start(container) {
+      let stopped = false;
+      async function poll() {
+        if (stopped) return;
+        try {
+          const items = await fetch(url).then((r) => r.json());
+          if (!stopped) renderDeviceLikeTable(container, items);
+        } catch (_err) {
+          // 靜默失敗，下一輪 poll 再試。
+        }
+      }
+      poll();
+      const intervalId = setInterval(poll, TABLE_POLL_MS);
+      return function stop() {
+        stopped = true;
+        clearInterval(intervalId);
+      };
+    };
+  }
+
+  // `weather`／`system` 分頁共用：沿用桌面版既有的純文字 panel 機制
+  // （`/api/panel/<name>/stream`），內容原樣顯示。
+  function makePlainPanelTab(panelName) {
+    return function start(container) {
+      const pre = document.createElement("pre");
+      pre.className = "plain-panel";
+      pre.textContent = "(等待資料...)";
+      container.appendChild(pre);
+      const es = new EventSource(`/api/panel/${encodeURIComponent(panelName)}/stream`);
+      es.onmessage = (e) => {
+        try {
+          pre.textContent = JSON.parse(e.data);
+        } catch (_err) {
+          pre.textContent = e.data;
+        }
+      };
+      return function stop() {
+        es.close();
+      };
+    };
+  }
+
+  const TABS = [
+    { name: "device", icon: "📟", label: "device" },
+    { name: "global", icon: "🌍", label: "global" },
+    { name: "topology", icon: "🌐", label: "topology" },
+    { name: "weather", icon: "🌤️", label: "weather" },
+    { name: "system", icon: "⚙️", label: "system" },
+    { name: "player", icon: "🎵", label: "player" },
+  ];
+
+  // topology／player 分頁在 Task 2／Task 3 才會實作，這裡先放佔位分頁，
+  // 避免點下去整個分頁系統壞掉。
+  const TAB_MODULES = {
+    device: { start: makeListTab("/api/device/list") },
+    global: { start: makeListTab("/api/global/list") },
+    topology: {
+      start(container) {
+        const hint = document.createElement("div");
+        hint.className = "empty-hint";
+        hint.textContent = "(topology 分頁尚未實作)";
+        container.appendChild(hint);
+        return function stop() {};
+      },
+    },
+    weather: { start: makePlainPanelTab("weather") },
+    system: { start: makePlainPanelTab("system") },
+    player: {
+      start(container) {
+        const hint = document.createElement("div");
+        hint.className = "empty-hint";
+        hint.textContent = "(player 分頁尚未實作)";
+        container.appendChild(hint);
+        return function stop() {};
+      },
+    },
+  };
+
+  const content = document.getElementById("content");
+  const tabbar = document.getElementById("tabbar");
+  let activeName = null;
+  let activeStop = null;
+
+  function switchTo(name) {
+    if (activeName === name) return;
+    if (activeStop) {
+      activeStop();
+      activeStop = null;
+    }
+    activeName = name;
+    for (const btn of tabbar.querySelectorAll("button")) {
+      btn.classList.toggle("active", btn.dataset.name === name);
+    }
+    content.innerHTML = "";
+    activeStop = TAB_MODULES[name].start(content);
+  }
+
+  for (const t of TABS) {
+    const btn = document.createElement("button");
+    btn.dataset.name = t.name;
+    const icon = document.createElement("div");
+    icon.className = "tab-icon";
+    icon.textContent = t.icon;
+    const label = document.createElement("div");
+    label.className = "tab-label";
+    label.textContent = t.label;
+    btn.appendChild(icon);
+    btn.appendChild(label);
+    btn.addEventListener("click", () => switchTo(t.name));
+    tabbar.appendChild(btn);
+  }
+
+  switchTo("device");
+})();
+</script>
+</body>
+</html>
