@@ -646,7 +646,7 @@
   .cell-flash { animation: cellFlash 1s ease-out; }
   .topology-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; position: relative; }
   .topology-svg { flex: 1; width: 100%; height: 100%; }
-  .topology-node { cursor: grab; }
+  .topology-node { cursor: default; }
   .topology-node-label { font-size: 10px; fill: #d8dee9; text-anchor: middle; pointer-events: none; }
   .topology-domain-box { fill: none; stroke: #3a4150; stroke-width: 1; stroke-dasharray: 5,3; }
   .topology-domain-label { font-size: 10px; fill: #6b7280; }
@@ -1773,152 +1773,94 @@
     return { edges, hasServer };
   }
 
-  // 建立一個獨立運作的 topology 面板：定期 poll 上面兩個端點合併節點、跑一個
-  // 手刻的簡化版力導向模擬（節點互推、邊當彈簧、往中心的微弱向心力、每幀
-  // 衰減速度），用 SVG 逐幀更新座標（不是整個重建 DOM，因為節點身分在兩次
-  // poll 之間通常不變，只是位置在動）。回傳 `{ container, stop }`，
-  // `stop()` 給 `closePanel` 呼叫，清掉 interval／animation frame，不留
-  // 背景在跑。
+  // 建立一個獨立運作的 topology 面板：定期 poll 上面兩個端點合併節點、依
+  // 角色（broker/server/client）＋ domain 直接算出固定座標（見
+  // `computeLayout`），不再跑力導向模擬，也不支援拖曳節點——固定佈局下手動
+  // 拖曳沒有意義，下一次 poll 座標就會被算出來的固定值蓋掉。用 SVG 更新
+  // 座標（不是整個重建 DOM，因為節點身分在兩次 poll 之間通常不變）。回傳
+  // `{ container, stop }`，`stop()` 給 `closePanel` 呼叫，清掉 interval，
+  // 不留背景在跑。
   function startTopology(container, svg, domainLayer, edgeLayer, nodeLayer, tooltip) {
     const sim = { nodes: new Map(), edges: [] };
     const domainEls = new Map();
     const edgeEls = new Map();
     const nodeEls = new Map();
-    // 拖曳中的節點 key／DOM 元素——拖曳期間 `tick()` 會跳過這個節點的力學
-    // 積分（見下面），完全交給滑鼠位置決定座標，放開滑鼠後才恢復正常物理。
-    let draggingKey = null;
-    let draggingEl = null;
 
     function panelSize() {
       const rect = svg.getBoundingClientRect();
       return { width: rect.width || 400, height: rect.height || 300 };
     }
 
-    // 把滑鼠事件的螢幕座標換成跟節點 `x`/`y` 同一套座標系（SVG 左上角為原點）。
-    function svgPoint(e) {
-      const rect = svg.getBoundingClientRect();
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    }
-
-    function onNodeMouseDown(key, group, e) {
-      e.preventDefault();
-      draggingKey = key;
-      draggingEl = group;
-      group.style.cursor = "grabbing";
-      const n = sim.nodes.get(key);
-      if (n) {
-        n.vx = 0;
-        n.vy = 0;
+    // 依角色＋domain 算出每個節點的固定座標：broker 置中最上排；具名 domain
+    // 依名稱排序由左到右各佔一欄，不知道 domain 名稱的節點（`local/${id}`）
+    // 另成一欄排在最後；欄內 server 排在上、client（含 standalone）排在下，
+    // 同排多個節點在欄寬內水平等距展開。回傳 `Map<key, {x, y}>`（`key` 是
+    // 節點 key 或 `"broker"`）。
+    function computeLayout(nodesData, hasServer, width, height) {
+      const domainOrder = [];
+      const domainMembers = new Map();
+      const localMembers = [];
+      for (const n of nodesData.values()) {
+        if (n.domain) {
+          if (!domainMembers.has(n.domain)) {
+            domainMembers.set(n.domain, []);
+            domainOrder.push(n.domain);
+          }
+          domainMembers.get(n.domain).push(n);
+        } else {
+          localMembers.push(n);
+        }
       }
+      domainOrder.sort();
+      const columns = domainOrder.map((d) => domainMembers.get(d));
+      if (localMembers.length > 0) columns.push(localMembers);
+
+      const positions = new Map();
+      const brokerY = height * 0.2;
+      const serverRowY = height * 0.5;
+      const clientRowY = height * 0.8;
+
+      if (hasServer) positions.set("broker", { x: width / 2, y: brokerY });
+
+      const colWidth = columns.length > 0 ? width / columns.length : width;
+      columns.forEach((members, colIndex) => {
+        const colCenterX = colWidth * (colIndex + 0.5);
+        const servers = members.filter((n) => n.report.mode === "server");
+        const clients = members.filter((n) => n.report.mode !== "server");
+        const spread = (list, y) => {
+          list.forEach((n, i) => {
+            const offset = (i - (list.length - 1) / 2) * 70;
+            positions.set(n.key, { x: colCenterX + offset, y });
+          });
+        };
+        spread(servers, serverRowY);
+        spread(clients, clientRowY);
+      });
+
+      return positions;
     }
 
-    function onDocumentMouseMove(e) {
-      if (!draggingKey) return;
-      const n = sim.nodes.get(draggingKey);
-      if (!n) return;
-      const p = svgPoint(e);
-      n.x = p.x;
-      n.y = p.y;
-      n.vx = 0;
-      n.vy = 0;
-    }
-
-    function onDocumentMouseUp() {
-      if (draggingEl) draggingEl.style.cursor = "grab";
-      draggingKey = null;
-      draggingEl = null;
-    }
-
-    document.addEventListener("mousemove", onDocumentMouseMove);
-    document.addEventListener("mouseup", onDocumentMouseUp);
-
-    function makeNode(isBroker) {
-      const { width, height } = panelSize();
-      return {
-        x: width / 2 + (Math.random() - 0.5) * 60,
-        y: height / 2 + (Math.random() - 0.5) * 60,
-        vx: 0,
-        vy: 0,
-        fx: 0,
-        fy: 0,
-        isBroker,
-        data: null,
-      };
-    }
-
-    function applyPoll(nodesData, hasServer) {
+    // 把 poll 拿到的節點集合套進 `sim.nodes`：消失的節點移除，新出現的節點
+    // 用 `computeLayout` 算出的座標建立，本來就有的節點座標也用最新算出的
+    // 值覆蓋（固定佈局每次 poll 都是同一套規則重算，不保留舊座標）。
+    function applyPoll(nodesData, hasServer, width, height) {
+      const layout = computeLayout(nodesData, hasServer, width, height);
       const wanted = new Set(nodesData.keys());
       if (hasServer) wanted.add("broker");
       for (const key of [...sim.nodes.keys()]) {
         if (!wanted.has(key)) sim.nodes.delete(key);
       }
       for (const key of wanted) {
+        const pos = layout.get(key) || { x: width / 2, y: height / 2 };
         let n = sim.nodes.get(key);
         if (!n) {
-          n = makeNode(key === "broker");
+          n = { x: pos.x, y: pos.y, isBroker: key === "broker", data: null };
           sim.nodes.set(key, n);
+        } else {
+          n.x = pos.x;
+          n.y = pos.y;
         }
         if (key !== "broker") n.data = nodesData.get(key);
-      }
-    }
-
-    function tick() {
-      const { width, height } = panelSize();
-      const entries = [...sim.nodes.values()];
-      const draggedNode = draggingKey ? sim.nodes.get(draggingKey) : null;
-      for (const n of entries) {
-        n.fx = 0;
-        n.fy = 0;
-      }
-
-      const REPULSION = 2200;
-      for (let i = 0; i < entries.length; i++) {
-        for (let j = i + 1; j < entries.length; j++) {
-          const a = entries[i];
-          const b = entries[j];
-          const dx = a.x - b.x;
-          const dy = a.y - b.y;
-          let distSq = dx * dx + dy * dy;
-          if (distSq < 1) distSq = 1;
-          const dist = Math.sqrt(distSq);
-          const force = REPULSION / distSq;
-          const fx = (dx / dist) * force;
-          const fy = (dy / dist) * force;
-          a.fx += fx;
-          a.fy += fy;
-          b.fx -= fx;
-          b.fy -= fy;
-        }
-      }
-
-      const SPRING_LENGTH = 90;
-      const SPRING_STRENGTH = 0.02;
-      for (const edge of sim.edges) {
-        const a = sim.nodes.get(edge.from);
-        const b = sim.nodes.get(edge.to);
-        if (!a || !b) continue;
-        const dx = b.x - a.x;
-        const dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const stretch = dist - SPRING_LENGTH;
-        const fx = (dx / dist) * stretch * SPRING_STRENGTH;
-        const fy = (dy / dist) * stretch * SPRING_STRENGTH;
-        a.fx += fx;
-        a.fy += fy;
-        b.fx -= fx;
-        b.fy -= fy;
-      }
-
-      const CENTER_STRENGTH = 0.01;
-      const DAMPING = 0.85;
-      for (const n of entries) {
-        if (n === draggedNode) continue;
-        n.fx += (width / 2 - n.x) * CENTER_STRENGTH;
-        n.fy += (height / 2 - n.y) * CENTER_STRENGTH;
-        n.vx = (n.vx + n.fx) * DAMPING;
-        n.vy = (n.vy + n.fy) * DAMPING;
-        n.x += n.vx;
-        n.y += n.vy;
       }
     }
 
@@ -1979,7 +1921,6 @@
       group.addEventListener("mouseenter", () => showTooltip(key));
       group.addEventListener("mousemove", positionTooltip);
       group.addEventListener("mouseleave", hideTooltip);
-      group.addEventListener("mousedown", (e) => onNodeMouseDown(key, group, e));
       return { group, shape, label };
     }
 
@@ -2087,28 +2028,19 @@
     async function pollOnce() {
       const nodesData = await fetchTopologyNodes();
       const { edges, hasServer } = computeTopologyEdges(nodesData);
-      applyPoll(nodesData, hasServer);
+      const { width, height } = panelSize();
+      applyPoll(nodesData, hasServer, width, height);
       sim.edges = edges;
-    }
-
-    let rafId = null;
-    function loop() {
-      tick();
       render();
-      rafId = requestAnimationFrame(loop);
     }
 
     pollOnce();
-    loop();
     const intervalId = setInterval(pollOnce, TOPOLOGY_POLL_MS);
 
     return {
       container,
       stop() {
         clearInterval(intervalId);
-        if (rafId) cancelAnimationFrame(rafId);
-        document.removeEventListener("mousemove", onDocumentMouseMove);
-        document.removeEventListener("mouseup", onDocumentMouseUp);
       },
     };
   }
