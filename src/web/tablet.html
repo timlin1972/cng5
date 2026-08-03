@@ -351,8 +351,9 @@
         const servers = members.filter((n) => n.report.mode === "server");
         const clients = members.filter((n) => n.report.mode !== "server");
         const spread = (list, y) => {
+          const step = list.length > 1 ? Math.min(70, (colWidth - 44) / (list.length - 1)) : 0;
           list.forEach((n, i) => {
-            const offset = (i - (list.length - 1) / 2) * 70;
+            const offset = (i - (list.length - 1) / 2) * step;
             positions.set(n.key, { x: colCenterX + offset, y });
           });
         };
@@ -544,20 +545,43 @@
       }
     }
 
+    // 上一次 poll 拿到的節點資料，給 `onResize` 在不打網路請求的情況下
+    // 重算佈局用（見下面 `onResize` 的說明）。
+    let lastNodesData = null;
+    let lastHasServer = false;
+
     async function pollOnce() {
       const nodesData = await fetchTopologyNodes();
       const { edges, hasServer } = computeTopologyEdges(nodesData);
+      lastNodesData = nodesData;
+      lastHasServer = hasServer;
       const { width, height } = panelSize();
       applyPoll(nodesData, hasServer, width, height);
       sim.edges = edges;
       render();
     }
 
+    // panel 大小改變（旋轉螢幕、視窗縮放……）時，固定式佈局是依目前尺寸
+    // 算出來的，尺寸一變就該立刻重新排版，不用等到下一次 poll（最長
+    // `TOPOLOGY_POLL_MS`，約 2.5 秒）才跟上——用上一次 poll 拿到的節點
+    // 資料重算座標、重繪即可，不需要為了單純的版面調整重新打一次網路
+    // 請求。跟桌面版 topology panel 同一套 ResizeObserver 模式（各自一份
+    // 程式碼，不共用模組）。
+    function onResize() {
+      if (!lastNodesData) return;
+      const { width, height } = panelSize();
+      applyPoll(lastNodesData, lastHasServer, width, height);
+      render();
+    }
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(svg);
+
     pollOnce();
     const intervalId = setInterval(pollOnce, TOPOLOGY_POLL_MS);
 
     return function stop() {
       clearInterval(intervalId);
+      resizeObserver.disconnect();
     };
   }
 

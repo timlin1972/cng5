@@ -1026,3 +1026,49 @@ async fn notepad_save_content(body: web::Json<NotepadSaveRequest>) -> HttpRespon
         Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 從一段 HTML/JS 原始碼裡擷取 `function computeLayout(...) { ... }` 的完整
+    /// 函式本體（含開頭的 `function computeLayout(` 到跟它配對的最後一個 `}`）。
+    /// 不能靠固定行數切，用最簡單的括號計數：從函式名稱後第一個 `{` 開始數，
+    /// 每個 `{` +1、每個 `}` -1，數到 0 就是配對的結尾。
+    fn extract_compute_layout(src: &str) -> String {
+        const NEEDLE: &str = "function computeLayout(";
+        let start = src.find(NEEDLE).expect("找不到 computeLayout 函式");
+        let brace_start = src[start..].find('{').map(|i| start + i).expect("computeLayout 少了開頭的 {");
+        let bytes = src.as_bytes();
+        let mut depth = 0i32;
+        let mut end = brace_start;
+        for (offset, &b) in bytes[brace_start..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = brace_start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        src[start..=end].to_string()
+    }
+
+    /// `frontend.html`（桌面版）跟 `tablet.html`（`/tablet`）各自獨立一份
+    /// topology 佈局程式碼（既有慣例，不共用模組），但兩邊的 `computeLayout`
+    /// 函式本體必須實作同一套演算法、逐字相同——這個測試就是那道 drift
+    /// guard：改了一邊的 `computeLayout` 卻忘了同步改另一邊，這裡就會炸掉。
+    #[test]
+    fn frontend_and_tablet_compute_layout_are_identical() {
+        let frontend = extract_compute_layout(FRONTEND_HTML);
+        let tablet = extract_compute_layout(TABLET_HTML);
+        assert_eq!(
+            frontend, tablet,
+            "frontend.html and tablet.html's computeLayout() have drifted apart — this project intentionally keeps two independent copies of the topology layout code, but they must implement the identical algorithm; if you changed one, apply the same change to the other."
+        );
+    }
+}
