@@ -68,25 +68,91 @@
     z-index: 20;
   }
 
-  /* player 分頁：只有播放控制，沒有檔案清單/上傳/下載，版面比桌面版
-     player panel 簡單很多。按鈕做成 56px 圓形，觸控好按。 */
-  .player-tab { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; height: 100%; padding: 24px; }
-  .player-tab-track { font-size: 17px; text-align: center; word-break: break-all; }
-  .player-tab-seek-row { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 480px; }
-  .player-tab-seek-row input[type="range"] { flex: 1; }
-  .player-tab-time { font-size: 13px; color: #9aa4b8; white-space: nowrap; }
-  .player-tab-transport { display: flex; align-items: center; gap: 24px; }
-  .player-tab-transport button {
+  /* player 分頁：跟桌面版 frontend.html 的 player panel（`.music-*`/
+     `.player-*`）是同一套設計，這裡各自一份（同一種取捨，見 topology 那段
+     的說明）。跟桌面版唯一的差異是 `.player-body` 用 `height: 100%`
+     （桌面版靠浮動 panel 的固定 `width`/`height` 撐開，tablet 分頁沒有那層,
+     直接吃滿 `#content`）。 */
+  .music-files { flex: 1; overflow: auto; padding: 0 8px; }
+  .music-empty { color: #5a6272; padding: 8px 0; }
+  .music-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #262a33; }
+  .music-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .music-row button {
     background: #262a33;
     border: 1px solid #3a4150;
     color: #d8dee9;
-    font-size: 22px;
-    width: 56px;
-    height: 56px;
-    border-radius: 50%;
+    border-radius: 3px;
+    padding: 2px 6px;
+    font: inherit;
     cursor: pointer;
   }
-  .player-tab-transport button:active { background: #323844; }
+  .music-row button:hover { background: #323844; }
+  .music-row.playing { background: #1e2530; border-radius: 3px; }
+  .music-row.playing .music-name { color: #6f9dff; }
+  .player-body { height: 100%; display: flex; overflow: hidden; font-size: 15px; }
+  .player-left { flex: 1.3; display: flex; flex-direction: column; overflow: hidden; border-right: 1px solid #262a33; }
+  .player-left .music-files { flex: 1; }
+  .player-download-row { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #262a33; }
+  .player-file-count { flex: none; align-self: center; color: #8a92a5; white-space: nowrap; }
+  .player-url-input {
+    flex: 1;
+    min-width: 0;
+    background: #0d0f13;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 4px 6px;
+    font: inherit;
+  }
+  .player-download-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 4px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  .player-download-row button:hover { background: #323844; }
+  .player-right { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; overflow: hidden; }
+  .player-cover-slot {
+    width: 100%;
+    max-width: 220px;
+    aspect-ratio: 1 / 1;
+    background: #0d0f13;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .player-cover { object-fit: cover; }
+  .player-seek-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 220px; }
+  .player-seek { flex: 1; min-width: 0; accent-color: #6f9dff; }
+  .player-time { flex-shrink: 0; font-size: 12px; color: #9aa3b2; white-space: nowrap; }
+  .player-track-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #d8dee9;
+    text-align: center;
+  }
+  .player-lyrics { overflow: auto; text-align: center; color: #6a7383; font-size: 13px; }
+  .player-lyric-line { padding: 3px 0; }
+  .player-lyric-line.active { color: #6f9dff; font-weight: bold; }
+  .player-lyrics-empty { color: #5a6272; padding: 8px 0; }
+  .player-controls { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; }
+  .player-transport { display: flex; gap: 8px; }
+  .player-controls button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 8px 16px;
+    font: inherit;
+    font-size: 17px;
+    cursor: pointer;
+  }
+  .player-controls button:hover { background: #323844; }
 </style>
 </head>
 <body>
@@ -100,8 +166,9 @@
   // 跟後端 device.rs/global.rs 的 ALIVE_TTL（REPORT_INTERVAL 10 秒 * 3）保持
   // 一致——這裡沒有對應的 API 可以查，只能寫死並用註解註明依賴關係。跟桌面版
   // frontend.html 的 TOPOLOGY_ALIVE_TTL_MS 是同一個值，這裡各自一份常數。
+  // topology 分頁還在用這個值算 alive（它走的是原始 `/api/device/list`／
+  // `/api/global/list`，不是下面 `device`／`global` 分頁改用的 snapshot）。
   const ALIVE_TTL_MS = 30000;
-  const TABLE_POLL_MS = 2500;
 
   // 跟 `sysinfo::format_uptime` 算法一致。
   function formatUptimeJs(secs) {
@@ -129,13 +196,16 @@
     return `${short(free)}/${short(total)}`;
   }
 
-  // `device`／`global` 兩個分頁共用：把 `/api/device/list`／`/api/global/list`
-  // 回應的清單畫成一個簡單表格。用 `textContent` 逐格填值（不是拼 HTML
+  // `device`／`global` 兩個分頁共用：把後端 `web.rs` 的 `table_snapshot_json`
+  // 送來的逐格 snapshot 畫成一個簡單表格，跟桌面版 frontend.html 的
+  // `renderTableSnapshot` 是同一份資料源（`/api/panel/<name>/snapshot-stream`），
+  // 「目前控制的機器」前面的 `* ` 前綴跟 alive 欄的 `*`/空白都是後端算好、
+  // 原封不動顯示，前端不用重算。用 `textContent` 逐格填值（不是拼 HTML
   // 字串），跟桌面版同一個理由——`global` 的資料有一部分是其他 domain 透過
   // 公開 MQTT broker 回報的字串，不能假設乾淨。
-  function renderDeviceLikeTable(container, items) {
+  function renderTableSnapshot(container, snapshot) {
     container.innerHTML = "";
-    if (items.length === 0) {
+    if (snapshot.rows.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty-hint";
       empty.textContent = "(還沒有任何裝置資料)";
@@ -146,36 +216,18 @@
     table.className = "data-table";
     const thead = document.createElement("thead");
     const headRow = document.createElement("tr");
-    for (const h of ["id", "ip", "os", "version", "mode", "device uptime", "app uptime", "disk", "alive"]) {
+    for (const header of snapshot.headers) {
       const th = document.createElement("th");
-      th.textContent = h;
+      th.textContent = header;
       headRow.appendChild(th);
     }
     thead.appendChild(headRow);
     const tbody = document.createElement("tbody");
-    const sorted = [...items].sort((a, b) => {
-      const keyA = a.domain ? `${a.domain}/${a.report.id}` : a.report.id;
-      const keyB = b.domain ? `${b.domain}/${b.report.id}` : b.report.id;
-      return keyA < keyB ? -1 : keyA > keyB ? 1 : 0;
-    });
-    for (const item of sorted) {
-      const r = item.report;
-      const alive = item.age_secs * 1000 < ALIVE_TTL_MS;
-      const values = [
-        item.domain ? `${item.domain}/${r.id}` : r.id,
-        r.ip,
-        r.os,
-        r.version,
-        r.mode,
-        formatUptimeJs(r.device_uptime_secs),
-        formatUptimeJs(r.app_uptime_secs),
-        formatDiskJs(r.disk_free_bytes, r.disk_total_bytes),
-        alive ? "是" : "否",
-      ];
+    for (const row of snapshot.rows) {
       const tr = document.createElement("tr");
-      for (const v of values) {
+      for (const cell of row.cells) {
         const td = document.createElement("td");
-        td.textContent = v;
+        td.textContent = cell.text;
         tr.appendChild(td);
       }
       tbody.appendChild(tr);
@@ -185,25 +237,24 @@
     container.appendChild(table);
   }
 
-  // 通用的「定期 poll 一個回傳 JSON 陣列的端點，畫成表格」分頁工廠，
-  // `device`／`global` 分頁共用同一份邏輯，只是端點不同。
-  function makeListTab(url) {
+  // 通用的「訂閱 `/api/panel/<name>/snapshot-stream`，收到就整個重繪表格」
+  // 分頁工廠，`device`／`global` 分頁共用同一份邏輯，只是端點不同。跟桌面版
+  // frontend.html 一樣要解兩層 JSON——`table_snapshot_json` 送的是「JSON 物件
+  // 字串」，經過 `sse_frame` 又整個包了一層 JSON 字串編碼。
+  function makeSnapshotTab(name) {
     return function start(container) {
-      let stopped = false;
-      async function poll() {
-        if (stopped) return;
+      const es = new EventSource(`/api/panel/${encodeURIComponent(name)}/snapshot-stream`);
+      es.onmessage = (e) => {
+        let snapshot;
         try {
-          const items = await fetch(url).then((r) => r.json());
-          if (!stopped) renderDeviceLikeTable(container, items);
+          snapshot = JSON.parse(JSON.parse(e.data));
         } catch (_err) {
-          // 靜默失敗，下一輪 poll 再試。
+          return;
         }
-      }
-      poll();
-      const intervalId = setInterval(poll, TABLE_POLL_MS);
+        renderTableSnapshot(container, snapshot);
+      };
       return function stop() {
-        stopped = true;
-        clearInterval(intervalId);
+        es.close();
       };
     };
   }
@@ -585,125 +636,634 @@
     };
   }
 
-  // 建立 player 分頁：只做播放控制（播放/暫停/上一首/下一首/拖進度），
-  // 不做檔案上傳/下載/刪除——假設歌曲已經在 `music/` 資料夾裡，這裡只是
-  // 讀現成的檔名清單當播放清單用。切走這個分頁時 `stop()` 會把音樂暫停，
-  // 不會留著在背景繼續播。
+  // player 分頁跟桌面版 frontend.html 的 player panel 共用同一套邏輯，這裡
+  // 各自一份（同一種取捨，見 topology 那段的說明）：檔案清單＋刪除＋
+  // YouTube 網址下載、封面/歌詞/頻譜/放射狀頻譜循環顯示、播放模式（依序/
+  // 隨機/單曲）、Media Session。跟終端機共用同一個 Shell，下載按鈕送出去
+  // 的指令（`plugin enter music` -> `download ...` -> `~`）會直接影響後端
+  // 狀態，跟指令列輸入框共用這個函式，不要各自重複一份 fetch 邏輯。
+  async function execLine(line) {
+    const res = await fetch("/api/exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ line }),
+    });
+    return res.json();
+  }
+
+  // 定期打 `/api/music/files` 拿目前 `music/` 資料夾裡的檔案清單，畫成一列
+  // 一列（播放/刪除按鈕）。
+  function startMusicFileBrowser(musicUi) {
+    async function refresh() {
+      try {
+        const res = await fetch("/api/music/files");
+        const names = await res.json();
+        renderMusicFiles(musicUi, names, refresh);
+      } catch (_err) {
+        // 這次沒抓到就算了，下一次 poll 再試，不用跳錯誤訊息干擾畫面。
+      }
+    }
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    musicUi.stopPolling = () => clearInterval(timer);
+  }
+
+  // 秒數轉成「分:秒」，超過一小時才會多帶一段（"1:05:00"）。
+  function formatTime(seconds) {
+    const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    const paddedSecs = String(secs).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${paddedSecs}`;
+    }
+    return `${minutes}:${paddedSecs}`;
+  }
+
+  function updateTimeLabel(musicUi) {
+    if (!musicUi.timeLabel) return;
+    musicUi.timeLabel.textContent = `${formatTime(musicUi.player.currentTime)}/${formatTime(musicUi.player.duration)}`;
+  }
+
+  // 播放清單靠「目前正在播的檔名」而不是數字索引記位置，清單每 3 秒重新
+  // 抓一次，中間有檔案被加入/刪除也不會對錯歌。
+  function playByName(musicUi, name) {
+    musicUi.currentName = name;
+    musicUi.player.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
+    musicUi.player.play();
+    const activeRow = highlightPlaying(musicUi);
+    if (activeRow) {
+      activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    if (musicUi.cover) {
+      musicUi.cover.removeAttribute("src");
+      musicUi.cover.src = `/api/music/file/${encodeURIComponent(name)}/cover`;
+    }
+    if (musicUi.trackName) {
+      musicUi.trackName.textContent = name;
+    }
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: name,
+        artwork: [{ src: `/api/music/file/${encodeURIComponent(name)}/cover` }],
+      });
+    }
+    if (musicUi.seekBar) {
+      musicUi.seekBar.max = "0";
+      musicUi.seekBar.value = "0";
+      updateTimeLabel(musicUi);
+    }
+    if (musicUi.lyricsEl) {
+      fetch(`/api/music/file/${encodeURIComponent(name)}/lyrics`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((lines) => renderLyrics(musicUi, lines))
+        .catch(() => renderLyrics(musicUi, []));
+    }
+  }
+
+  function renderLyrics(musicUi, lines) {
+    musicUi.lyricsLines = lines;
+    musicUi.lyricsActiveIndex = -1;
+    musicUi.lyricsEl.innerHTML = "";
+    if (lines.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "player-lyrics-empty";
+      empty.textContent = "(沒有歌詞)";
+      musicUi.lyricsEl.appendChild(empty);
+      return;
+    }
+    for (const line of lines) {
+      const div = document.createElement("div");
+      div.className = "player-lyric-line";
+      div.textContent = line.text;
+      musicUi.lyricsEl.appendChild(div);
+    }
+  }
+
+  function scrollActiveLyricIntoView(musicUi) {
+    const rows = musicUi.lyricsEl.children;
+    const idx = musicUi.lyricsActiveIndex;
+    if (idx >= 0 && rows[idx]) {
+      rows[idx].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  function updateLyricsHighlight(musicUi) {
+    const lines = musicUi.lyricsLines;
+    if (!musicUi.lyricsEl || !lines || lines.length === 0) return;
+    const t = musicUi.player.currentTime;
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].start <= t) idx = i;
+      else break;
+    }
+    if (idx === musicUi.lyricsActiveIndex) return;
+    musicUi.lyricsActiveIndex = idx;
+    const rows = musicUi.lyricsEl.children;
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle("active", i === idx);
+    }
+    scrollActiveLyricIntoView(musicUi);
+  }
+
+  function offsetTrack(musicUi, delta) {
+    const idx = musicUi.playlist.indexOf(musicUi.currentName);
+    if (idx === -1) return;
+    const next = idx + delta;
+    if (next >= 0 && next < musicUi.playlist.length) {
+      playByName(musicUi, musicUi.playlist[next]);
+    }
+  }
+
+  function playRandomOther(musicUi) {
+    const others = musicUi.playlist.filter((name) => name !== musicUi.currentName);
+    if (others.length > 0) {
+      playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
+    } else if (musicUi.playlist.length > 0) {
+      musicUi.player.currentTime = 0;
+      musicUi.player.play();
+    }
+  }
+
+  function goToNextTrack(musicUi) {
+    if (musicUi.playMode === "shuffle") {
+      playRandomOther(musicUi);
+    } else {
+      offsetTrack(musicUi, 1);
+    }
+  }
+
+  function advanceOnEnded(musicUi) {
+    if (musicUi.playMode === "single") {
+      musicUi.player.currentTime = 0;
+      musicUi.player.play();
+      return;
+    }
+    if (musicUi.playMode === "shuffle") {
+      playRandomOther(musicUi);
+      return;
+    }
+    offsetTrack(musicUi, 1);
+  }
+
+  function highlightPlaying(musicUi) {
+    let activeRow = null;
+    for (const row of musicUi.fileList.children) {
+      const isActive = row.dataset.name === musicUi.currentName;
+      row.classList.toggle("playing", isActive);
+      if (isActive) activeRow = row;
+    }
+    return activeRow;
+  }
+
+  function renderMusicFiles(musicUi, names, refresh) {
+    musicUi.playlist = names;
+    musicUi.fileList.innerHTML = "";
+    musicUi.fileCount.textContent = `共 ${names.length} 首`;
+    if (names.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "music-empty";
+      empty.textContent = "(還沒有下載任何檔案)";
+      musicUi.fileList.appendChild(empty);
+      return;
+    }
+    for (const name of names) {
+      const row = document.createElement("div");
+      row.className = "music-row";
+      row.dataset.name = name;
+      const label = document.createElement("span");
+      label.className = "music-name";
+      label.textContent = name;
+      label.title = name;
+
+      const playBtn = document.createElement("button");
+      playBtn.textContent = "▶";
+      playBtn.title = "播放";
+      playBtn.addEventListener("click", () => playByName(musicUi, name));
+
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "🗑";
+      delBtn.title = "刪除";
+      delBtn.addEventListener("click", async () => {
+        if (!window.confirm(`刪除「${name}」？`)) return;
+        await fetch(`/api/music/file/${encodeURIComponent(name)}`, { method: "DELETE" });
+        refresh();
+      });
+
+      row.appendChild(label);
+      row.appendChild(playBtn);
+      row.appendChild(delBtn);
+      musicUi.fileList.appendChild(row);
+    }
+    highlightPlaying(musicUi);
+  }
+
+  // 建立 player 分頁：跟桌面版 player panel 完全同一套 DOM／功能（檔案清單＋
+  // 刪除＋YouTube 下載、封面/歌詞/頻譜/放射狀頻譜循環、播放模式、Media
+  // Session），只是不用桌面版浮動 panel 那層，直接把 `.player-body` 塞進
+  // 分頁的 `container`。切走這個分頁時 `stop()` 只停 poll／視覺化動畫，不會
+  // 暫停播放——跟桌面版 `closePanel` 的行為一致，讓音樂可以在切到其他分頁
+  // （device/global/…）時繼續放，Media Session 的鎖屏控制才有意義。
   function startPlayerTab(container) {
     const wrap = document.createElement("div");
-    wrap.className = "player-tab";
+    wrap.className = "player-body";
 
-    const trackName = document.createElement("div");
-    trackName.className = "player-tab-track";
-    trackName.textContent = "(尚未載入歌曲)";
+    const left = document.createElement("div");
+    left.className = "player-left";
+    const fileList = document.createElement("div");
+    fileList.className = "music-files";
+    const downloadRow = document.createElement("div");
+    downloadRow.className = "player-download-row";
+    const fileCount = document.createElement("span");
+    fileCount.className = "player-file-count";
+    const urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.placeholder = "YouTube 連結...";
+    urlInput.className = "player-url-input";
+    const downloadBtn = document.createElement("button");
+    downloadBtn.textContent = "Download";
+    downloadRow.appendChild(fileCount);
+    downloadRow.appendChild(urlInput);
+    downloadRow.appendChild(downloadBtn);
+    left.appendChild(fileList);
+    left.appendChild(downloadRow);
 
+    const right = document.createElement("div");
+    right.className = "player-right";
+    const cover = document.createElement("img");
+    cover.className = "player-cover-slot player-cover";
+    cover.alt = "";
+    cover.title = "點一下切換：封面 → 歌詞 → 頻譜 → 放射狀頻譜";
+    cover.addEventListener("error", () => cover.removeAttribute("src"));
+    const lyricsEl = document.createElement("div");
+    lyricsEl.className = "player-cover-slot player-lyrics";
+    lyricsEl.title = cover.title;
+    const spectrum = document.createElement("canvas");
+    spectrum.className = "player-cover-slot player-spectrum";
+    spectrum.width = 220;
+    spectrum.height = 220;
+    spectrum.title = cover.title;
+    const radial = document.createElement("canvas");
+    radial.className = "player-cover-slot player-radial";
+    radial.width = 220;
+    radial.height = 220;
+    radial.title = cover.title;
     const seekRow = document.createElement("div");
-    seekRow.className = "player-tab-seek-row";
+    seekRow.className = "player-seek-row";
     const seekBar = document.createElement("input");
     seekBar.type = "range";
+    seekBar.className = "player-seek";
     seekBar.min = "0";
     seekBar.max = "0";
     seekBar.value = "0";
     seekBar.step = "0.1";
     const timeLabel = document.createElement("span");
-    timeLabel.className = "player-tab-time";
+    timeLabel.className = "player-time";
     timeLabel.textContent = "0:00/0:00";
     seekRow.appendChild(seekBar);
     seekRow.appendChild(timeLabel);
-
-    const transport = document.createElement("div");
-    transport.className = "player-tab-transport";
+    const trackName = document.createElement("div");
+    trackName.className = "player-track-name";
+    trackName.textContent = "(尚未播放)";
+    const rightControls = document.createElement("div");
+    rightControls.className = "player-controls";
+    const SHUFFLE_ICON =
+      '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.125em">' +
+      '<path d="M4 7 L9 7 C12 7 12 17 15 17 L17 17"></path>' +
+      '<path d="M17 14 L21 17 L17 20"></path>' +
+      '<path d="M4 17 L9 17 C12 17 12 7 15 7 L17 7"></path>' +
+      '<path d="M17 4 L21 7 L17 10"></path>' +
+      "</svg>";
+    const PLAY_MODES = [
+      { mode: "sequential", icon: "⇉", title: "依序播放" },
+      { mode: "shuffle", icon: SHUFFLE_ICON, title: "隨機播放" },
+      { mode: "single", icon: "↻", title: "播放單首" },
+    ];
+    const modeBtn = document.createElement("button");
+    modeBtn.className = "player-mode-btn";
+    modeBtn.innerHTML = PLAY_MODES[0].icon;
+    modeBtn.title = PLAY_MODES[0].title;
+    modeBtn.addEventListener("click", () => {
+      const idx = PLAY_MODES.findIndex((m) => m.mode === musicUi.playMode);
+      const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
+      musicUi.playMode = next.mode;
+      modeBtn.innerHTML = next.icon;
+      modeBtn.title = next.title;
+    });
+    const TEXT_STYLE = "︎";
     const prevBtn = document.createElement("button");
-    prevBtn.textContent = "⏮";
+    prevBtn.textContent = "⏮" + TEXT_STYLE;
     prevBtn.title = "上一首";
     const playPauseBtn = document.createElement("button");
-    playPauseBtn.textContent = "▶";
+    playPauseBtn.textContent = "▶" + TEXT_STYLE;
     playPauseBtn.title = "播放/暫停";
     const nextBtn = document.createElement("button");
-    nextBtn.textContent = "⏭";
+    nextBtn.textContent = "⏭" + TEXT_STYLE;
     nextBtn.title = "下一首";
+    const transport = document.createElement("div");
+    transport.className = "player-transport";
     transport.appendChild(prevBtn);
     transport.appendChild(playPauseBtn);
     transport.appendChild(nextBtn);
+    rightControls.appendChild(modeBtn);
+    rightControls.appendChild(transport);
+    right.appendChild(cover);
+    right.appendChild(lyricsEl);
+    right.appendChild(spectrum);
+    right.appendChild(radial);
+    right.appendChild(seekRow);
+    right.appendChild(trackName);
+    right.appendChild(rightControls);
 
-    wrap.appendChild(trackName);
-    wrap.appendChild(seekRow);
-    wrap.appendChild(transport);
+    wrap.appendChild(left);
+    wrap.appendChild(right);
     container.appendChild(wrap);
 
-    const audio = document.createElement("audio");
-    container.appendChild(audio);
+    const player = document.createElement("audio");
+    container.appendChild(player);
 
-    let files = [];
-    let index = -1;
-    let seeking = false;
-    let stopped = false;
+    const musicUi = {
+      container: wrap,
+      fileList,
+      fileCount,
+      player,
+      cover,
+      trackName,
+      seekBar,
+      timeLabel,
+      lyricsEl,
+      lyricsLines: [],
+      lyricsActiveIndex: -1,
+      playlist: [],
+      currentName: null,
+      playMode: PLAY_MODES[0].mode,
+      stopPolling: () => {},
+      stopVisualizers: () => {},
+    };
 
-    function formatPlayerTime(seconds) {
-      if (!Number.isFinite(seconds)) return "0:00";
-      const total = Math.floor(seconds);
-      const m = Math.floor(total / 60);
-      const s = total % 60;
-      return `${m}:${String(s).padStart(2, "0")}`;
+    let audioCtx = null;
+    let analyser = null;
+    let freqData = null;
+    let spectrumRafId = null;
+    let radialRafId = null;
+    const spectrumCtx = spectrum.getContext("2d");
+    const radialCtx = radial.getContext("2d");
+
+    function ensureAnalyser() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
+      const source = audioCtx.createMediaElementSource(player);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 128;
+      const splitter = audioCtx.createChannelSplitter(2);
+      const merger = audioCtx.createChannelMerger(2);
+      source.connect(analyser);
+      analyser.connect(splitter);
+      splitter.connect(merger, 0, 0);
+      splitter.connect(merger, 1, 1);
+      merger.connect(audioCtx.destination);
+      freqData = new Uint8Array(analyser.frequencyBinCount);
     }
 
-    function loadIndex(i, autoplay) {
-      if (files.length === 0) return;
-      index = ((i % files.length) + files.length) % files.length;
-      const name = files[index];
-      trackName.textContent = name;
-      audio.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
-      if (autoplay) audio.play().catch(() => {});
-    }
-
-    prevBtn.addEventListener("click", () => loadIndex(index - 1, true));
-    nextBtn.addEventListener("click", () => loadIndex(index + 1, true));
-    playPauseBtn.addEventListener("click", () => {
-      if (index < 0) {
-        loadIndex(0, true);
-        return;
+    const SPECTRUM_CELL_W = 8;
+    const SPECTRUM_CELL_H = 4;
+    const SPECTRUM_GAP = 2;
+    const SPECTRUM_PITCH_X = SPECTRUM_CELL_W + SPECTRUM_GAP;
+    const SPECTRUM_PITCH_Y = SPECTRUM_CELL_H + SPECTRUM_GAP;
+    const spectrumColumns = Math.max(1, Math.floor(spectrum.width / SPECTRUM_PITCH_X));
+    const spectrumRows = Math.max(1, Math.floor(spectrum.height / SPECTRUM_PITCH_Y));
+    const spectrumRowColors = Array.from({ length: spectrumRows }, (_, row) => {
+      const t = spectrumRows === 1 ? 0 : row / (spectrumRows - 1);
+      const r = t < 0.5 ? Math.round(255 * (t / 0.5)) : 255;
+      const g = t < 0.5 ? 255 : Math.round(255 * (1 - (t - 0.5) / 0.5));
+      return {
+        on: `rgb(${r}, ${g}, 0)`,
+        off: `rgba(${r}, ${g}, 0, 0.15)`,
+      };
+    });
+    function drawSpectrum() {
+      spectrumRafId = requestAnimationFrame(drawSpectrum);
+      analyser.getByteFrequencyData(freqData);
+      const h = spectrum.height;
+      spectrumCtx.clearRect(0, 0, spectrum.width, h);
+      const binsPerColumn = freqData.length / spectrumColumns;
+      for (let col = 0; col < spectrumColumns; col++) {
+        const from = Math.floor(col * binsPerColumn);
+        const to = Math.max(from + 1, Math.floor((col + 1) * binsPerColumn));
+        let sum = 0;
+        for (let i = from; i < to; i++) sum += freqData[i];
+        const value = sum / (to - from) / 255;
+        const lit = Math.round(value * spectrumRows);
+        const x = col * SPECTRUM_PITCH_X;
+        for (let row = 0; row < spectrumRows; row++) {
+          const y = h - (row + 1) * SPECTRUM_PITCH_Y;
+          const colors = spectrumRowColors[row];
+          spectrumCtx.fillStyle = row < lit ? colors.on : colors.off;
+          spectrumCtx.fillRect(x, y, SPECTRUM_CELL_W, SPECTRUM_CELL_H);
+        }
       }
-      if (audio.paused) audio.play().catch(() => {});
-      else audio.pause();
+    }
+
+    const RADIAL_BAR_COUNT = 48;
+    const RADIAL_INNER_RADIUS = 40;
+    const RADIAL_MAX_LEN = 55;
+    const RADIAL_CX = radial.width / 2;
+    const RADIAL_CY = radial.height / 2;
+    const radialBarGradient = radialCtx.createRadialGradient(
+      RADIAL_CX,
+      RADIAL_CY,
+      RADIAL_INNER_RADIUS,
+      RADIAL_CX,
+      RADIAL_CY,
+      RADIAL_INNER_RADIUS + RADIAL_MAX_LEN,
+    );
+    radialBarGradient.addColorStop(0, "rgb(0, 255, 0)");
+    radialBarGradient.addColorStop(0.5, "rgb(255, 255, 0)");
+    radialBarGradient.addColorStop(1, "rgb(255, 0, 0)");
+    const RADIAL_RING_RADIUS = RADIAL_INNER_RADIUS - 4;
+    function drawRadial() {
+      radialRafId = requestAnimationFrame(drawRadial);
+      analyser.getByteFrequencyData(freqData);
+      radialCtx.clearRect(0, 0, radial.width, radial.height);
+
+      const binsPerBar = freqData.length / RADIAL_BAR_COUNT;
+      radialCtx.strokeStyle = radialBarGradient;
+      radialCtx.lineWidth = 3;
+      radialCtx.lineCap = "round";
+      for (let i = 0; i < RADIAL_BAR_COUNT; i++) {
+        const from = Math.floor(i * binsPerBar);
+        const to = Math.max(from + 1, Math.floor((i + 1) * binsPerBar));
+        let sum = 0;
+        for (let b = from; b < to; b++) sum += freqData[b];
+        const value = sum / (to - from) / 255;
+        const angle = (i / RADIAL_BAR_COUNT) * Math.PI * 2 - Math.PI / 2;
+        const len = value * RADIAL_MAX_LEN;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        radialCtx.beginPath();
+        radialCtx.moveTo(RADIAL_CX + cosA * RADIAL_INNER_RADIUS, RADIAL_CY + sinA * RADIAL_INNER_RADIUS);
+        radialCtx.lineTo(
+          RADIAL_CX + cosA * (RADIAL_INNER_RADIUS + len),
+          RADIAL_CY + sinA * (RADIAL_INNER_RADIUS + len),
+        );
+        radialCtx.stroke();
+      }
+
+      radialCtx.beginPath();
+      radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_INNER_RADIUS - 8, 0, Math.PI * 2);
+      radialCtx.fillStyle = "#0d0f13";
+      radialCtx.fill();
+
+      radialCtx.lineWidth = 3;
+      radialCtx.strokeStyle = "#3a4150";
+      radialCtx.beginPath();
+      radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, 0, Math.PI * 2);
+      radialCtx.stroke();
+      const duration = player.duration;
+      const progress =
+        Number.isFinite(duration) && duration > 0 ? Math.min(1, Math.max(0, player.currentTime / duration)) : 0;
+      if (progress > 0) {
+        radialCtx.strokeStyle = "#6f9dff";
+        radialCtx.beginPath();
+        radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+        radialCtx.stroke();
+      }
+
+      radialCtx.fillStyle = "#d8dee9";
+      radialCtx.font = "16px sans-serif";
+      radialCtx.textAlign = "center";
+      radialCtx.textBaseline = "middle";
+      radialCtx.fillText(formatTime(player.currentTime), RADIAL_CX, RADIAL_CY);
+    }
+
+    function stopSpectrumAnim() {
+      if (spectrumRafId !== null) {
+        cancelAnimationFrame(spectrumRafId);
+        spectrumRafId = null;
+      }
+    }
+
+    function stopRadialAnim() {
+      if (radialRafId !== null) {
+        cancelAnimationFrame(radialRafId);
+        radialRafId = null;
+      }
+    }
+
+    musicUi.stopVisualizers = () => {
+      stopSpectrumAnim();
+      stopRadialAnim();
+      if (audioCtx) {
+        audioCtx.close();
+        audioCtx = null;
+      }
+    };
+
+    const coverViews = [
+      { el: cover, onShow: () => {}, onHide: () => {} },
+      { el: lyricsEl, onShow: () => scrollActiveLyricIntoView(musicUi), onHide: () => {} },
+      {
+        el: spectrum,
+        onShow: () => {
+          ensureAnalyser();
+          audioCtx.resume();
+          drawSpectrum();
+        },
+        onHide: stopSpectrumAnim,
+      },
+      {
+        el: radial,
+        onShow: () => {
+          ensureAnalyser();
+          audioCtx.resume();
+          drawRadial();
+        },
+        onHide: stopRadialAnim,
+      },
+    ];
+    let coverViewIndex = 0;
+    coverViews.forEach((v, i) => {
+      v.el.style.display = i === 0 ? "" : "none";
     });
 
-    audio.addEventListener("play", () => {
-      playPauseBtn.textContent = "⏸";
+    function cycleCoverView() {
+      coverViews[coverViewIndex].onHide();
+      coverViewIndex = (coverViewIndex + 1) % coverViews.length;
+      coverViews.forEach((v, i) => {
+        v.el.style.display = i === coverViewIndex ? "" : "none";
+      });
+      coverViews[coverViewIndex].onShow();
+    }
+    cover.addEventListener("click", cycleCoverView);
+    lyricsEl.addEventListener("click", cycleCoverView);
+    spectrum.addEventListener("click", cycleCoverView);
+    radial.addEventListener("click", cycleCoverView);
+
+    prevBtn.addEventListener("click", () => offsetTrack(musicUi, -1));
+    nextBtn.addEventListener("click", () => goToNextTrack(musicUi));
+    playPauseBtn.addEventListener("click", () => {
+      if (player.paused) {
+        if (!musicUi.currentName && musicUi.playlist.length > 0) {
+          playByName(musicUi, musicUi.playlist[0]);
+        } else {
+          player.play();
+        }
+      } else {
+        player.pause();
+      }
     });
-    audio.addEventListener("pause", () => {
-      playPauseBtn.textContent = "▶";
+    player.addEventListener("play", () => { playPauseBtn.textContent = "⏸" + TEXT_STYLE; });
+    player.addEventListener("pause", () => { playPauseBtn.textContent = "▶" + TEXT_STYLE; });
+    player.addEventListener("ended", () => advanceOnEnded(musicUi));
+
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.setActionHandler("play", () => player.play());
+      navigator.mediaSession.setActionHandler("pause", () => player.pause());
+      navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
+      navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
+      player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
+      player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
+    }
+
+    let seeking = false;
+    player.addEventListener("loadedmetadata", () => {
+      seekBar.max = String(player.duration || 0);
+      updateTimeLabel(musicUi);
     });
-    audio.addEventListener("ended", () => loadIndex(index + 1, true));
-    audio.addEventListener("loadedmetadata", () => {
-      seekBar.max = String(audio.duration || 0);
-    });
-    audio.addEventListener("timeupdate", () => {
-      if (!seeking) seekBar.value = String(audio.currentTime);
-      timeLabel.textContent = `${formatPlayerTime(audio.currentTime)}/${formatPlayerTime(audio.duration)}`;
+    player.addEventListener("timeupdate", () => {
+      if (!seeking) seekBar.value = String(player.currentTime);
+      updateLyricsHighlight(musicUi);
+      updateTimeLabel(musicUi);
     });
     seekBar.addEventListener("input", () => {
       seeking = true;
+      player.currentTime = Number(seekBar.value);
+      updateTimeLabel(musicUi);
     });
     seekBar.addEventListener("change", () => {
-      audio.currentTime = Number(seekBar.value);
       seeking = false;
     });
 
-    fetch("/api/music/files")
-      .then((r) => r.json())
-      .then((names) => {
-        if (stopped) return;
-        files = names;
-        if (files.length > 0) loadIndex(0, false);
-        else trackName.textContent = "(沒有歌曲檔案)";
-      })
-      .catch(() => {
-        if (!stopped) trackName.textContent = "(讀取歌曲清單失敗)";
-      });
+    downloadBtn.addEventListener("click", async () => {
+      const url = urlInput.value.trim();
+      if (!url) return;
+      urlInput.value = "";
+      await execLine("~");
+      await execLine("plugin enter music");
+      const result = await execLine(`download "${url}"`);
+      await execLine("~");
+      if (result.error) {
+        window.alert(`下載失敗: ${result.error}`);
+      }
+    });
+
+    startMusicFileBrowser(musicUi);
 
     return function stop() {
-      stopped = true;
-      audio.pause();
+      musicUi.stopPolling();
+      musicUi.stopVisualizers();
     };
   }
 
@@ -720,8 +1280,8 @@
   // 內容並回傳 `stopFn`，切分頁時呼叫該 `stopFn` 清掉 interval／EventSource
   // ／animation frame，不留背景在跑。
   const TAB_MODULES = {
-    device: { start: makeListTab("/api/device/list") },
-    global: { start: makeListTab("/api/global/list") },
+    device: { start: makeSnapshotTab("device") },
+    global: { start: makeSnapshotTab("global") },
     topology: { start: startTopologyTab },
     weather: { start: makePlainPanelTab("weather") },
     system: { start: makePlainPanelTab("system") },
