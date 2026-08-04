@@ -80,14 +80,101 @@ weather：抓 wttr.in 的天氣資料，用純文字表格顯示現在/今天剩
 /// 表格第一列，`locations` 裡 `add` 加進來的城市依序排在後面。
 const AUTO_DETECT: &str = "";
 
-/// 一個地點抓回來、已經整理好的報告：`headers`/`row` 一一對應（`now`、今天剩下
-/// 的時段、未來幾天），還在抓取中或抓失敗時只有一欄狀態訊息（`headers` 長度是
-/// 1），`text()` 組合表格時靠這個長度差異分辨要不要當成「有資料」的一列。
+/// 一欄的內容種類：`now`／今天剩下的時段／未來的日期，各自需要的數值不一樣
+/// （`now`／`hour` 是單一氣溫，`day` 是氣溫範圍），拆成 enum 而不是塞進共用的
+/// `Vec<String>`，是因為 `snapshot()`（給 tablet 前端畫圖示用）需要保留數字
+/// 跟分類（`WeatherColumn::slug`），不能只有 `cells()` 拼好的顯示字串。
+#[derive(Clone)]
+enum WeatherColumnKind {
+    Now { temp_c: i32, feels_like_c: i32, humidity: i32 },
+    Hour { temp_c: i32 },
+    /// `is_today`：`weather[]` 第一筆本來就是今天，`snapshot()` 的 `days`
+    /// （給前端畫「未來預報」用）要排除這一筆——今天已經有 `now`／`today`
+    /// （今天剩下的時段）可以看了，不需要在「未來」那排重複列一次。`text()`
+    /// 的純文字表格不受影響，兩者都照樣列出來（跟改之前的行為一致）。
+    Day { min_c: i32, max_c: i32, is_today: bool },
+}
+
+/// 一欄天氣資料：`header` 是表格表頭（"now"／"15:00"／"7/18"…），`slug` 是給
+/// `snapshot()` 用的圖示/背景分類鍵（例如 `"rain"`），`desc` 是對應的英文描述
+/// （跟改之前的 `weather_text()` 回傳值一樣，維持 `text()` 純文字輸出不變）。
+#[derive(Clone)]
+struct WeatherColumn {
+    header: String,
+    slug: &'static str,
+    desc: &'static str,
+    chance_of_rain: u32,
+    kind: WeatherColumnKind,
+}
+
+impl WeatherColumn {
+    /// `text()`/CLI/TUI 用的純文字表格儲存格：跟改之前的 `cell()` 輸出完全
+    /// 一樣（描述/氣溫/降雨機率各一行），只是資料來源從原本三個各自獨立的
+    /// `(String, Vec<String>)` 改成從這個結構算出來。
+    fn cells(&self) -> Vec<String> {
+        match &self.kind {
+            WeatherColumnKind::Now { temp_c, .. } | WeatherColumnKind::Hour { temp_c } => {
+                vec![self.desc.to_string(), format!("{temp_c}°C"), format!("{}%", self.chance_of_rain)]
+            }
+            WeatherColumnKind::Day { min_c, max_c, .. } => {
+                vec![self.desc.to_string(), format!("{min_c}~{max_c}°C"), format!("{}%", self.chance_of_rain)]
+            }
+        }
+    }
+}
+
+/// 一個地點抓回來、已經整理好的報告：`status` 是 `Some` 代表還在抓取中／抓失敗
+/// （`columns` 這時一定是空的，`text()`/`snapshot()` 都只顯示這個狀態訊息）；
+/// 抓到真正資料時 `status` 是 `None`，`columns` 依序是 `now`、今天剩下的時段、
+/// 然後未來幾天。
 #[derive(Clone)]
 struct LocationReport {
     place: String,
-    headers: Vec<String>,
-    row: Vec<Vec<String>>,
+    status: Option<String>,
+    columns: Vec<WeatherColumn>,
+}
+
+/// `snapshot()` 給 `/api/weather/list` 用的 JSON 結構，見該函式的說明。
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct WeatherNowJson {
+    category: String,
+    desc: String,
+    temp_c: i32,
+    feels_like_c: i32,
+    humidity: i32,
+    chance_of_rain: u32,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct WeatherHourJson {
+    label: String,
+    category: String,
+    desc: String,
+    temp_c: i32,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct WeatherDayJson {
+    label: String,
+    category: String,
+    desc: String,
+    min_c: i32,
+    max_c: i32,
+    chance_of_rain: u32,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct LocationJson {
+    /// 地點清單裡的識別碼：自動偵測地點是空字串，其餘是 `add` 時用的城市名
+    /// 字串本身（也是 `remove <city>` 要打的那個名字），前端拿這個當「切換
+    /// 地區」時要記住/送出的 key，`place` 只是給人看的顯示名稱（自動偵測地點
+    /// 會被 wttr.in 換成實際地名，兩者不一定相同）。
+    key: String,
+    place: String,
+    status: Option<String>,
+    now: Option<WeatherNowJson>,
+    today: Vec<WeatherHourJson>,
+    days: Vec<WeatherDayJson>,
 }
 
 struct CacheEntry {
@@ -164,22 +251,23 @@ impl WeatherPlugin {
             reports.push(self.display(city));
         }
 
-        let headers = reports
+        let headers: Vec<String> = reports
             .iter()
-            .max_by_key(|report| report.row.len())
-            .map(|report| report.headers.clone())
+            .filter(|report| report.status.is_none())
+            .max_by_key(|report| report.columns.len())
+            .map(|report| report.columns.iter().map(|c| c.header.clone()).collect())
             .unwrap_or_else(|| vec!["狀態".to_string()]);
 
         let rows: Vec<Vec<Vec<String>>> = reports
             .into_iter()
             .map(|report| {
                 let mut cells = vec![vec![report.place]];
-                if report.row.len() == headers.len() {
-                    cells.extend(report.row);
-                } else {
-                    let message = report.row.into_iter().next().unwrap_or_default();
-                    cells.push(message);
-                    cells.extend(std::iter::repeat_with(|| vec![String::new()]).take(headers.len().saturating_sub(1)));
+                match report.status {
+                    None => cells.extend(report.columns.iter().map(WeatherColumn::cells)),
+                    Some(message) => {
+                        cells.push(vec![message]);
+                        cells.extend(std::iter::repeat_with(|| vec![String::new()]).take(headers.len().saturating_sub(1)));
+                    }
                 }
                 cells
             })
@@ -189,6 +277,68 @@ impl WeatherPlugin {
         full_headers.extend(headers);
         let header_refs: Vec<&str> = full_headers.iter().map(String::as_str).collect();
         render_table(&header_refs, &rows)
+    }
+
+    /// 給 tablet 前端用的結構化清單（`web.rs` 的 `/api/weather/list` 呼叫這個
+    /// 轉成 JSON）：跟 `text()` 一樣，第一筆永遠是自動偵測地點，後面依序是
+    /// `add` 加過的城市；跟 `text()` 不一樣的是這裡回傳的是可以直接拿去畫圖示/
+    /// 背景動畫的數字跟分類，不是拼好的顯示字串。
+    pub(crate) fn snapshot(&self) -> Vec<LocationJson> {
+        let mut items = Vec::with_capacity(1 + self.locations.len());
+        items.push(Self::location_json(AUTO_DETECT, self.display(AUTO_DETECT)));
+        for city in &self.locations {
+            items.push(Self::location_json(city, self.display(city)));
+        }
+        items
+    }
+
+    /// 把一個地點的 `LocationReport` 轉成 JSON 結構：`now`／`today`（今天剩下
+    /// 的時段）／`days`（未來預報，跳過 `is_today` 那一筆，見
+    /// `WeatherColumnKind::Day` 的說明）。
+    fn location_json(key: &str, report: LocationReport) -> LocationJson {
+        let Some(status) = report.status else {
+            let mut now = None;
+            let mut today = Vec::new();
+            let mut days = Vec::new();
+            for column in report.columns {
+                match column.kind {
+                    WeatherColumnKind::Now { temp_c, feels_like_c, humidity } => {
+                        now = Some(WeatherNowJson {
+                            category: column.slug.to_string(),
+                            desc: column.desc.to_string(),
+                            temp_c,
+                            feels_like_c,
+                            humidity,
+                            chance_of_rain: column.chance_of_rain,
+                        });
+                    }
+                    WeatherColumnKind::Hour { temp_c } => {
+                        today.push(WeatherHourJson {
+                            label: column.header,
+                            category: column.slug.to_string(),
+                            desc: column.desc.to_string(),
+                            temp_c,
+                        });
+                    }
+                    WeatherColumnKind::Day { min_c, max_c, is_today: true } => {
+                        // 今天已經有 `now`／`today` 可以看，這裡不重複列。
+                        let _ = (min_c, max_c);
+                    }
+                    WeatherColumnKind::Day { min_c, max_c, is_today: false } => {
+                        days.push(WeatherDayJson {
+                            label: column.header,
+                            category: column.slug.to_string(),
+                            desc: column.desc.to_string(),
+                            min_c,
+                            max_c,
+                            chance_of_rain: column.chance_of_rain,
+                        });
+                    }
+                }
+            }
+            return LocationJson { key: key.to_string(), place: report.place, status: None, now, today, days };
+        };
+        LocationJson { key: key.to_string(), place: report.place, status: Some(status), now: None, today: Vec::new(), days: Vec::new() }
     }
 
     /// 只讀快取，不做任何網路呼叫：有資料就回傳（同時判斷是否過期該重抓），
@@ -213,10 +363,11 @@ impl WeatherPlugin {
         }
     }
 
-    /// 只有一欄狀態訊息的報告，`display()`（還沒抓過）跟 `fetch()`（抓失敗）共用。
+    /// 只有一句狀態訊息、沒有任何欄位的報告，`display()`（還沒抓過）跟
+    /// `fetch()`（抓失敗）共用。
     fn placeholder(location: &str, message: &str) -> LocationReport {
         let place = if location.is_empty() { "自動偵測".to_string() } else { location.to_string() };
-        LocationReport { place, headers: vec!["狀態".to_string()], row: vec![vec![message.to_string()]] }
+        LocationReport { place, status: Some(message.to_string()), columns: Vec::new() }
     }
 
     /// 開一個背景執行緒去抓 `location` 的天氣，抓完寫回 `cache`；如果這個地點
@@ -281,49 +432,56 @@ impl WeatherPlugin {
             requested_location.to_string()
         };
 
-        let mut columns: Vec<(String, Vec<String>)> =
-            vec![("now".to_string(), Self::now_column(current, today, now_minutes))];
+        let mut columns = vec![Self::now_column(current, today, now_minutes)];
 
         if let Some(hourly) = today.get("hourly").and_then(|h| h.as_array()) {
             columns.extend(hourly.iter().filter_map(|hour| Self::hourly_column(hour, now_minutes)));
         }
-        columns.extend(days.iter().filter_map(Self::daily_column));
+        columns.extend(days.iter().enumerate().filter_map(|(i, day)| Self::daily_column(day, i == 0)));
 
-        let (headers, row): (Vec<String>, Vec<Vec<String>>) = columns.into_iter().unzip();
-        Some(LocationReport { place, headers, row })
+        Some(LocationReport { place, status: None, columns })
     }
 
     /// `now` 那一欄：氣溫/天氣描述直接用 `current_condition`，降雨機率取「現在
     /// 這個時段」（見 `current_chance_of_rain`）。
-    fn now_column(current: &Value, today: &Value, now_minutes: Option<u32>) -> Vec<String> {
-        let temp = current.get("temp_C").and_then(|v| v.as_str()).unwrap_or("?");
-        let desc = current.get("weatherCode").and_then(|v| v.as_str()).map(Self::weather_text).unwrap_or("");
+    fn now_column(current: &Value, today: &Value, now_minutes: Option<u32>) -> WeatherColumn {
+        let temp_c = current.get("temp_C").map(Self::parse_i32).unwrap_or(0);
+        let feels_like_c = current.get("FeelsLikeC").map(Self::parse_i32).unwrap_or(temp_c);
+        let humidity = current.get("humidity").map(Self::parse_i32).unwrap_or(0);
+        let (slug, desc) = current.get("weatherCode").and_then(|v| v.as_str()).map(Self::classify).unwrap_or(("unknown", "Unknown"));
         let chance = Self::current_chance_of_rain(today, now_minutes);
-        Self::cell(desc, temp, chance)
+        WeatherColumn {
+            header: "now".to_string(),
+            slug,
+            desc,
+            chance_of_rain: chance,
+            kind: WeatherColumnKind::Now { temp_c, feels_like_c, humidity },
+        }
     }
 
     /// 今天單一個 3 小時時段那一欄：時間已經過去（早於 `now_minutes`）就回傳
     /// `None`，讓呼叫端直接跳過這一欄，不列進表格裡。
-    fn hourly_column(hour: &Value, now_minutes: Option<u32>) -> Option<(String, Vec<String>)> {
+    fn hourly_column(hour: &Value, now_minutes: Option<u32>) -> Option<WeatherColumn> {
         let hhmm = Self::hour_hhmm(hour)?;
         let slot_minutes = Self::hhmm_to_minutes(&hhmm)?;
         if now_minutes.is_some_and(|now| slot_minutes < now) {
             return None;
         }
-        let temp = hour.get("tempC")?.as_str()?;
+        let temp_c: i32 = hour.get("tempC")?.as_str()?.parse().ok()?;
         let chance: u32 = hour.get("chanceofrain")?.as_str()?.parse().ok()?;
-        let desc = hour.get("weatherCode").and_then(|v| v.as_str()).map(Self::weather_text).unwrap_or("");
+        let (slug, desc) = hour.get("weatherCode").and_then(|v| v.as_str()).map(Self::classify).unwrap_or(("unknown", "Unknown"));
         let header = format!("{}:00", &hhmm[0..2]);
-        Some((header, Self::cell(desc, temp, chance)))
+        Some(WeatherColumn { header, slug, desc, chance_of_rain: chance, kind: WeatherColumnKind::Hour { temp_c } })
     }
 
     /// `weather[]` 裡一整天那一欄：表頭是「月/日」短日期，內容是天氣描述/氣溫
     /// 範圍/當天最高降雨機率；天氣描述挑中午（`1200`）那個時段代表這一天，
-    /// wttr.in 自己選每日圖示也是這樣挑的，沒有中午這筆就退回第一筆。
-    fn daily_column(day: &Value) -> Option<(String, Vec<String>)> {
+    /// wttr.in 自己選每日圖示也是這樣挑的，沒有中午這筆就退回第一筆。`is_today`
+    /// 見 `WeatherColumnKind::Day` 的說明。
+    fn daily_column(day: &Value, is_today: bool) -> Option<WeatherColumn> {
         let date = day.get("date")?.as_str()?;
-        let min = day.get("mintempC")?.as_str()?;
-        let max = day.get("maxtempC")?.as_str()?;
+        let min_c: i32 = day.get("mintempC")?.as_str()?.parse().ok()?;
+        let max_c: i32 = day.get("maxtempC")?.as_str()?.parse().ok()?;
         let chance = Self::day_chance_of_rain(day);
         let hourly = day.get("hourly").and_then(|h| h.as_array());
         let noon = hourly.and_then(|hourly| {
@@ -332,13 +490,21 @@ impl WeatherPlugin {
                 .find(|hour| hour.get("time").and_then(|v| v.as_str()) == Some("1200"))
                 .or_else(|| hourly.first())
         });
-        let desc = noon.and_then(|hour| hour.get("weatherCode")).and_then(|v| v.as_str()).map(Self::weather_text).unwrap_or("");
-        Some((Self::short_date(date), vec![desc.to_string(), format!("{min}~{max}°C"), format!("{chance}%")]))
+        let (slug, desc) =
+            noon.and_then(|hour| hour.get("weatherCode")).and_then(|v| v.as_str()).map(Self::classify).unwrap_or(("unknown", "Unknown"));
+        Some(WeatherColumn {
+            header: Self::short_date(date),
+            slug,
+            desc,
+            chance_of_rain: chance,
+            kind: WeatherColumnKind::Day { min_c, max_c, is_today },
+        })
     }
 
-    /// 一個儲存格的內容：天氣描述、溫度、降雨機率各自獨立一行。
-    fn cell(desc: &str, temp: &str, chance: u32) -> Vec<String> {
-        vec![desc.to_string(), format!("{temp}°C"), format!("{chance}%")]
+    /// wttr.in 數字欄位都是以字串形式存放（`"28"`），解析失敗（格式跑掉）就
+    /// 當成 0，不讓整個地點因為一個次要欄位解析失敗就顯示不出來。
+    fn parse_i32(value: &Value) -> i32 {
+        value.as_str().and_then(|s| s.parse().ok()).unwrap_or(0)
     }
 
     /// `"2026-07-18"` 這種 ISO 日期簡化成 `"7/18"`（月/日，不補零），當表頭用。
@@ -350,26 +516,26 @@ impl WeatherPlugin {
         format!("{month}/{day}")
     }
 
-    /// wttr.in（World Weather Online）的 `weatherCode` 對應到一句簡短的英文天氣
-    /// 描述。原本試過 emoji 圖示，但 emoji 在終端機/瀏覽器兩邊的實際顯示寬度不
-    /// 保證一致（各自的字型/渲染引擎決定，不是我們這邊寬度算得準不準的問題）；
-    /// 中文描述則是中文字在瀏覽器裡容易被换成跟西文等寬字型沒對齊好的替代字型
-    /// （見 `body` 的 `font-family` 註解）。純 ASCII 文字兩邊都不會有這些問題。
-    /// 沒對到的代碼給一個中性的說法，不讓整格空著。
-    fn weather_text(code: &str) -> &'static str {
+    /// wttr.in（World Weather Online）的 `weatherCode` 分類成 (slug, 英文描述)：
+    /// `desc` 沿用改之前 `weather_text()` 的英文描述，給 `text()` 純文字輸出用
+    /// （原因見改之前的說明：emoji 兩邊寬度不一致、中文字型容易跑掉，純 ASCII
+    /// 最穩）；`slug` 是新加的，給 `snapshot()` 的 JSON 輸出用，tablet 前端拿
+    /// 這個字串選圖示／背景動畫（tablet.html 是獨立頁面，不受純文字等寬表格
+    /// 的限制，可以用圖示）。沒對到的代碼給一個中性的分類，不讓整格空著。
+    fn classify(code: &str) -> (&'static str, &'static str) {
         match code {
-            "113" => "Sunny",
-            "116" => "Partly cloudy",
-            "119" => "Cloudy",
-            "122" => "Overcast",
-            "143" | "248" | "260" => "Fog",
-            "176" | "263" | "266" | "293" | "353" => "Showers",
+            "113" => ("sunny", "Sunny"),
+            "116" => ("partly-cloudy", "Partly cloudy"),
+            "119" => ("cloudy", "Cloudy"),
+            "122" => ("overcast", "Overcast"),
+            "143" | "248" | "260" => ("fog", "Fog"),
+            "176" | "263" | "266" | "293" | "353" => ("showers", "Showers"),
             "179" | "182" | "227" | "230" | "317" | "320" | "323" | "326" | "329" | "332" | "335" | "338" | "362"
-            | "365" | "368" | "371" => "Snow",
-            "185" | "281" | "284" | "296" | "299" | "302" | "305" | "308" | "311" | "314" | "356" => "Rain",
-            "200" | "359" | "386" | "389" | "392" | "395" => "Thunderstorm",
-            "350" | "374" | "377" => "Ice pellets",
-            _ => "Unknown",
+            | "365" | "368" | "371" => ("snow", "Snow"),
+            "185" | "281" | "284" | "296" | "299" | "302" | "305" | "308" | "311" | "314" | "356" => ("rain", "Rain"),
+            "200" | "359" | "386" | "389" | "392" | "395" => ("thunderstorm", "Thunderstorm"),
+            "350" | "374" | "377" => ("ice-pellets", "Ice pellets"),
+            _ => ("unknown", "Unknown"),
         }
     }
 

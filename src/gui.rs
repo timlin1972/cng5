@@ -73,9 +73,25 @@ fn flash_style(elapsed: Duration) -> Style {
     }
 }
 
+/// 閃爍窗口過後的預設樣式：離線（alive 那一欄不是 `*`）整排都調淡一點
+/// （`Color::DarkGray`，跟 `PANEL_HINT` 那行提示字同一個顏色，這個專案已經
+/// 驗證過在深色終端機背景下還讀得清楚），在線的維持原本樣式不變。閃爍窗口
+/// 內優先顯示 `flash_style`（剛變化的格子，不管這一列是否離線都要看得到）。
+fn cell_style(elapsed: Duration, offline: bool) -> Style {
+    if elapsed < Duration::from_secs(1) {
+        flash_style(elapsed)
+    } else if offline {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    }
+}
+
 /// 把一份 `TableSnapshot` 畫成對齊好的逐格 `Line`：表頭／分隔線排版邏輯跟
-/// `global.rs`/`device.rs` 的 `render_table` 一致，每一格再依 `flash_style`
-/// 套上樣式。
+/// `global.rs`/`device.rs` 的 `render_table` 一致，每一格再依 `cell_style`
+/// 套上樣式。`offline` 只看每一列最後一欄（alive，`device.rs`/`global.rs`
+/// 的 `rows()` 都把它排在 `cells` 最後一個）是不是 `*`，`TableSnapshot` 本身
+/// 不知道哪一欄語意上是 alive，所以只能用這個「最後一欄」的慣例判斷。
 fn render_table_snapshot(snapshot: &TableSnapshot) -> Vec<Line<'static>> {
     let widths = snapshot.column_widths();
     let pad = |s: &str, w: usize| format!("{s}{}", " ".repeat(w.saturating_sub(UnicodeWidthStr::width(s))));
@@ -91,12 +107,13 @@ fn render_table_snapshot(snapshot: &TableSnapshot) -> Vec<Line<'static>> {
 
     let mut lines = vec![Line::from(header_spans), Line::raw(separator)];
     for row in &snapshot.rows {
+        let offline = row.cells.last().is_some_and(|c| c.text != "*");
         let mut spans = Vec::new();
         for (i, (cell, w)) in row.cells.iter().zip(&widths).enumerate() {
             if i > 0 {
                 spans.push(Span::raw(" | "));
             }
-            spans.push(Span::styled(pad(&cell.text, *w), flash_style(cell.changed_at.elapsed())));
+            spans.push(Span::styled(pad(&cell.text, *w), cell_style(cell.changed_at.elapsed(), offline)));
         }
         lines.push(Line::from(spans));
     }

@@ -41,8 +41,164 @@
   .data-table { width: 100%; border-collapse: collapse; font-size: 15px; }
   .data-table th, .data-table td { padding: 10px 12px; border-top: 1px solid #262a33; white-space: pre; text-align: left; }
   .data-table th { color: #9aa4b8; font-weight: normal; border-top: none; border-bottom: 1px solid #3a4150; }
+  .data-table tr.row-offline { color: #8a92a5; }
   .plain-panel { white-space: pre-wrap; font-size: 15px; line-height: 1.6; }
   .empty-hint { color: #9aa4b8; padding: 16px; font-size: 15px; }
+
+  /* weather 分頁：左側地區清單＋右側大圖（圖示＋動態背景＋現在氣溫／今天／
+     未來預報），見 `startWeatherTab` 的說明。 */
+  .weather-body { height: 100%; display: flex; overflow: hidden; }
+  .weather-sidebar { width: 180px; flex: none; overflow-y: auto; background: #1b1e26; border-right: 1px solid #262a33; }
+  .weather-loc-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px;
+    cursor: pointer;
+    border-bottom: 1px solid #262a33;
+    color: #fff;
+  }
+  .weather-loc-row.selected { background: #262a33; }
+  .weather-loc-icon { width: 28px; height: 28px; flex: none; }
+  .weather-loc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+  .weather-loc-temp { flex: none; font-size: 14px; color: #9aa4b8; }
+
+  .weather-main { flex: 1; position: relative; overflow: auto; display: flex; flex-direction: column; color: #fff; }
+  /* 動態背景層：漸層色＋依天氣分類疊加的雲/霧/雨/雪/太陽光暈/閃電效果，
+     `position: absolute; inset: 0` 蓋滿 `.weather-main`，前景內容（`.weather-
+     hero`/`.weather-forecast-section`）用 `z-index: 1` 疊在上面。 */
+  .weather-bg { position: absolute; inset: 0; overflow: hidden; }
+  .weather-bg-dim::after { content: ""; position: absolute; inset: 0; background: rgba(0, 0, 0, 0.15); }
+  .weather-sun-glow {
+    position: absolute;
+    top: -15%;
+    left: 50%;
+    width: 220px;
+    height: 220px;
+    margin-left: -110px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0));
+    border-radius: 50%;
+    animation: weatherSunPulse 6s ease-in-out infinite;
+  }
+  @keyframes weatherSunPulse {
+    0%, 100% { opacity: .7; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.08); }
+  }
+  .weather-cloud {
+    position: absolute;
+    left: -30%;
+    width: 180px;
+    height: 70px;
+    background: #fff;
+    border-radius: 60px;
+    animation-name: weatherCloudDrift;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  .weather-cloud::before, .weather-cloud::after { content: ""; position: absolute; background: #fff; border-radius: 50%; }
+  .weather-cloud::before { width: 70px; height: 70px; top: -30px; left: 20px; }
+  .weather-cloud::after { width: 50px; height: 50px; top: -18px; left: 90px; }
+  @keyframes weatherCloudDrift {
+    from { transform: translateX(0); }
+    to { transform: translateX(160vw); }
+  }
+  .weather-fog-band {
+    position: absolute;
+    left: -20%;
+    width: 140%;
+    height: 40px;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    animation-name: weatherFogDrift;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+  }
+  @keyframes weatherFogDrift {
+    0%, 100% { transform: translateX(-6%); }
+    50% { transform: translateX(6%); }
+  }
+  .weather-drop {
+    position: absolute;
+    top: -10%;
+    width: 2px;
+    height: 16px;
+    background: linear-gradient(rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.7));
+    animation-name: weatherDropFall;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  @keyframes weatherDropFall {
+    from { top: -10%; }
+    to { top: 110%; }
+  }
+  .weather-flake {
+    position: absolute;
+    top: -5%;
+    background: #fff;
+    border-radius: 50%;
+    opacity: .85;
+    animation-name: weatherFlakeFall;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  @keyframes weatherFlakeFall {
+    from { top: -5%; transform: translateX(0); }
+    to { top: 110%; transform: translateX(20px); }
+  }
+  .weather-flash {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+    animation: weatherLightning 7s infinite;
+  }
+  @keyframes weatherLightning {
+    0%, 92%, 100% { opacity: 0; }
+    93% { opacity: .8; }
+    94% { opacity: 0; }
+    95% { opacity: .5; }
+    96% { opacity: 0; }
+  }
+
+  .weather-hero {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 32px 16px 16px;
+    flex: none;
+  }
+  .weather-hero-icon { width: 120px; height: 120px; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3)); }
+  .weather-hero-temp { font-size: 48px; font-weight: 600; }
+  .weather-hero-desc { font-size: 18px; }
+  .weather-hero-sub { font-size: 13px; opacity: .85; }
+
+  .weather-forecast-section { position: relative; z-index: 1; padding: 8px 16px; flex: none; }
+  .weather-forecast-label { font-size: 13px; opacity: .75; margin-bottom: 6px; text-align: center; }
+  /* `justify-content: center` 直接放在有 `overflow-x: auto` 的 flex
+     容器上，內容一旦寬過容器就會出現經典的 flexbox 置中 + overflow 問題：
+     瀏覽器預設的 scroll 起點會對齊到「置中排列後」的最左端，視覺上看起來
+     跟沒置中一樣是靠左。改成外層 `.weather-forecast-row` 只負責
+     `overflow-x: auto`（純捲動容器），真正排列的 `.weather-forecast-track`
+     用 `width: max-content` + `margin: 0 auto`：內容比容器窄時 auto margin
+     會置中；內容比容器寬時 auto margin 算出來是 0，自動退回靠左＋可捲動，
+     不會有一半內容捲不到的問題。 */
+  .weather-forecast-row { overflow-x: auto; padding-bottom: 4px; }
+  .weather-forecast-track { display: flex; gap: 16px; width: max-content; margin: 0 auto; }
+  .weather-forecast-item { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: none; min-width: 56px; }
+  .weather-forecast-icon { width: 36px; height: 36px; }
+  .weather-forecast-item .label { font-size: 12px; opacity: .8; }
+  .weather-forecast-item .temp { font-size: 13px; }
+  .weather-forecast-item .rain { font-size: 11px; opacity: .75; }
+  .weather-forecast-empty { font-size: 13px; opacity: .6; padding: 8px 0; text-align: center; }
+
+  .weather-loc-icon svg, .weather-hero-icon svg, .weather-forecast-icon svg { width: 100%; height: 100%; display: block; }
+  .weather-icon-sun-rays { transform-box: fill-box; transform-origin: center; animation: weatherIconSunRotate 20s linear infinite; }
+  @keyframes weatherIconSunRotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
 
   /* topology 分頁專用，跟桌面版 frontend.html 的 `.topology-*` 是同一套
      設計，這裡各自一份（這次刻意不共用 JS/CSS 模組，見 spec 的取捨說明）。 */
@@ -225,6 +381,13 @@
     const tbody = document.createElement("tbody");
     for (const row of snapshot.rows) {
       const tr = document.createElement("tr");
+      // alive 永遠是最後一欄（`device.rs`/`global.rs` 的 `rows()` 都把它排在
+      // `cells` 最後一個），不是 `*` 就是離線，整排文字調淡一點（不是只淡化
+      // alive 那一格），但不要淡到看不清楚。
+      const aliveCell = row.cells[row.cells.length - 1];
+      if (aliveCell && aliveCell.text !== "*") {
+        tr.className = "row-offline";
+      }
       for (const cell of row.cells) {
         const td = document.createElement("td");
         td.textContent = cell.text;
@@ -259,8 +422,9 @@
     };
   }
 
-  // `weather`／`system` 分頁共用：沿用桌面版既有的純文字 panel 機制
-  // （`/api/panel/<name>/stream`），內容原樣顯示。
+  // `system` 分頁沿用桌面版既有的純文字 panel 機制
+  // （`/api/panel/<name>/stream`），內容原樣顯示。`weather` 分頁改成自己的
+  // 圖示化版面（見下面 `startWeatherTab`），不再共用這個函式。
   function makePlainPanelTab(panelName) {
     return function start(container) {
       const pre = document.createElement("pre");
@@ -278,6 +442,371 @@
       return function stop() {
         es.close();
       };
+    };
+  }
+
+  // weather 分頁：左側地區清單＋右側大圖（圖示＋動態背景＋現在氣溫，下面分
+  // 「今天」／「未來預報」兩排），資料來自 `/api/weather/list`（見
+  // `src/plugins/weather.rs` 的 `WeatherPlugin::snapshot`），跟桌面版的純文字
+  // panel（`/api/panel/weather/stream`）是兩條獨立的路——桌面版刻意維持純
+  // ASCII 等寬表格（見 `weather.rs` `classify()` 的說明：emoji 寬度在終端機/
+  // 瀏覽器不保證一致），tablet 是獨立頁面，不受這個限制，可以放心用圖示／
+  // CSS 動畫。
+  const WEATHER_POLL_MS = 8000;
+
+  // 11 種天氣分類（跟 `weather.rs` 的 `classify()` 一一對應）各自的中文標籤、
+  // 背景漸層色、跟要疊加的動態效果（`buildWeatherBackground` 用）。
+  const WEATHER_LABELS = {
+    sunny: "晴天",
+    "partly-cloudy": "多雲時晴",
+    cloudy: "多雲",
+    overcast: "陰天",
+    fog: "有霧",
+    showers: "短暫陣雨",
+    rain: "下雨",
+    snow: "下雪",
+    thunderstorm: "雷雨",
+    "ice-pellets": "凍雨",
+    unknown: "天氣不明",
+  };
+  const WEATHER_GRADIENTS = {
+    sunny: "linear-gradient(160deg, #ffb347 0%, #ff8a3d 55%, #ff6f61 100%)",
+    "partly-cloudy": "linear-gradient(160deg, #7fb7e8 0%, #a9c9e8 45%, #f0c869 100%)",
+    cloudy: "linear-gradient(160deg, #8a97a8 0%, #6b7789 100%)",
+    overcast: "linear-gradient(160deg, #5c6472 0%, #3a4150 100%)",
+    fog: "linear-gradient(160deg, #c3c9d1 0%, #9aa2ac 100%)",
+    showers: "linear-gradient(160deg, #5c7a9e 0%, #34506b 100%)",
+    rain: "linear-gradient(160deg, #44607e 0%, #223245 100%)",
+    snow: "linear-gradient(160deg, #d8e6f2 0%, #a9c1d6 100%)",
+    thunderstorm: "linear-gradient(160deg, #34364a 0%, #14151f 100%)",
+    "ice-pellets": "linear-gradient(160deg, #c3d8e4 0%, #90aabd 100%)",
+    unknown: "linear-gradient(160deg, #6b7280 0%, #4a5160 100%)",
+  };
+  const WEATHER_EFFECTS = {
+    sunny: { sun: true },
+    "partly-cloudy": { sun: true, clouds: 2 },
+    cloudy: { clouds: 3 },
+    overcast: { clouds: 4, dim: true },
+    fog: { fogBands: 3 },
+    showers: { rain: 12 },
+    rain: { rain: 24 },
+    snow: { snow: 20 },
+    thunderstorm: { rain: 20, lightning: true, dim: true },
+    "ice-pellets": { snow: 14, fast: true },
+    unknown: { clouds: 2 },
+  };
+
+  // 疊加在 `.weather-bg` 上的動態效果：雲飄移／霧飄移／雨滴落下／雪花飄落／
+  // 太陽光暈脈動／雷雨閃光，都是純 CSS `@keyframes` 動畫，這裡只負責依
+  // `WEATHER_EFFECTS[category]` 決定要不要建立、建幾個，每個粒子的位置/
+  // 速度/延遲用 `Math.random()` 錯開，才不會所有雨滴/雪花同步落下看起來
+  // 假假的。
+  function buildWeatherBackground(category) {
+    const bg = document.createElement("div");
+    bg.className = "weather-bg" + (WEATHER_EFFECTS[category]?.dim ? " weather-bg-dim" : "");
+    bg.style.background = WEATHER_GRADIENTS[category] || WEATHER_GRADIENTS.unknown;
+    const effects = WEATHER_EFFECTS[category] || {};
+
+    if (effects.sun) {
+      const glow = document.createElement("div");
+      glow.className = "weather-sun-glow";
+      bg.appendChild(glow);
+    }
+    if (effects.clouds) {
+      for (let i = 0; i < effects.clouds; i++) {
+        const cloud = document.createElement("div");
+        cloud.className = "weather-cloud";
+        cloud.style.top = `${10 + Math.random() * 55}%`;
+        cloud.style.transform = `scale(${0.6 + Math.random() * 0.8})`;
+        cloud.style.opacity = String(0.3 + Math.random() * 0.35);
+        cloud.style.animationDuration = `${40 + Math.random() * 40}s`;
+        cloud.style.animationDelay = `-${Math.random() * 40}s`;
+        bg.appendChild(cloud);
+      }
+    }
+    if (effects.fogBands) {
+      for (let i = 0; i < effects.fogBands; i++) {
+        const band = document.createElement("div");
+        band.className = "weather-fog-band";
+        band.style.top = `${15 + i * 28}%`;
+        band.style.animationDuration = `${16 + Math.random() * 10}s`;
+        band.style.animationDelay = `-${Math.random() * 20}s`;
+        bg.appendChild(band);
+      }
+    }
+    if (effects.rain) {
+      for (let i = 0; i < effects.rain; i++) {
+        const drop = document.createElement("div");
+        drop.className = "weather-drop";
+        drop.style.left = `${Math.random() * 100}%`;
+        drop.style.animationDuration = `${0.5 + Math.random() * 0.4}s`;
+        drop.style.animationDelay = `-${Math.random() * 2}s`;
+        bg.appendChild(drop);
+      }
+    }
+    if (effects.snow) {
+      for (let i = 0; i < effects.snow; i++) {
+        const flake = document.createElement("div");
+        flake.className = "weather-flake";
+        const dur = effects.fast ? 2 + Math.random() : 4 + Math.random() * 3;
+        flake.style.left = `${Math.random() * 100}%`;
+        flake.style.width = flake.style.height = `${3 + Math.random() * 3}px`;
+        flake.style.animationDuration = `${dur}s`;
+        flake.style.animationDelay = `-${Math.random() * dur}s`;
+        bg.appendChild(flake);
+      }
+    }
+    if (effects.lightning) {
+      const flash = document.createElement("div");
+      flash.className = "weather-flash";
+      bg.appendChild(flash);
+    }
+    return bg;
+  }
+
+  // 11 種天氣分類的圖示，統一用 `0 0 100 100` viewBox、單色（`currentColor`，
+  // 由外層 CSS 的 `color` 決定），共用一個「雲」形狀（幾個橢圓/圓形疊在一起，
+  // 同色填滿看起來就是一整片雲，不用刻真正的雲朵貝茲曲線）。
+  const WEATHER_CLOUD_SHAPE =
+    '<ellipse cx="38" cy="60" rx="24" ry="16"/><circle cx="60" cy="46" r="18"/><circle cx="42" cy="38" r="14"/><rect x="24" y="52" width="52" height="22" rx="11"/>';
+  const WEATHER_STROKE_BASE = 'fill="none" stroke="currentColor" stroke-linecap="round"';
+
+  function weatherIconWrap(inner) {
+    return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`;
+  }
+  function weatherSunRays(count, innerR, outerR, cx, cy) {
+    let s = "";
+    for (let i = 0; i < count; i++) {
+      s += `<line x1="${cx}" y1="${cy - outerR}" x2="${cx}" y2="${cy - innerR}" transform="rotate(${(360 / count) * i} ${cx} ${cy})"/>`;
+    }
+    return s;
+  }
+  function weatherRainLines(xs, y1, y2) {
+    return xs.map((x) => `<line x1="${x}" y1="${y1}" x2="${x - 6}" y2="${y2}"/>`).join("");
+  }
+  function weatherSnowflakes(xs, cy, r) {
+    let s = "";
+    for (const cx of xs) {
+      for (let i = 0; i < 3; i++) {
+        s += `<line x1="${cx}" y1="${cy - r}" x2="${cx}" y2="${cy + r}" transform="rotate(${i * 60} ${cx} ${cy})"/>`;
+      }
+    }
+    return s;
+  }
+  function weatherPellets(xs, cy, r) {
+    return xs.map((x) => `<circle cx="${x}" cy="${cy}" r="${r}"/>`).join("");
+  }
+
+  function weatherIconSvg(category) {
+    const cloud = `<g fill="currentColor">${WEATHER_CLOUD_SHAPE}</g>`;
+    switch (category) {
+      case "sunny":
+        return weatherIconWrap(
+          `<g class="weather-icon-sun-rays" ${WEATHER_STROKE_BASE} stroke-width="6">${weatherSunRays(8, 26, 38, 50, 50)}</g>` +
+            `<circle cx="50" cy="50" r="22" fill="currentColor"/>`,
+        );
+      case "partly-cloudy":
+        return weatherIconWrap(
+          `<g class="weather-icon-sun-rays" ${WEATHER_STROKE_BASE} stroke-width="5">${weatherSunRays(8, 16, 26, 40, 38)}</g>` +
+            `<circle cx="40" cy="38" r="14" fill="currentColor"/>` +
+            `<g fill="currentColor" transform="translate(8,10)">${WEATHER_CLOUD_SHAPE}</g>`,
+        );
+      case "cloudy":
+        return weatherIconWrap(`<g fill="currentColor" opacity="0.55" transform="translate(-10,-14) scale(0.85)">${WEATHER_CLOUD_SHAPE}</g>${cloud}`);
+      case "overcast":
+        return weatherIconWrap(
+          `<g fill="currentColor" opacity="0.5" transform="translate(-12,-16) scale(0.85)">${WEATHER_CLOUD_SHAPE}</g>` +
+            `<g fill="currentColor" opacity="0.85">${WEATHER_CLOUD_SHAPE}</g>`,
+        );
+      case "fog":
+        return weatherIconWrap(
+          `<g fill="currentColor" opacity="0.7" transform="translate(0,-10) scale(1,0.85)">${WEATHER_CLOUD_SHAPE}</g>` +
+            `<g ${WEATHER_STROKE_BASE} stroke-width="4"><line x1="20" y1="82" x2="80" y2="82"/><line x1="26" y1="90" x2="74" y2="90"/></g>`,
+        );
+      case "showers":
+        return weatherIconWrap(`${cloud}<g ${WEATHER_STROKE_BASE} stroke-width="5">${weatherRainLines([40, 60], 76, 90)}</g>`);
+      case "rain":
+        return weatherIconWrap(`${cloud}<g ${WEATHER_STROKE_BASE} stroke-width="5">${weatherRainLines([32, 50, 68], 76, 92)}</g>`);
+      case "snow":
+        return weatherIconWrap(`${cloud}<g ${WEATHER_STROKE_BASE} stroke-width="4">${weatherSnowflakes([34, 50, 66], 84, 7)}</g>`);
+      case "thunderstorm":
+        return weatherIconWrap(
+          `<g fill="currentColor" opacity="0.85">${WEATHER_CLOUD_SHAPE}</g>` +
+            `<g ${WEATHER_STROKE_BASE} stroke-width="5">${weatherRainLines([30, 68], 76, 90)}</g>` +
+            `<path d="M56 58 L42 82 L52 82 L44 100 L68 72 L54 72 Z" fill="currentColor"/>`,
+        );
+      case "ice-pellets":
+        return weatherIconWrap(`${cloud}<g fill="currentColor">${weatherPellets([34, 50, 66], 84, 4)}</g>`);
+      default:
+        return weatherIconWrap(`${cloud}<text x="50" y="90" font-size="22" text-anchor="middle" fill="currentColor">?</text>`);
+    }
+  }
+
+  // 一排小圖示（今天剩下的時段／未來預報），`kind` 決定溫度怎麼顯示
+  // （單一氣溫 vs 氣溫範圍）跟沒有資料時的提示文字。
+  function renderWeatherForecastRow(rowEl, items, kind) {
+    rowEl.innerHTML = "";
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "weather-forecast-empty";
+      empty.textContent = kind === "hour" ? "(今天沒有更多預報時段)" : "(沒有未來預報資料)";
+      rowEl.appendChild(empty);
+      return;
+    }
+    const track = document.createElement("div");
+    track.className = "weather-forecast-track";
+    for (const item of items) {
+      const el = document.createElement("div");
+      el.className = "weather-forecast-item";
+      const icon = document.createElement("span");
+      icon.className = "weather-forecast-icon";
+      icon.innerHTML = weatherIconSvg(item.category);
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = item.label;
+      const temp = document.createElement("span");
+      temp.className = "temp";
+      temp.textContent = kind === "hour" ? `${item.temp_c}°` : `${item.min_c}~${item.max_c}°`;
+      const rain = document.createElement("span");
+      rain.className = "rain";
+      rain.textContent = `${item.chance_of_rain}%`;
+      el.appendChild(icon);
+      el.appendChild(label);
+      el.appendChild(temp);
+      el.appendChild(rain);
+      track.appendChild(el);
+    }
+    rowEl.appendChild(track);
+  }
+
+  // 建立 weather 分頁：定期打 `/api/weather/list` 拿目前所有地點的結構化天氣
+  // 資料，左側清單點哪個地區、右側大圖就換成那個地區的圖示／背景／預報，
+  // `selectedKey` 跨每一輪 poll 保留（除非那個地區被移除了才退回清單第一個，
+  // 通常是自動偵測地點）。回傳 `stop` 函式，切分頁時清掉 interval。
+  function startWeatherTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "weather-body";
+    const sidebar = document.createElement("div");
+    sidebar.className = "weather-sidebar";
+    const main = document.createElement("div");
+    main.className = "weather-main";
+    wrap.appendChild(sidebar);
+    wrap.appendChild(main);
+    container.appendChild(wrap);
+
+    let stopped = false;
+    let locations = [];
+    let selectedKey = null;
+
+    function renderSidebar() {
+      sidebar.innerHTML = "";
+      for (const loc of locations) {
+        const row = document.createElement("div");
+        row.className = "weather-loc-row" + (loc.key === selectedKey ? " selected" : "");
+        const icon = document.createElement("span");
+        icon.className = "weather-loc-icon";
+        icon.innerHTML = weatherIconSvg(loc.now ? loc.now.category : "unknown");
+        const name = document.createElement("span");
+        name.className = "weather-loc-name";
+        name.textContent = loc.key === "" ? `${loc.place}（自動偵測）` : loc.place;
+        const temp = document.createElement("span");
+        temp.className = "weather-loc-temp";
+        temp.textContent = loc.now ? `${loc.now.temp_c}°` : "…";
+        row.appendChild(icon);
+        row.appendChild(name);
+        row.appendChild(temp);
+        row.addEventListener("click", () => {
+          selectedKey = loc.key;
+          renderSidebar();
+          renderMain();
+        });
+        sidebar.appendChild(row);
+      }
+    }
+
+    function renderMain() {
+      main.innerHTML = "";
+      const loc = locations.find((l) => l.key === selectedKey);
+      if (!loc) return;
+      const category = loc.now ? loc.now.category : "unknown";
+      main.appendChild(buildWeatherBackground(category));
+
+      const hero = document.createElement("div");
+      hero.className = "weather-hero";
+      const icon = document.createElement("div");
+      icon.className = "weather-hero-icon";
+      icon.innerHTML = weatherIconSvg(category);
+      hero.appendChild(icon);
+
+      if (loc.status) {
+        const desc = document.createElement("div");
+        desc.className = "weather-hero-desc";
+        desc.textContent = loc.status;
+        hero.appendChild(desc);
+        main.appendChild(hero);
+        return;
+      }
+
+      const temp = document.createElement("div");
+      temp.className = "weather-hero-temp";
+      temp.textContent = `${loc.now.temp_c}°C`;
+      const desc = document.createElement("div");
+      desc.className = "weather-hero-desc";
+      desc.textContent = WEATHER_LABELS[category] || category;
+      const sub = document.createElement("div");
+      sub.className = "weather-hero-sub";
+      sub.textContent = `體感 ${loc.now.feels_like_c}° · 濕度 ${loc.now.humidity}% · 降雨機率 ${loc.now.chance_of_rain}%`;
+      hero.appendChild(temp);
+      hero.appendChild(desc);
+      hero.appendChild(sub);
+      main.appendChild(hero);
+
+      const todaySection = document.createElement("div");
+      todaySection.className = "weather-forecast-section";
+      const todayLabel = document.createElement("div");
+      todayLabel.className = "weather-forecast-label";
+      todayLabel.textContent = "今天";
+      const todayRow = document.createElement("div");
+      todayRow.className = "weather-forecast-row";
+      todaySection.appendChild(todayLabel);
+      todaySection.appendChild(todayRow);
+      main.appendChild(todaySection);
+      renderWeatherForecastRow(todayRow, loc.today, "hour");
+
+      const daysSection = document.createElement("div");
+      daysSection.className = "weather-forecast-section";
+      const daysLabel = document.createElement("div");
+      daysLabel.className = "weather-forecast-label";
+      daysLabel.textContent = "未來預報";
+      const daysRow = document.createElement("div");
+      daysRow.className = "weather-forecast-row";
+      daysSection.appendChild(daysLabel);
+      daysSection.appendChild(daysRow);
+      main.appendChild(daysSection);
+      renderWeatherForecastRow(daysRow, loc.days, "day");
+    }
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const res = await fetch("/api/weather/list");
+        locations = await res.json();
+      } catch (_err) {
+        return; // 這次沒抓到就算了，下一輪 poll 再試。
+      }
+      if (selectedKey === null || !locations.some((l) => l.key === selectedKey)) {
+        selectedKey = locations.length > 0 ? locations[0].key : null;
+      }
+      renderSidebar();
+      renderMain();
+    }
+
+    poll();
+    const intervalId = setInterval(poll, WEATHER_POLL_MS);
+
+    return function stop() {
+      stopped = true;
+      clearInterval(intervalId);
     };
   }
 
@@ -1283,7 +1812,7 @@
     device: { start: makeSnapshotTab("device") },
     global: { start: makeSnapshotTab("global") },
     topology: { start: startTopologyTab },
-    weather: { start: makePlainPanelTab("weather") },
+    weather: { start: startWeatherTab },
     system: { start: makePlainPanelTab("system") },
     player: { start: startPlayerTab },
   };

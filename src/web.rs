@@ -21,7 +21,8 @@ use crate::plugin::{
 };
 use crate::plugins::{
     list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
-    DevicePlugin, GlobalPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    DevicePlugin, GlobalPlugin, WeatherPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR,
+    SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -122,6 +123,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/device/register", web::post().to(device_register))
             .route("/api/device/list", web::get().to(device_list))
             .route("/api/global/list", web::get().to(global_list))
+            .route("/api/weather/list", web::get().to(weather_list))
             .route("/api/remote/cross-relay", web::post().to(remote_cross_relay))
             .route("/api/music/copy", web::get().to(music_copy_list))
             .route("/api/music/copy/{name}", web::get().to(music_copy_download))
@@ -169,6 +171,22 @@ async fn device_list(ctx: web::Data<SharedContext>) -> impl Responder {
 /// `broker.emqx.io`。
 async fn global_list(ctx: web::Data<SharedContext>) -> impl Responder {
     let items = merged_global_view(&ctx.lock().unwrap());
+    HttpResponse::Ok().json(items)
+}
+
+/// `GET /api/weather/list`：tablet 前端的 weather 分頁用，回傳每個地點（自動
+/// 偵測 + `add` 過的城市）目前的結構化天氣資料（分類/數字，不是拼好的顯示
+/// 字串），見 `WeatherPlugin::snapshot` 的說明。跟 `table_snapshot_json` 同一個
+/// 「向下轉型拿具體型別」的做法，這裡不用比對「有沒有變化才推播」（不像
+/// `global`/`device` 那樣走 SSE snapshot channel），因為 weather 是每 300 秒才
+/// 換一次資料（`CACHE_TTL`），前端定期 poll 就夠了，不需要另開一組 broadcast
+/// channel。
+async fn weather_list(shell: web::Data<SharedShell>) -> impl Responder {
+    let items = lock_shell(&shell)
+        .plugin_mut("weather")
+        .and_then(|p| p.as_any_mut().downcast_mut::<WeatherPlugin>())
+        .map(|w| w.snapshot())
+        .unwrap_or_default();
     HttpResponse::Ok().json(items)
 }
 
