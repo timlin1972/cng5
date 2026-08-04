@@ -1351,6 +1351,11 @@
   }
 
   function highlightPlaying(musicUi) {
+    // player 分頁沒開著的時候 `musicUi.fileList` 是 `null`（見
+    // `startPlayerTab`/`stopPlayerVisuals` 的說明）——播放狀態（`ended`
+    // 自動接歌、Media Session 的上一首/下一首）在分頁沒開著時一樣會呼叫
+    // 到這裡，這時候沒有清單 DOM 可以反白，直接跳過。
+    if (!musicUi.fileList) return null;
     let activeRow = null;
     for (const row of musicUi.fileList.children) {
       const isActive = row.dataset.name === musicUi.currentName;
@@ -1402,12 +1407,100 @@
     highlightPlaying(musicUi);
   }
 
+  // player 的核心播放狀態（`<audio>` 元素本身、播放清單、目前播放中的檔名、
+  // 播放模式）建立一次、掛在 `document.body` 底下，不隨分頁切換而重建或
+  // 移除——切到 device/global/… 時 `switchTo` 會把 `#content` 整個清空，
+  // 如果 `<audio>` 元素也在裡面，會被當成從文件移除，播放跟著停掉（這正是
+  // 「切分頁音樂就停」這個問題的根源）。只有畫面用的部分（檔案清單/封面/
+  // 歌詞/頻譜/按鈕……）才隨分頁切換建立/拆掉，`musicUi.player`/`.playlist`/
+  // `.currentName`/`.playMode` 這幾個欄位跨分頁切換持續有效，`musicUi` 上的
+  // 畫面元素欄位（`fileList`/`cover`/…）在分頁沒開著時是 `null`——`playByName`
+  // 等函式本來就會檢查這些欄位存不存在才更新畫面，null 的時候自然跳過。
+  const PLAYER_SHUFFLE_ICON =
+    '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.125em">' +
+    '<path d="M4 7 L9 7 C12 7 12 17 15 17 L17 17"></path>' +
+    '<path d="M17 14 L21 17 L17 20"></path>' +
+    '<path d="M4 17 L9 17 C12 17 12 7 15 7 L17 7"></path>' +
+    '<path d="M17 4 L21 7 L17 10"></path>' +
+    "</svg>";
+  const PLAY_MODES = [
+    { mode: "sequential", icon: "⇉", title: "依序播放" },
+    { mode: "shuffle", icon: PLAYER_SHUFFLE_ICON, title: "隨機播放" },
+    { mode: "single", icon: "↻", title: "播放單首" },
+  ];
+  const PLAYER_TEXT_STYLE = "︎";
+
+  const player = document.createElement("audio");
+  // 沒有 `controls` 屬性的 `<audio>` 正常不會佔版面，但 `body` 是
+  // `display: flex; flex-direction: column`，這裡明講 `display: none`
+  // 保險一點，不要讓它變成一個多出來的 flex item 影響版面。
+  player.style.display = "none";
+  document.body.appendChild(player);
+  const musicUi = {
+    fileList: null,
+    fileCount: null,
+    player,
+    cover: null,
+    trackName: null,
+    seekBar: null,
+    timeLabel: null,
+    lyricsEl: null,
+    lyricsLines: [],
+    lyricsActiveIndex: -1,
+    playlist: [],
+    currentName: null,
+    playMode: PLAY_MODES[0].mode,
+    stopPolling: () => {},
+  };
+
+  // 自然播完、Media Session 的上一首/下一首/播放/暫停都是跟播放本身有關
+  // 的邏輯，不管 player 分頁有沒有開著都該生效，只註冊一次。
+  player.addEventListener("ended", () => advanceOnEnded(musicUi));
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.setActionHandler("play", () => player.play());
+    navigator.mediaSession.setActionHandler("pause", () => player.pause());
+    navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
+    player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
+    player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
+  }
+
+  // Web Audio 的 `AudioContext`/`MediaElementAudioSourceNode` 同一個道理要
+  // 跨分頁切換持續存在：`createMediaElementSource` 對同一個 `<audio>` 元素
+  // 只能呼叫一次，而且一旦呼叫過，這個元素的聲音輸出就永久改成透過這個
+  // audio graph 才聽得到（不再是瀏覽器預設直接輸出）——如果切走分頁時把
+  // `audioCtx` 關掉，之後即使 `<audio>` 元素本身還在播放（`paused` 是
+  // `false`），聲音也會變成啞的。所以這裡只在第一次真的要畫頻譜/放射狀
+  // 頻譜時建立，之後永遠留著、不主動關閉；分頁切換只需要停掉畫布動畫的
+  // `requestAnimationFrame` 迴圈（見 `startPlayerTab` 的 `stop()`），不要
+  // 動 `playerAudioCtx`。
+  let playerAudioCtx = null;
+  let playerAnalyser = null;
+  let playerFreqData = null;
+  function ensurePlayerAnalyser() {
+    if (playerAudioCtx) return;
+    playerAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
+    const source = playerAudioCtx.createMediaElementSource(player);
+    playerAnalyser = playerAudioCtx.createAnalyser();
+    playerAnalyser.fftSize = 128;
+    const splitter = playerAudioCtx.createChannelSplitter(2);
+    const merger = playerAudioCtx.createChannelMerger(2);
+    source.connect(playerAnalyser);
+    playerAnalyser.connect(splitter);
+    splitter.connect(merger, 0, 0);
+    splitter.connect(merger, 1, 1);
+    merger.connect(playerAudioCtx.destination);
+    playerFreqData = new Uint8Array(playerAnalyser.frequencyBinCount);
+  }
+
   // 建立 player 分頁：跟桌面版 player panel 完全同一套 DOM／功能（檔案清單＋
   // 刪除＋YouTube 下載、封面/歌詞/頻譜/放射狀頻譜循環、播放模式、Media
   // Session），只是不用桌面版浮動 panel 那層，直接把 `.player-body` 塞進
-  // 分頁的 `container`。切走這個分頁時 `stop()` 只停 poll／視覺化動畫，不會
-  // 暫停播放——跟桌面版 `closePanel` 的行為一致，讓音樂可以在切到其他分頁
-  // （device/global/…）時繼續放，Media Session 的鎖屏控制才有意義。
+  // 分頁的 `container`。切走這個分頁時 `stop()` 只停檔案清單 poll／畫布
+  // 動畫，不會暫停播放、也不會動上面模組層級的 `player`/`playerAudioCtx`
+  // ——音樂會在切到其他分頁（device/global/…）時繼續放，Media Session 的
+  // 鎖屏控制也才有意義。
   function startPlayerTab(container) {
     const wrap = document.createElement("div");
     wrap.className = "player-body";
@@ -1471,23 +1564,11 @@
     trackName.textContent = "(尚未播放)";
     const rightControls = document.createElement("div");
     rightControls.className = "player-controls";
-    const SHUFFLE_ICON =
-      '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" ' +
-      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.125em">' +
-      '<path d="M4 7 L9 7 C12 7 12 17 15 17 L17 17"></path>' +
-      '<path d="M17 14 L21 17 L17 20"></path>' +
-      '<path d="M4 17 L9 17 C12 17 12 7 15 7 L17 7"></path>' +
-      '<path d="M17 4 L21 7 L17 10"></path>' +
-      "</svg>";
-    const PLAY_MODES = [
-      { mode: "sequential", icon: "⇉", title: "依序播放" },
-      { mode: "shuffle", icon: SHUFFLE_ICON, title: "隨機播放" },
-      { mode: "single", icon: "↻", title: "播放單首" },
-    ];
+    const currentMode = PLAY_MODES.find((m) => m.mode === musicUi.playMode) || PLAY_MODES[0];
     const modeBtn = document.createElement("button");
     modeBtn.className = "player-mode-btn";
-    modeBtn.innerHTML = PLAY_MODES[0].icon;
-    modeBtn.title = PLAY_MODES[0].title;
+    modeBtn.innerHTML = currentMode.icon;
+    modeBtn.title = currentMode.title;
     modeBtn.addEventListener("click", () => {
       const idx = PLAY_MODES.findIndex((m) => m.mode === musicUi.playMode);
       const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
@@ -1495,15 +1576,14 @@
       modeBtn.innerHTML = next.icon;
       modeBtn.title = next.title;
     });
-    const TEXT_STYLE = "︎";
     const prevBtn = document.createElement("button");
-    prevBtn.textContent = "⏮" + TEXT_STYLE;
+    prevBtn.textContent = "⏮" + PLAYER_TEXT_STYLE;
     prevBtn.title = "上一首";
     const playPauseBtn = document.createElement("button");
-    playPauseBtn.textContent = "▶" + TEXT_STYLE;
+    playPauseBtn.textContent = (player.paused ? "▶" : "⏸") + PLAYER_TEXT_STYLE;
     playPauseBtn.title = "播放/暫停";
     const nextBtn = document.createElement("button");
-    nextBtn.textContent = "⏭" + TEXT_STYLE;
+    nextBtn.textContent = "⏭" + PLAYER_TEXT_STYLE;
     nextBtn.title = "下一首";
     const transport = document.createElement("div");
     transport.className = "player-transport";
@@ -1524,51 +1604,33 @@
     wrap.appendChild(right);
     container.appendChild(wrap);
 
-    const player = document.createElement("audio");
-    container.appendChild(player);
+    // 接回模組層級的持久 `musicUi`：播放狀態（playlist/currentName/
+    // playMode）維持原樣，只換上這次畫面用的 DOM 元素。
+    musicUi.fileList = fileList;
+    musicUi.fileCount = fileCount;
+    musicUi.cover = cover;
+    musicUi.trackName = trackName;
+    musicUi.seekBar = seekBar;
+    musicUi.timeLabel = timeLabel;
+    musicUi.lyricsEl = lyricsEl;
 
-    const musicUi = {
-      container: wrap,
-      fileList,
-      fileCount,
-      player,
-      cover,
-      trackName,
-      seekBar,
-      timeLabel,
-      lyricsEl,
-      lyricsLines: [],
-      lyricsActiveIndex: -1,
-      playlist: [],
-      currentName: null,
-      playMode: PLAY_MODES[0].mode,
-      stopPolling: () => {},
-      stopVisualizers: () => {},
-    };
+    // 音樂可能是在其他分頁時就已經開始播放/換歌了，剛打開這個分頁要把畫面
+    // 立刻同步成目前的實際播放狀態，不要空等下一次 `timeupdate`/檔案清單
+    // poll 才更新。
+    if (musicUi.currentName) {
+      trackName.textContent = musicUi.currentName;
+      cover.removeAttribute("src");
+      cover.src = `/api/music/file/${encodeURIComponent(musicUi.currentName)}/cover`;
+      renderLyrics(musicUi, musicUi.lyricsLines);
+    }
+    seekBar.max = String(player.duration || 0);
+    seekBar.value = String(player.currentTime || 0);
+    updateTimeLabel(musicUi);
 
-    let audioCtx = null;
-    let analyser = null;
-    let freqData = null;
     let spectrumRafId = null;
     let radialRafId = null;
     const spectrumCtx = spectrum.getContext("2d");
     const radialCtx = radial.getContext("2d");
-
-    function ensureAnalyser() {
-      if (audioCtx) return;
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
-      const source = audioCtx.createMediaElementSource(player);
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 128;
-      const splitter = audioCtx.createChannelSplitter(2);
-      const merger = audioCtx.createChannelMerger(2);
-      source.connect(analyser);
-      analyser.connect(splitter);
-      splitter.connect(merger, 0, 0);
-      splitter.connect(merger, 1, 1);
-      merger.connect(audioCtx.destination);
-      freqData = new Uint8Array(analyser.frequencyBinCount);
-    }
 
     const SPECTRUM_CELL_W = 8;
     const SPECTRUM_CELL_H = 4;
@@ -1588,15 +1650,15 @@
     });
     function drawSpectrum() {
       spectrumRafId = requestAnimationFrame(drawSpectrum);
-      analyser.getByteFrequencyData(freqData);
+      playerAnalyser.getByteFrequencyData(playerFreqData);
       const h = spectrum.height;
       spectrumCtx.clearRect(0, 0, spectrum.width, h);
-      const binsPerColumn = freqData.length / spectrumColumns;
+      const binsPerColumn = playerFreqData.length / spectrumColumns;
       for (let col = 0; col < spectrumColumns; col++) {
         const from = Math.floor(col * binsPerColumn);
         const to = Math.max(from + 1, Math.floor((col + 1) * binsPerColumn));
         let sum = 0;
-        for (let i = from; i < to; i++) sum += freqData[i];
+        for (let i = from; i < to; i++) sum += playerFreqData[i];
         const value = sum / (to - from) / 255;
         const lit = Math.round(value * spectrumRows);
         const x = col * SPECTRUM_PITCH_X;
@@ -1628,10 +1690,10 @@
     const RADIAL_RING_RADIUS = RADIAL_INNER_RADIUS - 4;
     function drawRadial() {
       radialRafId = requestAnimationFrame(drawRadial);
-      analyser.getByteFrequencyData(freqData);
+      playerAnalyser.getByteFrequencyData(playerFreqData);
       radialCtx.clearRect(0, 0, radial.width, radial.height);
 
-      const binsPerBar = freqData.length / RADIAL_BAR_COUNT;
+      const binsPerBar = playerFreqData.length / RADIAL_BAR_COUNT;
       radialCtx.strokeStyle = radialBarGradient;
       radialCtx.lineWidth = 3;
       radialCtx.lineCap = "round";
@@ -1639,7 +1701,7 @@
         const from = Math.floor(i * binsPerBar);
         const to = Math.max(from + 1, Math.floor((i + 1) * binsPerBar));
         let sum = 0;
-        for (let b = from; b < to; b++) sum += freqData[b];
+        for (let b = from; b < to; b++) sum += playerFreqData[b];
         const value = sum / (to - from) / 255;
         const angle = (i / RADIAL_BAR_COUNT) * Math.PI * 2 - Math.PI / 2;
         const len = value * RADIAL_MAX_LEN;
@@ -1695,23 +1757,14 @@
       }
     }
 
-    musicUi.stopVisualizers = () => {
-      stopSpectrumAnim();
-      stopRadialAnim();
-      if (audioCtx) {
-        audioCtx.close();
-        audioCtx = null;
-      }
-    };
-
     const coverViews = [
       { el: cover, onShow: () => {}, onHide: () => {} },
       { el: lyricsEl, onShow: () => scrollActiveLyricIntoView(musicUi), onHide: () => {} },
       {
         el: spectrum,
         onShow: () => {
-          ensureAnalyser();
-          audioCtx.resume();
+          ensurePlayerAnalyser();
+          playerAudioCtx.resume();
           drawSpectrum();
         },
         onHide: stopSpectrumAnim,
@@ -1719,8 +1772,8 @@
       {
         el: radial,
         onShow: () => {
-          ensureAnalyser();
-          audioCtx.resume();
+          ensurePlayerAnalyser();
+          playerAudioCtx.resume();
           drawRadial();
         },
         onHide: stopRadialAnim,
@@ -1757,29 +1810,31 @@
         player.pause();
       }
     });
-    player.addEventListener("play", () => { playPauseBtn.textContent = "⏸" + TEXT_STYLE; });
-    player.addEventListener("pause", () => { playPauseBtn.textContent = "▶" + TEXT_STYLE; });
-    player.addEventListener("ended", () => advanceOnEnded(musicUi));
 
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.setActionHandler("play", () => player.play());
-      navigator.mediaSession.setActionHandler("pause", () => player.pause());
-      navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
-      navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
-      player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
-      player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
-    }
-
+    // 這幾個都是「畫面」層級的更新（按鈕圖示、進度條、歌詞反白），掛在
+    // 模組層級的持久 `player` 上，切走分頁時要記得解除，不然每次重新打開
+    // player 分頁都會疊加一組新的 listener，同一個更新動作會被觸發好幾次
+    // （`stop()` 會呼叫 `removeEventListener`，見下面）。
     let seeking = false;
-    player.addEventListener("loadedmetadata", () => {
+    function onPlay() {
+      playPauseBtn.textContent = "⏸" + PLAYER_TEXT_STYLE;
+    }
+    function onPause() {
+      playPauseBtn.textContent = "▶" + PLAYER_TEXT_STYLE;
+    }
+    function onLoadedMetadata() {
       seekBar.max = String(player.duration || 0);
       updateTimeLabel(musicUi);
-    });
-    player.addEventListener("timeupdate", () => {
+    }
+    function onTimeUpdate() {
       if (!seeking) seekBar.value = String(player.currentTime);
       updateLyricsHighlight(musicUi);
       updateTimeLabel(musicUi);
-    });
+    }
+    player.addEventListener("play", onPlay);
+    player.addEventListener("pause", onPause);
+    player.addEventListener("loadedmetadata", onLoadedMetadata);
+    player.addEventListener("timeupdate", onTimeUpdate);
     seekBar.addEventListener("input", () => {
       seeking = true;
       player.currentTime = Number(seekBar.value);
@@ -1806,7 +1861,22 @@
 
     return function stop() {
       musicUi.stopPolling();
-      musicUi.stopVisualizers();
+      stopSpectrumAnim();
+      stopRadialAnim();
+      player.removeEventListener("play", onPlay);
+      player.removeEventListener("pause", onPause);
+      player.removeEventListener("loadedmetadata", onLoadedMetadata);
+      player.removeEventListener("timeupdate", onTimeUpdate);
+      // 注意：不關閉 `playerAudioCtx`、不暫停 `player`——音樂繼續在背景播放
+      // （見上面模組層級那段的說明）。畫面欄位清成 `null`，讓 `playByName`
+      // 等函式在分頁沒開著時正確跳過畫面更新。
+      musicUi.fileList = null;
+      musicUi.fileCount = null;
+      musicUi.cover = null;
+      musicUi.trackName = null;
+      musicUi.seekBar = null;
+      musicUi.timeLabel = null;
+      musicUi.lyricsEl = null;
     };
   }
 
