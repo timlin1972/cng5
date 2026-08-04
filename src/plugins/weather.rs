@@ -151,6 +151,7 @@ pub(crate) struct WeatherHourJson {
     category: String,
     desc: String,
     temp_c: i32,
+    chance_of_rain: u32,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -318,6 +319,7 @@ impl WeatherPlugin {
                             category: column.slug.to_string(),
                             desc: column.desc.to_string(),
                             temp_c,
+                            chance_of_rain: column.chance_of_rain,
                         });
                     }
                     WeatherColumnKind::Day { min_c, max_c, is_today: true } => {
