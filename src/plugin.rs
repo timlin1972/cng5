@@ -14,7 +14,7 @@ use crate::output::OutputBuffer;
 /// 常數）。之後要發新版本時，**只需要改這一行**：`system` plugin 的
 /// `version` 指令/panel、`DeviceReport`（因此 `device`/`global` 的清單也一
 /// 起）、`/api/version` 都是讀這裡，不用到處改。
-pub const APP_VERSION: &str = "2.0.0";
+pub const APP_VERSION: &str = "2.1.0";
 
 /// 一台裝置目前回報的資訊——不管是這台機器自己（見 `plugins::system` 背景
 /// 回報執行緒直接寫入本機 registry），還是透過 `/api/device/register` 收到
