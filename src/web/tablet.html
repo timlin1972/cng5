@@ -314,6 +314,202 @@
     cursor: pointer;
   }
   .player-controls button:hover { background: #323844; }
+
+  /* storage 分頁：跟桌面版 frontend.html 的 storage panel 是同一套設計，
+     這裡各自一份（同一種取捨，見 topology 那段的說明）。 */
+  .storage-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .storage-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #3a4150;
+  }
+  .storage-breadcrumb { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .storage-breadcrumb a { color: #6f9dff; text-decoration: none; margin-right: 4px; }
+  .storage-breadcrumb a:hover { text-decoration: underline; }
+  .storage-toolbar button {
+    background: #232833;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+  }
+  .storage-toolbar button:hover { background: #2b3140; }
+  /* `flex: 1`/`overflow: auto` 要放在外面包一層的 `<div>`，不能直接放在
+     `<table>` 本身，不然檔案數一少、每列高度會被平分撐開（HTML table 排版
+     演算法的行為），見桌面版同一段註解的完整說明。 */
+  .storage-table-scroll { flex: 1; overflow: auto; }
+  .storage-table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  .storage-table td { height: 40px; padding: 6px 14px; border-top: 1px solid #262a33; white-space: nowrap; vertical-align: top; }
+  .storage-table a { color: #6f9dff; text-decoration: none; }
+  .storage-table a:hover { text-decoration: underline; }
+  .storage-table button {
+    background: none;
+    border: none;
+    color: #9aa4b8;
+    cursor: pointer;
+    font-size: 16px;
+    margin-left: 10px;
+    padding: 4px;
+  }
+  .storage-table button:hover { color: #d8dee9; }
+
+  /* notepad 分頁：跟桌面版一樣，但 Ctrl-E／Ctrl-F／Ctrl-S／Ctrl-X 這幾個
+     組合鍵全部換成按鈕（見 `startNotepadTab` 開頭的說明）。 */
+  .notepad-body { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .notepad-view { flex: 1; overflow: auto; padding: 14px 16px; font-size: 15px; }
+  .notepad-edit { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .notepad-textarea {
+    flex: 1;
+    min-height: 0;
+    resize: none;
+    background: #0d0f13;
+    border: none;
+    border-bottom: 1px solid #262a33;
+    color: #d8dee9;
+    padding: 14px 16px;
+    font: inherit;
+    font-size: 15px;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    outline: none;
+  }
+  .notepad-preview { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; font-size: 15px; }
+  .notepad-hint {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid #262a33;
+    color: #6b7280;
+    font-size: 13px;
+  }
+  .notepad-hint-actions { display: flex; gap: 8px; }
+  .notepad-hint button, .notepad-filename-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 4px;
+    padding: 8px 14px;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+  }
+  .notepad-hint button:hover, .notepad-filename-row button:hover { background: #323844; }
+  .notepad-hint-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .notepad-filename-row {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid #262a33;
+    background: #0d0f13;
+  }
+  .notepad-filename-input {
+    flex: 1;
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    background: #1b1e26;
+    color: #d8dee9;
+    font: inherit;
+    font-size: 15px;
+    outline: none;
+  }
+  .notepad-empty { color: #5a6272; }
+  .notepad-view h1, .notepad-view h2, .notepad-view h3,
+  .notepad-view h4, .notepad-view h5, .notepad-view h6,
+  .notepad-preview h1, .notepad-preview h2, .notepad-preview h3,
+  .notepad-preview h4, .notepad-preview h5, .notepad-preview h6 {
+    color: #6f9dff;
+    margin: 0.6em 0 0.3em;
+  }
+  .notepad-view h1, .notepad-view h2,
+  .notepad-preview h1, .notepad-preview h2 {
+    border-bottom: 1px solid #3a4150;
+    padding-bottom: 0.2em;
+  }
+  .notepad-view p, .notepad-preview p { margin: 0.4em 0; }
+  .notepad-view code, .notepad-preview code {
+    background: #a0a0a0;
+    color: #8b0000;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  .notepad-view s, .notepad-preview s { text-decoration: line-through; }
+  .notepad-underline { text-decoration: underline; }
+  .notepad-highlight { background: #d8dee9; color: #1b1e26; }
+  .notepad-view pre, .notepad-preview pre {
+    background: #0d0f13;
+    border: 1px solid #262a33;
+    border-radius: 4px;
+    padding: 8px 10px;
+    overflow: auto;
+  }
+  .notepad-view pre code, .notepad-preview pre code { background: none; color: inherit; border: none; padding: 0; }
+  .notepad-view .tok-keyword, .notepad-preview .tok-keyword { color: #5c8ae6; font-weight: bold; }
+  .notepad-view .tok-string, .notepad-preview .tok-string { color: #d7ba48; }
+  .notepad-view .tok-number, .notepad-preview .tok-number { color: #c678dd; }
+  .notepad-view .tok-comment, .notepad-preview .tok-comment { color: #6b7280; font-style: italic; }
+  .notepad-view .line-no, .notepad-preview .line-no {
+    display: inline-block;
+    width: 2.5em;
+    margin-right: 0.8em;
+    padding-right: 0.4em;
+    border-right: 1px solid #3a4150;
+    text-align: right;
+    color: #6b7280;
+    user-select: none;
+  }
+  .notepad-view blockquote, .notepad-preview blockquote {
+    margin: 0.4em 0;
+    padding-left: 10px;
+    border-left: 3px solid #3a4150;
+    color: #8a92a5;
+    font-style: italic;
+  }
+  .notepad-view ul, .notepad-preview ul,
+  .notepad-view ol, .notepad-preview ol {
+    margin: 0.3em 0;
+    padding-left: 1.6em;
+  }
+  .notepad-view li.notepad-task, .notepad-preview li.notepad-task {
+    list-style: none;
+    margin-left: -1.6em;
+  }
+  .notepad-view li.notepad-task input, .notepad-preview li.notepad-task input {
+    margin-right: 4px;
+  }
+  .notepad-view hr, .notepad-preview hr {
+    border: none;
+    border-top: 1px solid #3a4150;
+    margin: 0.6em 0;
+  }
+  .notepad-view a, .notepad-preview a { color: #6f9dff; font-weight: bold; text-decoration: underline; }
+  .notepad-view table, .notepad-preview table {
+    border-collapse: collapse;
+    margin: 0.4em 0;
+  }
+  .notepad-view th, .notepad-preview th {
+    font-weight: bold;
+    text-align: left;
+    padding: 3px 10px;
+    border-bottom: 2px solid #3a4150;
+  }
+  .notepad-view td, .notepad-preview td { padding: 3px 10px; }
+  .notepad-view tbody tr:not(:first-child) td,
+  .notepad-preview tbody tr:not(:first-child) td {
+    border-top: 1px solid #262a33;
+  }
 </style>
 </head>
 <body>
@@ -1880,6 +2076,760 @@
     };
   }
 
+  // notepad 分頁的即時 markdown 預覽用，跟桌面版 frontend.html 的
+  // `renderMarkdown` 是同一套規則（各自一份，理由見 topology 那段的說明）：
+  // 不是完整的 CommonMark 剖析器，只涵蓋標題/引言/清單/table/code fence/
+  // 分隔線/段落跟行內強調語法，足夠「盡量還原排版好的樣子」。文字先跳脫過
+  // HTML 特殊字元，使用者打的原始內容不會被當成標籤解讀。
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // code fence 的語法上色規則：關鍵字清單、單行註解開頭符號、區塊註解頭尾
+  // 符號——跟 `gui.rs` 的 `language_spec` 是同一套規則（維持兩邊一致），不是
+  // 完整的詞法分析器，但字串/註解/數字/關鍵字這幾類最常見、最有用的分類
+  // 已經涵蓋。
+  const CODE_LANGUAGES = {
+    rust: {
+      keywords: ["fn","let","mut","pub","struct","enum","impl","trait","use","mod","if","else","match","for","while","loop","return","break","continue","const","static","self","Self","super","crate","as","in","move","ref","where","async","await","dyn","unsafe","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    python: {
+      keywords: ["def","class","if","elif","else","for","while","return","import","from","as","with","try","except","finally","raise","pass","break","continue","lambda","yield","in","is","not","and","or","None","True","False","self","global","nonlocal","async","await"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    javascript: {
+      keywords: ["function","const","let","var","if","else","for","while","return","class","extends","new","this","import","export","from","as","try","catch","finally","throw","break","continue","switch","case","default","typeof","instanceof","in","of","async","await","yield","null","undefined","true","false","super"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    c: {
+      keywords: ["int","char","float","double","void","if","else","for","while","return","struct","typedef","enum","union","static","const","unsigned","signed","long","short","sizeof","switch","case","default","break","continue","class","public","private","protected","namespace","template","new","delete","this","virtual","override","nullptr","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    java: {
+      keywords: ["public","private","protected","class","interface","extends","implements","static","final","void","int","long","float","double","boolean","char","String","if","else","for","while","return","new","this","super","try","catch","finally","throw","throws","import","package","break","continue","switch","case","default","true","false","null"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    go: {
+      keywords: ["func","package","import","var","const","type","struct","interface","if","else","for","range","return","go","chan","select","case","default","switch","break","continue","defer","map","nil","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    bash: {
+      keywords: ["if","then","else","elif","fi","for","while","do","done","case","esac","function","return","exit","export","local","echo","break","continue","in"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    json: { keywords: ["true", "false", "null"], lineComment: null, blockComment: null },
+    sql: {
+      keywords: ["SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","SET","DELETE","JOIN","LEFT","RIGHT","INNER","OUTER","ON","GROUP","BY","ORDER","HAVING","AS","AND","OR","NOT","NULL","IS","IN","LIKE","LIMIT","CREATE","TABLE","DROP","ALTER","PRIMARY","KEY","FOREIGN","REFERENCES","DEFAULT","DISTINCT"],
+      lineComment: "--",
+      blockComment: ["/*", "*/"],
+    },
+    ruby: {
+      keywords: ["def","end","class","module","if","elsif","else","unless","while","until","for","in","do","return","break","next","yield","begin","rescue","ensure","raise","require","true","false","nil","self"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    yaml: { keywords: ["true", "false", "null"], lineComment: "#", blockComment: null },
+  };
+  const CODE_LANG_ALIASES = {
+    rs: "rust", py: "python",
+    js: "javascript", ts: "javascript", jsx: "javascript", tsx: "javascript", typescript: "javascript",
+    cpp: "c", "c++": "c", h: "c", hpp: "c",
+    golang: "go",
+    sh: "bash", shell: "bash", zsh: "bash",
+    rb: "ruby",
+    yml: "yaml", toml: "yaml",
+  };
+
+  // 依 code fence 開頭標注的語言名稱（例如 ` ```rust ` 的 `rust`）查對應的
+  // 語法上色規則；沒標語言或標了但不認得的語言都回傳 `null`，呼叫端在這種
+  // 情況下維持原本單一顏色的樣子，不強行套用錯誤的規則。
+  function getLanguageSpec(lang) {
+    const key = (lang || "").toLowerCase();
+    return CODE_LANGUAGES[CODE_LANG_ALIASES[key] || key] || null;
+  }
+
+  // 把一行程式碼掃成字串/註解/數字/關鍵字/其餘（plain）幾類，各自包一層
+  // `<span class="tok-...">`；不是完整的詞法分析器（不處理跳脫字元、原始
+  // 字串、巢狀區塊註解），跟 `gui.rs` 的 `highlight_code_line` 是同一套簡化
+  // 規則。`state.inBlockComment` 是跨行狀態（區塊註解可能橫跨好幾行），
+  // 呼叫端每個 code block 開頭要重設成 `{ inBlockComment: false }`，同一個
+  // code block 內逐行往下傳同一個物件（靠物件參考模擬「傳址」，JS 沒有
+  // 像 Rust `&mut bool` 那樣的東西）。
+  function highlightCodeLine(line, spec, state) {
+    let html = "";
+    let plainStart = 0;
+    let i = 0;
+    const flushPlain = (end) => {
+      if (plainStart < end) html += escapeHtml(line.slice(plainStart, end));
+    };
+
+    if (state.inBlockComment && spec.blockComment) {
+      const idx = line.indexOf(spec.blockComment[1]);
+      if (idx === -1) {
+        return line ? `<span class="tok-comment">${escapeHtml(line)}</span>` : "";
+      }
+      const end = idx + spec.blockComment[1].length;
+      html += `<span class="tok-comment">${escapeHtml(line.slice(0, end))}</span>`;
+      i = end;
+      plainStart = end;
+      state.inBlockComment = false;
+    }
+
+    while (i < line.length) {
+      if (spec.blockComment && line.startsWith(spec.blockComment[0], i)) {
+        flushPlain(i);
+        const idx = line.indexOf(spec.blockComment[1], i + spec.blockComment[0].length);
+        if (idx === -1) {
+          html += `<span class="tok-comment">${escapeHtml(line.slice(i))}</span>`;
+          state.inBlockComment = true;
+          i = line.length;
+        } else {
+          const end = idx + spec.blockComment[1].length;
+          html += `<span class="tok-comment">${escapeHtml(line.slice(i, end))}</span>`;
+          i = end;
+        }
+        plainStart = i;
+        continue;
+      }
+      if (spec.lineComment && line.startsWith(spec.lineComment, i)) {
+        flushPlain(i);
+        html += `<span class="tok-comment">${escapeHtml(line.slice(i))}</span>`;
+        plainStart = line.length;
+        break;
+      }
+      const ch = line[i];
+      if (ch === '"' || ch === "'") {
+        const end = line.indexOf(ch, i + 1);
+        if (end !== -1) {
+          flushPlain(i);
+          html += `<span class="tok-string">${escapeHtml(line.slice(i, end + 1))}</span>`;
+          i = end + 1;
+          plainStart = i;
+          continue;
+        }
+      }
+      if (/[A-Za-z_]/.test(ch)) {
+        const word = line.slice(i).match(/^[A-Za-z0-9_]+/)[0];
+        if (spec.keywords.includes(word)) {
+          flushPlain(i);
+          html += `<span class="tok-keyword">${escapeHtml(word)}</span>`;
+          i += word.length;
+          plainStart = i;
+          continue;
+        }
+        i += word.length;
+        continue;
+      }
+      if (/[0-9]/.test(ch)) {
+        const num = line.slice(i).match(/^[0-9.]+/)[0];
+        flushPlain(i);
+        html += `<span class="tok-number">${escapeHtml(num)}</span>`;
+        i += num.length;
+        plainStart = i;
+        continue;
+      }
+      i++;
+    }
+    flushPlain(line.length);
+    return html;
+  }
+
+  function renderInlineMarkdown(text) {
+    let s = escapeHtml(text);
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // `***文字***`（粗體兼斜體）要在 `**` 規則之前處理，不然會被 `**` 先
+    // 吃掉、多出來的一個 `*` 變成殘留字元。
+    s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+    s = s.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_, a, b) => `<strong>${a ?? b}</strong>`);
+    s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+    s = s.replace(/\+\+([^+]+)\+\+/g, '<span class="notepad-underline">$1</span>');
+    s = s.replace(/==([^=]+)==/g, '<span class="notepad-highlight">$1</span>');
+    s = s.replace(/\*([^*]+)\*|_([^_]+)_/g, (_, a, b) => `<em>${a ?? b}</em>`);
+    // 圖片語法 `![替代文字](網址)`：不是每個 panel 都需要真的顯示圖片，這裡
+    // 只當成連結對待——有些論壇（例如 Discourse）的替代文字會夾帶
+    // `|690x460, 50%` 這種縮放/尺寸提示，只取 `|` 前面那段當作顯示文字。
+    // 要先處理過圖片語法，才不會被底下的一般連結規則吃到剩一個孤立的 `!`。
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+      const label = alt.split("|")[0].trim();
+      return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+    });
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => `<a href="${url}" target="_blank" rel="noopener">${label}</a>`);
+    // `<br>` 換行標記：原始文字先被 `escapeHtml` 跳脫成 `&lt;br&gt;`，這裡
+    // 換回真正的 `<br>` 標籤才會讓瀏覽器實際換行，而不是顯示成字面文字。
+    s = s.replace(/&lt;br&gt;/g, "<br>");
+    return s;
+  }
+
+  function isTableRow(line) {
+    return line.includes("|") && line.trim() !== "";
+  }
+
+  // table 的分隔列（header 底下那一行，例如 `| --- | :---: | ---: |`）：只由
+  // `-`、`:`、`|`、空白組成，且至少要有一個 `-`。
+  function isTableSeparator(line) {
+    const t = line.trim();
+    return t.includes("-") && /^[-:|\s]+$/.test(t);
+  }
+
+  // 把一行 table 資料列拆成每一欄內容（已 trim 過前後空白）；行首/行尾的
+  // `|` 是可有可無的分隔符號，不當作多一欄空白內容。
+  function splitTableRow(line) {
+    let t = line.trim();
+    if (t.startsWith("|")) t = t.slice(1);
+    if (t.endsWith("|")) t = t.slice(0, -1);
+    return t.split("|").map((cell) => cell.trim());
+  }
+
+  // 逐行處理區塊層級語法（標題/引言/清單/table/code fence/分隔線/段落），
+  // 行內語法交給 `renderInlineMarkdown`。清單/code fence 需要跨行的「目前在
+  // 哪個區塊裡」狀態，用 `listType`/`inCodeBlock` 這兩個區域變數追蹤；table
+  // 則需要往下看一行才能判斷是不是 table（含 `|` 的下一行是不是分隔列），
+  // 所以這裡用索引迴圈而不是 `for...of`，才能在判斷完 table 之後直接把
+  // 迴圈游標跳到 table 結束的下一行。
+  function renderMarkdown(source) {
+    const lines = source.split("\n");
+    let html = "";
+    let inCodeBlock = false;
+    let codeSpec = null;
+    let codeState = null;
+    let codeShowLineNumbers = false;
+    let codeLineCounter = 0;
+    let listType = null; // "ul" | "ol" | null
+    const closeList = () => {
+      if (listType) {
+        html += `</${listType}>`;
+        listType = null;
+      }
+    };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith("```")) {
+        if (!inCodeBlock) {
+          closeList();
+          // 開頭 fence 標注的語言（例如 ` ```rust ` 的 `rust`）決定語法上色
+          // 規則；語言名稱後面接一個 `=`（例如 ` ```rust= `）表示要加行號，
+          // 兩者是各自獨立的標注，`=` 拿掉之後剩下的部分才是真正的語言
+          // 名稱。`codeState` 是這個 code block 專屬的跨行狀態，每個 code
+          // block 都要重新從 `false` 開始，不能沿用上一個 code block 剩下
+          // 的狀態。
+          const rawLang = line.trim().slice(3).trim();
+          codeShowLineNumbers = rawLang.endsWith("=");
+          codeSpec = getLanguageSpec(codeShowLineNumbers ? rawLang.slice(0, -1) : rawLang);
+          codeState = { inBlockComment: false };
+          codeLineCounter = 0;
+          html += `<pre data-line="${i}"><code>`;
+          inCodeBlock = true;
+        } else {
+          html += "</code></pre>";
+          inCodeBlock = false;
+          codeSpec = null;
+        }
+        continue;
+      }
+      if (inCodeBlock) {
+        if (codeShowLineNumbers) {
+          codeLineCounter++;
+          html += `<span class="line-no">${codeLineCounter}</span>`;
+        }
+        html += codeSpec ? highlightCodeLine(line, codeSpec, codeState) : escapeHtml(line);
+        html += "\n";
+        continue;
+      }
+
+      // table：一行含 `|` 的資料列，緊接著一行分隔列，就當作 table 的開頭；
+      // 後面連續含 `|` 的行都算資料列，直到遇到不符合的行或內容結尾為止。
+      if (isTableRow(line) && !isTableSeparator(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        closeList();
+        const headerCells = splitTableRow(line);
+        let j = i + 2;
+        const dataRows = [];
+        while (j < lines.length && isTableRow(lines[j])) {
+          dataRows.push(splitTableRow(lines[j]));
+          j++;
+        }
+        html += `<table data-line="${i}"><thead><tr>`;
+        for (const cell of headerCells) html += `<th>${renderInlineMarkdown(cell)}</th>`;
+        html += "</tr></thead><tbody>";
+        for (const [rowOffset, row] of dataRows.entries()) {
+          // 每一列各自帶自己的來源行號（`i + 2` 是資料列的起點，跳過 header
+          // 跟分隔列），捲動同步時才能精準對到你正在編輯的那一列，不是整個
+          // table 一起跳。
+          html += `<tr data-line="${i + 2 + rowOffset}">`;
+          for (const cell of row) html += `<td>${renderInlineMarkdown(cell)}</td>`;
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        i = j - 1; // for 迴圈本身還會再 +1
+        continue;
+      }
+
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        closeList();
+        const level = heading[1].length;
+        html += `<h${level} data-line="${i}">${renderInlineMarkdown(heading[2])}</h${level}>`;
+        continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        closeList();
+        html += `<blockquote data-line="${i}">${renderInlineMarkdown(line.replace(/^\s*>\s?/, ""))}</blockquote>`;
+        continue;
+      }
+      const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+      if (ul) {
+        if (listType !== "ul") {
+          closeList();
+          html += "<ul>";
+          listType = "ul";
+        }
+        // GFM 風格的 checklist 項目（`- [ ] 內容`／`- [x] 內容`）：畫成一個
+        // 唯讀的 checkbox，`disabled` 是因為這裡只是把目前的 markdown 內容
+        // 呈現出來，不是要讓使用者直接點擊改變原始檔案。
+        const checkbox = ul[1].match(/^\[( |x|X)\]\s+(.*)$/);
+        if (checkbox) {
+          const checked = checkbox[1].toLowerCase() === "x";
+          html += `<li class="notepad-task" data-line="${i}"><input type="checkbox" disabled${checked ? " checked" : ""}> ${renderInlineMarkdown(checkbox[2])}</li>`;
+        } else {
+          html += `<li data-line="${i}">${renderInlineMarkdown(ul[1])}</li>`;
+        }
+        continue;
+      }
+      const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+      if (ol) {
+        if (listType !== "ol") {
+          closeList();
+          html += "<ol>";
+          listType = "ol";
+        }
+        html += `<li data-line="${i}">${renderInlineMarkdown(ol[1])}</li>`;
+        continue;
+      }
+      if (/^\s*(---|\*\*\*)\s*$/.test(line)) {
+        closeList();
+        html += `<hr data-line="${i}">`;
+        continue;
+      }
+      closeList();
+      if (line.trim() !== "") {
+        html += `<p data-line="${i}">${renderInlineMarkdown(line)}</p>`;
+      }
+    }
+    closeList();
+    if (inCodeBlock) html += "</code></pre>";
+    return html;
+  }
+
+  // storage 分頁點 `notepad/` 資料夾底下的檔名要切去 notepad 分頁並顯示
+  // 那個檔案：tablet 是單頁分頁（不像桌面版可以同時開好幾個浮動 panel），
+  // 沒有「panel 已經開著就直接呼叫它的 loadFile」這種機制，改成用一個
+  // 模組層級變數記住「下次開 notepad 分頁要先載入哪個檔案」，`startNotepadTab`
+  // 每次啟動都會讀這個值；notepad 分頁自己切換檔案時也會回寫這個值，這樣
+  // 切到別的分頁再切回來還是顯示同一個檔案，不會每次都跳回預設的
+  // `notepad.md`。
+  let notepadInitialFile = "notepad.md";
+  function openNotepadFile(name) {
+    notepadInitialFile = name;
+    switchTo("notepad");
+  }
+
+  // 建立 storage 分頁：跟桌面版 storage panel 完全同一套功能（瀏覽資料夾／
+  // 上傳／新資料夾／下載／刪除／重新命名），只是不用桌面版浮動 panel 那層，
+  // 直接把 `.storage-body` 塞進分頁的 `container`。沒有 EventSource/interval
+  // 需要清，`stop()` 是空函式。
+  function startStorageTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "storage-body";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "storage-toolbar";
+    const breadcrumb = document.createElement("span");
+    breadcrumb.className = "storage-breadcrumb";
+    const uploadBtn = document.createElement("button");
+    uploadBtn.textContent = "⬆ 上傳";
+    const uploadInput = document.createElement("input");
+    uploadInput.type = "file";
+    uploadInput.style.display = "none";
+    const mkdirBtn = document.createElement("button");
+    mkdirBtn.textContent = "＋ 新資料夾";
+    toolbar.appendChild(breadcrumb);
+    toolbar.appendChild(uploadBtn);
+    toolbar.appendChild(uploadInput);
+    toolbar.appendChild(mkdirBtn);
+
+    const table = document.createElement("table");
+    table.className = "storage-table";
+    const tbody = document.createElement("tbody");
+    table.appendChild(tbody);
+    const tableScroll = document.createElement("div");
+    tableScroll.className = "storage-table-scroll";
+    tableScroll.appendChild(table);
+
+    wrap.appendChild(toolbar);
+    wrap.appendChild(tableScroll);
+    container.appendChild(wrap);
+
+    const state = { currentPath: "" };
+
+    const joinPath = (base, name2) => (base ? `${base}/${name2}` : name2);
+
+    function formatSize(bytes) {
+      if (bytes === 0) return "—";
+      const units = ["B", "K", "M", "G", "T"];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+      }
+      return unit === 0 ? `${bytes}${units[0]}` : `${value.toFixed(1)}${units[unit]}`;
+    }
+
+    function renderBreadcrumb() {
+      breadcrumb.innerHTML = "";
+      const rootSeg = document.createElement("a");
+      rootSeg.href = "#";
+      rootSeg.textContent = "/";
+      rootSeg.addEventListener("click", (e) => {
+        e.preventDefault();
+        navigate("");
+      });
+      breadcrumb.appendChild(rootSeg);
+      if (!state.currentPath) return;
+      const parts = state.currentPath.split("/");
+      let acc = "";
+      for (const part of parts) {
+        acc = acc ? `${acc}/${part}` : part;
+        const seg = document.createElement("a");
+        seg.href = "#";
+        seg.textContent = ` ${part}`;
+        const target = acc;
+        seg.addEventListener("click", (e) => {
+          e.preventDefault();
+          navigate(target);
+        });
+        breadcrumb.appendChild(seg);
+      }
+    }
+
+    async function refresh() {
+      const path = state.currentPath;
+      let entries;
+      try {
+        const res = await fetch(`/api/storage/list?path=${encodeURIComponent(path)}`);
+        entries = await res.json();
+      } catch (_err) {
+        return; // 這次沒抓到就算了，使用者可以再手動切換一次路徑重試。
+      }
+      if (path !== state.currentPath) return; // 等待期間使用者又切了路徑，這次回應過期了，不要蓋掉新畫面。
+      renderBreadcrumb();
+      tbody.innerHTML = "";
+      for (const entry of entries) {
+        const row = document.createElement("tr");
+        const nameCell = document.createElement("td");
+        if (entry.is_dir) {
+          const link = document.createElement("a");
+          link.href = "#";
+          link.textContent = `📁 ${entry.name}`;
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigate(joinPath(state.currentPath, entry.name));
+          });
+          nameCell.appendChild(link);
+        } else if (state.currentPath === "notepad") {
+          // notepad 分頁的 `/api/notepad/content` 只接單一裸檔名（見
+          // `web.rs` 的 `safe_notepad_path`，不能帶路徑），只有目前瀏覽到
+          // `storage/notepad/` 這一層時，`entry.name` 才剛好對應 notepad
+          // 能開的同一個檔案——其他路徑下的檔案沒有對應的 notepad 檔名，
+          // 不能這樣接，維持純文字不可點。
+          const link = document.createElement("a");
+          link.href = "#";
+          link.textContent = `📄 ${entry.name}`;
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            openNotepadFile(entry.name);
+          });
+          nameCell.appendChild(link);
+        } else {
+          nameCell.textContent = `📄 ${entry.name}`;
+        }
+        const sizeCell = document.createElement("td");
+        sizeCell.textContent = entry.is_dir ? "—" : formatSize(entry.size);
+        const modifiedCell = document.createElement("td");
+        modifiedCell.textContent = new Date(entry.modified * 1000).toLocaleString();
+        const actionsCell = document.createElement("td");
+        if (!entry.is_dir) {
+          const dlBtn = document.createElement("a");
+          dlBtn.href = `/api/storage/download?path=${encodeURIComponent(joinPath(state.currentPath, entry.name))}`;
+          dlBtn.textContent = "⬇";
+          actionsCell.appendChild(dlBtn);
+        }
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "🗑";
+        delBtn.addEventListener("click", async () => {
+          const full = joinPath(state.currentPath, entry.name);
+          if (entry.is_dir) {
+            let itemCount = 0;
+            try {
+              const res = await fetch(`/api/storage/list?path=${encodeURIComponent(full)}`);
+              const children = await res.json();
+              itemCount = children.length;
+            } catch (_err) {
+              // 查不到子項目數量就當作非空、用比較保守的措辭，不影響後面還是照樣送
+              // recursive=true 的刪除請求。
+            }
+            const message = itemCount > 0
+              ? `確定要刪除「${entry.name}」嗎？裡面還有 ${itemCount} 個項目，會一併刪除`
+              : `確定要刪除「${entry.name}」（空資料夾）嗎？`;
+            if (!window.confirm(message)) return;
+            await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}&recursive=true`, { method: "POST" });
+          } else {
+            if (!window.confirm(`確定要刪除「${entry.name}」嗎？`)) return;
+            await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}`, { method: "POST" });
+          }
+          refresh();
+        });
+        const renameBtn = document.createElement("button");
+        renameBtn.textContent = "✎";
+        renameBtn.addEventListener("click", async () => {
+          const newName = window.prompt("新名稱", entry.name);
+          if (!newName || newName === entry.name) return;
+          const from = joinPath(state.currentPath, entry.name);
+          const to = joinPath(state.currentPath, newName);
+          await fetch(`/api/storage/rename?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
+            method: "POST",
+          });
+          refresh();
+        });
+        actionsCell.appendChild(delBtn);
+        actionsCell.appendChild(renameBtn);
+        row.appendChild(nameCell);
+        row.appendChild(sizeCell);
+        row.appendChild(modifiedCell);
+        row.appendChild(actionsCell);
+        tbody.appendChild(row);
+      }
+    }
+
+    function navigate(path) {
+      state.currentPath = path;
+      refresh();
+    }
+
+    uploadBtn.addEventListener("click", () => uploadInput.click());
+    uploadInput.addEventListener("change", async () => {
+      const file = uploadInput.files[0];
+      if (!file) return;
+      const dest = joinPath(state.currentPath, file.name);
+      await fetch(`/api/storage/upload?path=${encodeURIComponent(dest)}`, { method: "POST", body: file });
+      uploadInput.value = "";
+      refresh();
+    });
+
+    mkdirBtn.addEventListener("click", async () => {
+      const dirName = window.prompt("新資料夾名稱");
+      if (!dirName) return;
+      const dest = joinPath(state.currentPath, dirName);
+      await fetch(`/api/storage/mkdir?path=${encodeURIComponent(dest)}`, { method: "POST" });
+      refresh();
+    });
+
+    refresh();
+
+    return function stop() {};
+  }
+
+  // 建立 notepad 分頁：跟桌面版 notepad panel 同一套檢視/編輯/切換檔案
+  // 功能，但編輯（原本 Ctrl-E）／切換檔案（原本 Ctrl-F）／儲存（Ctrl-S）／
+  // 取消（Ctrl-X）全部改成按鈕——平板很難按這種組合鍵。切換檔案的輸入框
+  // 保留 Enter/Esc（純文字輸入框用 Enter/Esc 很自然，跟「組合鍵」不是同一
+  // 個問題），但另外補上「確認」/「取消」兩顆按鈕，觸控操作更直覺。
+  function startNotepadTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "notepad-body";
+
+    const viewEl = document.createElement("div");
+    viewEl.className = "notepad-view";
+
+    const editEl = document.createElement("div");
+    editEl.className = "notepad-edit";
+    editEl.style.display = "none";
+    const textarea = document.createElement("textarea");
+    textarea.className = "notepad-textarea";
+    textarea.spellcheck = false;
+    const previewEl = document.createElement("div");
+    previewEl.className = "notepad-preview";
+    editEl.appendChild(textarea);
+    editEl.appendChild(previewEl);
+
+    const hint = document.createElement("div");
+    hint.className = "notepad-hint";
+    const hintActions = document.createElement("div");
+    hintActions.className = "notepad-hint-actions";
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "編輯";
+    const switchBtn = document.createElement("button");
+    switchBtn.textContent = "切換檔案";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "儲存";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "取消";
+    hintActions.appendChild(editBtn);
+    hintActions.appendChild(switchBtn);
+    hintActions.appendChild(saveBtn);
+    hintActions.appendChild(cancelBtn);
+    const hintName = document.createElement("span");
+    hintName.className = "notepad-hint-name";
+    hint.appendChild(hintActions);
+    hint.appendChild(hintName);
+
+    const filenameRow = document.createElement("div");
+    filenameRow.className = "notepad-filename-row";
+    filenameRow.style.display = "none";
+    const filenameInput = document.createElement("input");
+    filenameInput.type = "text";
+    filenameInput.className = "notepad-filename-input";
+    filenameInput.spellcheck = false;
+    const filenameConfirmBtn = document.createElement("button");
+    filenameConfirmBtn.textContent = "確認";
+    const filenameCancelBtn = document.createElement("button");
+    filenameCancelBtn.textContent = "取消";
+    filenameRow.appendChild(filenameInput);
+    filenameRow.appendChild(filenameConfirmBtn);
+    filenameRow.appendChild(filenameCancelBtn);
+
+    wrap.appendChild(viewEl);
+    wrap.appendChild(editEl);
+    wrap.appendChild(hint);
+    wrap.appendChild(filenameRow);
+    container.appendChild(wrap);
+
+    const state = { savedContent: "", editing: false, promptingFile: false, name: notepadInitialFile };
+
+    function updateHint() {
+      hintName.textContent = state.name;
+      editBtn.style.display = state.editing ? "none" : "";
+      switchBtn.style.display = state.editing ? "none" : "";
+      saveBtn.style.display = state.editing ? "" : "none";
+      cancelBtn.style.display = state.editing ? "" : "none";
+    }
+
+    function renderView() {
+      viewEl.innerHTML = state.savedContent.trim()
+        ? renderMarkdown(state.savedContent)
+        : '<span class="notepad-empty">(空白，按「編輯」開始輸入)</span>';
+      updateHint();
+    }
+
+    function enterEdit() {
+      state.editing = true;
+      textarea.value = state.savedContent;
+      previewEl.innerHTML = renderMarkdown(state.savedContent);
+      viewEl.style.display = "none";
+      editEl.style.display = "flex";
+      updateHint();
+      textarea.focus();
+    }
+
+    function exitEdit() {
+      state.editing = false;
+      viewEl.style.display = "";
+      editEl.style.display = "none";
+      renderView();
+    }
+
+    async function save() {
+      await fetch("/api/notepad/content", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: state.name, content: textarea.value }),
+      });
+      state.savedContent = textarea.value;
+      exitEdit();
+    }
+
+    async function loadFile(fileName) {
+      const res = await fetch(`/api/notepad/content?name=${encodeURIComponent(fileName)}`);
+      const d = await res.json();
+      state.name = d.name;
+      state.savedContent = d.content;
+      notepadInitialFile = d.name;
+      renderView();
+    }
+
+    function startFilePrompt() {
+      state.promptingFile = true;
+      filenameInput.value = state.name;
+      hint.style.display = "none";
+      filenameRow.style.display = "flex";
+      filenameInput.focus();
+      filenameInput.select();
+    }
+
+    function endFilePrompt() {
+      state.promptingFile = false;
+      filenameRow.style.display = "none";
+      hint.style.display = "";
+    }
+
+    function confirmFilePrompt() {
+      const fileName = filenameInput.value.trim();
+      endFilePrompt();
+      if (fileName) loadFile(fileName);
+    }
+
+    filenameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        confirmFilePrompt();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        endFilePrompt();
+      }
+    });
+    filenameConfirmBtn.addEventListener("click", confirmFilePrompt);
+    filenameCancelBtn.addEventListener("click", endFilePrompt);
+
+    function scrollPreviewToCursor() {
+      const currentLine = textarea.value.slice(0, textarea.selectionStart).split("\n").length - 1;
+      const marks = previewEl.querySelectorAll("[data-line]");
+      let target = null;
+      for (const el of marks) {
+        if (Number(el.dataset.line) <= currentLine) {
+          target = el;
+        } else {
+          break;
+        }
+      }
+      if (target) {
+        target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+
+    textarea.addEventListener("input", () => {
+      previewEl.innerHTML = renderMarkdown(textarea.value);
+      scrollPreviewToCursor();
+    });
+    textarea.addEventListener("keyup", scrollPreviewToCursor);
+    textarea.addEventListener("click", scrollPreviewToCursor);
+
+    editBtn.addEventListener("click", enterEdit);
+    switchBtn.addEventListener("click", startFilePrompt);
+    saveBtn.addEventListener("click", save);
+    cancelBtn.addEventListener("click", exitEdit);
+
+    loadFile(state.name);
+
+    return function stop() {};
+  }
+
   const TABS = [
     { name: "device", icon: "📟", label: "device" },
     { name: "global", icon: "🌍", label: "global" },
@@ -1887,6 +2837,8 @@
     { name: "weather", icon: "🌤️", label: "weather" },
     { name: "system", icon: "⚙️", label: "system" },
     { name: "player", icon: "🎵", label: "player" },
+    { name: "storage", icon: "🗂️", label: "storage" },
+    { name: "notepad", icon: "📝", label: "notepad" },
   ];
 
   // `TAB_MODULES` 把每個分頁名稱對應到一個模組：`start(container)` 掛上
@@ -1899,6 +2851,8 @@
     weather: { start: startWeatherTab },
     system: { start: makePlainPanelTab("system") },
     player: { start: startPlayerTab },
+    storage: { start: startStorageTab },
+    notepad: { start: startNotepadTab },
   };
 
   const content = document.getElementById("content");
