@@ -763,9 +763,16 @@
     font-size: 12px;
   }
   .storage-toolbar button:hover { background: #2b3140; }
+  /* `flex: 1`/`overflow: auto` 要放在外面包一層的 `<div>`，不能直接放在
+     `<table>` 本身——放在 `<table>` 上會撐開 table 這個 box 去填滿
+     `.storage-body` 剩下的高度，檔案數一少（不夠撐滿），HTML table 排版
+     算法就會把多出來的高度平分給每一列（`<tr>`），造成「視窗越大、每列
+     越高」的樣子，跟 `<td>` 上設的固定 `height` 打架。改成外層 scroll
+     容器負責撐滿高度＋捲動，`<table>` 本身維持自己的自然高度（幾列就是
+     幾列的高度），檔案少的時候底下就是空白，不會被拉開。跟 `.data-table-
+     scroll`/`.data-table`（device/global panel）同一套結構。 */
+  .storage-table-scroll { flex: 1; overflow: auto; }
   .storage-table {
-    flex: 1;
-    overflow: auto;
     border-collapse: collapse;
     width: 100%;
     font-size: 12px;
@@ -3444,9 +3451,12 @@
       table.className = "storage-table";
       const tbody = document.createElement("tbody");
       table.appendChild(tbody);
+      const tableScroll = document.createElement("div");
+      tableScroll.className = "storage-table-scroll";
+      tableScroll.appendChild(table);
 
       container.appendChild(toolbar);
-      container.appendChild(table);
+      container.appendChild(tableScroll);
 
       const state = { currentPath: "" };
 
