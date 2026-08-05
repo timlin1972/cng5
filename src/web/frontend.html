@@ -770,7 +770,11 @@
     width: 100%;
     font-size: 12px;
   }
-  .storage-table td { padding: 4px 10px; border-top: 1px solid #262a33; white-space: nowrap; }
+  /* `<td>` 內建預設是 `vertical-align: middle`，一排裡有的格子內容較高
+     （例如 actions 那格好幾個按鈕）時，其他格子的文字會跟著置中飄動，
+     看起來每一列高度、對齊都不太一致——固定高度＋靠上對齊，每一列看起來
+     整齊劃一。 */
+  .storage-table td { height: 28px; padding: 4px 10px; border-top: 1px solid #262a33; white-space: nowrap; vertical-align: top; }
   .storage-table a { color: #6f9dff; text-decoration: none; }
   .storage-table a:hover { text-decoration: underline; }
   .storage-table button {
@@ -2584,9 +2588,17 @@
     };
   }
 
-  function openPanel(name) {
+  // `opts.file` 目前只有 storage panel 點 `notepad/` 資料夾底下的檔名時會
+  // 帶——panel 已經開著就直接切換它顯示的檔案（`notepadUi.loadFile`），不用
+  // 使用者自己按 Ctrl-F 再選一次；panel 還沒開的話，見下面 notepad 分支怎麼
+  // 用這個值決定初次載入哪個檔案。
+  function openPanel(name, opts) {
     if (open.has(name)) {
-      bringToFront(open.get(name).el);
+      const entry = open.get(name);
+      bringToFront(entry.el);
+      if (opts && opts.file && entry.notepadUi) {
+        entry.notepadUi.loadFile(opts.file);
+      }
       return;
     }
     const panel = document.createElement("div");
@@ -3271,7 +3283,10 @@
       container.appendChild(hint);
       container.appendChild(filenameInput);
 
-      const state = { savedContent: "", editing: false, promptingFile: false, name: "notepad.md" };
+      // `opts.file`：storage panel 點 `notepad/` 資料夾底下的檔名開這個
+      // panel 時，第一次載入直接顯示那個檔案，不是永遠固定顯示
+      // `notepad.md`。
+      const state = { savedContent: "", editing: false, promptingFile: false, name: (opts && opts.file) || "notepad.md" };
 
       function updateHint() {
         hintName.textContent = state.name;
@@ -3399,7 +3414,9 @@
 
       loadFile(state.name).then(() => viewEl.focus());
 
-      notepadUi = { container };
+      // `loadFile` 掛出去給 `openPanel` 用：panel 已經開著時再點另一個
+      // 檔名，靠這個直接切換顯示的檔案，不用透過 Ctrl-F 手動選。
+      notepadUi = { container, loadFile };
     } else if (name === "storage") {
       panel.style.width = "560px";
       panel.style.height = "420px";
@@ -3496,6 +3513,20 @@
             link.addEventListener("click", (e) => {
               e.preventDefault();
               navigate(joinPath(state.currentPath, entry.name));
+            });
+            nameCell.appendChild(link);
+          } else if (state.currentPath === "notepad") {
+            // notepad panel 的 `/api/notepad/content` 只接單一裸檔名（見
+            // `web.rs` 的 `safe_notepad_path`，不能帶路徑），只有目前瀏覽
+            // 到 `storage/notepad/` 這一層時，`entry.name` 才剛好對應
+            // notepad 能開的同一個檔案——其他路徑下的檔案沒有對應的 notepad
+            // 檔名，不能這樣接，維持純文字不可點。
+            const link = document.createElement("a");
+            link.href = "#";
+            link.textContent = `📄 ${entry.name}`;
+            link.addEventListener("click", (e) => {
+              e.preventDefault();
+              openPanel("notepad", { file: entry.name });
             });
             nameCell.appendChild(link);
           } else {
