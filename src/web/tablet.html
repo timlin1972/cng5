@@ -363,14 +363,14 @@
      組合鍵全部換成按鈕（見 `startNotepadTab` 開頭的說明）。 */
   .notepad-body { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
   .notepad-view { flex: 1; overflow: auto; padding: 14px 16px; font-size: 15px; }
-  .notepad-edit { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .notepad-edit { flex: 1; display: flex; overflow: hidden; }
   .notepad-textarea {
     flex: 1;
-    min-height: 0;
+    min-width: 0;
     resize: none;
     background: #0d0f13;
     border: none;
-    border-bottom: 1px solid #262a33;
+    border-right: 1px solid #262a33;
     color: #d8dee9;
     padding: 14px 16px;
     font: inherit;
@@ -378,7 +378,7 @@
     font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     outline: none;
   }
-  .notepad-preview { flex: 1; min-height: 0; overflow: auto; padding: 14px 16px; font-size: 15px; }
+  .notepad-preview { flex: 1; min-width: 0; overflow: auto; padding: 14px 16px; font-size: 15px; }
   .notepad-hint {
     flex: none;
     display: flex;
