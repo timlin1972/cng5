@@ -55,16 +55,17 @@ fn render_table(headers: &[&str], rows: &[Vec<Vec<String>>]) -> String {
 }
 
 /// 天氣資訊多久重新抓一次。過期後不是在呼叫端（`show`/`panel_text()`，可能是
-/// GUI 畫面、web 的 ticker，也可能是 CLI）當場去打 wttr.in，而是丟給背景執行緒
-/// 抓（見 `spawn_refresh`），呼叫端先拿現有資料（或「抓取中」字樣），不會被網路
-/// 卡住——跟 `SystemPlugin` 每次都直接查 `tailscale`（本機、夠快）不一樣，天氣
-/// 是真的網路請求，可能要好幾秒，不能讓大家等它，等於是拿著 `Shell` 的鎖去等
-/// 外部網站回應。
+/// GUI 畫面、web 的 ticker，也可能是 CLI）當場去打 Open-Meteo，而是丟給背景
+/// 執行緒抓（見 `spawn_refresh`），呼叫端先拿現有資料（或「抓取中」字樣），
+/// 不會被網路卡住——跟 `SystemPlugin` 每次都直接查 `tailscale`（本機、夠快）
+/// 不一樣，天氣是真的網路請求，可能要好幾秒，不能讓大家等它，等於是拿著
+/// `Shell` 的鎖去等外部網站回應。
 const CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
-weather：抓 wttr.in 的天氣資料，用純文字表格顯示現在/今天剩下時段/未來幾天。
+weather：抓 Open-Meteo 的天氣資料，用純文字表格顯示現在/今天剩下時段/未來
+幾天。
 
 範例：
   show          顯示表格（第一列永遠是依來源 IP 自動判斷的地點，後面接著
@@ -76,8 +77,9 @@ weather：抓 wttr.in 的天氣資料，用純文字表格顯示現在/今天剩
 都是目前的快取值（或「抓取中」），不會讓你等網路回應卡住畫面。
 ";
 
-/// 空字串這個 key 代表讓 wttr.in 依來源 IP 自動判斷地點，`text()` 永遠把它排
-/// 表格第一列，`locations` 裡 `add` 加進來的城市依序排在後面。
+/// 空字串這個 key 代表依來源 IP 自動判斷地點（見 `resolve_location`），
+/// `text()` 永遠把它排表格第一列，`locations` 裡 `add` 加進來的城市依序排在
+/// 後面。
 const AUTO_DETECT: &str = "";
 
 /// 一欄的內容種類：`now`／今天剩下的時段／未來的日期，各自需要的數值不一樣
@@ -169,7 +171,7 @@ pub(crate) struct LocationJson {
     /// 地點清單裡的識別碼：自動偵測地點是空字串，其餘是 `add` 時用的城市名
     /// 字串本身（也是 `remove <city>` 要打的那個名字），前端拿這個當「切換
     /// 地區」時要記住/送出的 key，`place` 只是給人看的顯示名稱（自動偵測地點
-    /// 會被 wttr.in 換成實際地名，兩者不一定相同）。
+    /// 會被 IP 查到的實際地名取代，兩者不一定相同）。
     key: String,
     place: String,
     status: Option<String>,
@@ -240,11 +242,20 @@ impl WeatherPlugin {
         Ok(())
     }
 
-    /// 把「IP 反查」跟每個 `add` 加進去的城市合併成同一張表格：第一欄
-    /// 是 `location`，後面依序是 `now`/今天剩下的時段/未來幾天。欄位名稱取自
-    /// 任何一個已經抓到真正資料的地點（各地點理論上算出來的欄位都一樣，因為都
-    /// 是用同一個「現在」去篩今天剩下哪些時段）；還在抓取中或抓失敗的地點，
-    /// `headers` 長度只有 1，就只在第一個資料欄放狀態訊息，其餘欄位留空。
+    /// 把「IP 反查」跟每個 `add` 加進去的城市合併成同一張表格：第一欄是
+    /// `location`，後面依序是 `now`/今天剩下的時段/未來幾天。
+    ///
+    /// 表頭不能只挑「欄數最多的那一份」直接套用——`hourly_columns` 是依每個
+    /// 地點自己的當地時間各自獨立過濾出「今天剩下的時段」（`timezone=auto`
+    /// 讓 Open-Meteo 依座標換算當地時區），不同時區的地點今天剩下的時段數量
+    /// 本來就會不一樣（歐洲凌晨可能還有 7 個時段沒過，亞洲下午可能只剩 5
+    /// 個），直接拿其中一份的欄位當表頭、其他列硬塞進同樣位置會對不齊、資料
+    /// 移位。改成依「表頭文字」對齊：把所有有資料地點的欄位表頭做聯集（`now`
+    /// 固定第一欄，時段類表頭依文字排序，日期類表頭依第一次出現的順序），
+    /// 每一列再依表頭文字去找自己有沒有那一欄，沒有就留空——這樣同一欄
+    /// 「12:00」在不同列代表的是各自的當地時間中午，語意上仍然一致，只是
+    /// 不同列不保證是同一個絕對時刻。還在抓取中或抓失敗的地點整列留空
+    /// （只在第一個資料欄放狀態訊息）。
     fn text(&self) -> String {
         let mut reports = Vec::with_capacity(1 + self.locations.len());
         reports.push(self.display(AUTO_DETECT));
@@ -252,19 +263,50 @@ impl WeatherPlugin {
             reports.push(self.display(city));
         }
 
-        let headers: Vec<String> = reports
-            .iter()
-            .filter(|report| report.status.is_none())
-            .max_by_key(|report| report.columns.len())
-            .map(|report| report.columns.iter().map(|c| c.header.clone()).collect())
-            .unwrap_or_else(|| vec!["狀態".to_string()]);
+        let mut hour_headers: Vec<String> = Vec::new();
+        let mut day_headers: Vec<String> = Vec::new();
+        let mut any_success = false;
+        for report in &reports {
+            let Some(columns) = report.status.is_none().then(|| &report.columns) else { continue };
+            any_success = true;
+            for column in columns {
+                match &column.kind {
+                    WeatherColumnKind::Now { .. } => {}
+                    WeatherColumnKind::Hour { .. } => {
+                        if !hour_headers.contains(&column.header) {
+                            hour_headers.push(column.header.clone());
+                        }
+                    }
+                    WeatherColumnKind::Day { .. } => {
+                        if !day_headers.contains(&column.header) {
+                            day_headers.push(column.header.clone());
+                        }
+                    }
+                }
+            }
+        }
+        hour_headers.sort();
+        let headers: Vec<String> = if any_success {
+            let mut h = vec!["now".to_string()];
+            h.extend(hour_headers);
+            h.extend(day_headers);
+            h
+        } else {
+            vec!["狀態".to_string()]
+        };
 
         let rows: Vec<Vec<Vec<String>>> = reports
             .into_iter()
             .map(|report| {
                 let mut cells = vec![vec![report.place]];
                 match report.status {
-                    None => cells.extend(report.columns.iter().map(WeatherColumn::cells)),
+                    None => {
+                        for header in &headers {
+                            let cell =
+                                report.columns.iter().find(|c| &c.header == header).map(WeatherColumn::cells).unwrap_or_default();
+                            cells.push(cell);
+                        }
+                    }
                     Some(message) => {
                         cells.push(vec![message]);
                         cells.extend(std::iter::repeat_with(|| vec![String::new()]).take(headers.len().saturating_sub(1)));
@@ -387,126 +429,177 @@ impl WeatherPlugin {
         let pending = self.pending.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            ctx.lock().unwrap().log_activity("external", format!("GET https://wttr.in/{}?format=j1", location.replace(' ', "+")));
+            let log_location = if location.is_empty() { "auto-detect (IP)".to_string() } else { location.clone() };
+            ctx.lock().unwrap().log_activity("external", format!("GET Open-Meteo forecast for {log_location}"));
             let report = Self::fetch(&location);
             cache.lock().unwrap().insert(location.clone(), CacheEntry { fetched_at: Instant::now(), report });
             pending.lock().unwrap().remove(&location);
         });
     }
 
-    /// 用 `curl` 打 wttr.in 拿 JSON（`?format=j1`）並解析。`location` 空字串時
-    /// 網址不帶地點，讓 wttr.in 依來源 IP 自動判斷。沒裝 curl、沒網路、逾時
-    /// （5 秒）或回應格式不對都算沒有，回傳看得懂的狀態訊息，不 panic。只會在
-    /// `spawn_refresh` 開的背景執行緒裡呼叫，不會卡住任何持有鎖的執行緒。
-    fn fetch(location: &str) -> LocationReport {
-        let place = location.replace(' ', "+");
-        let url = format!("https://wttr.in/{place}?format=j1");
-        Command::new("curl")
-            .args(["--silent", "--max-time", "5", &url])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .and_then(|output| String::from_utf8(output.stdout).ok())
-            .and_then(|body| Self::parse(&body, location))
-            .unwrap_or_else(|| Self::placeholder(location, "無法取得天氣資訊（沒有網路或未安裝 curl）"))
+    /// 用 `curl` 打一個網址、把回應內容當 JSON 解析，網路/curl 不存在/逾時
+    /// （5 秒）/回應不是合法 JSON 都回傳 `None`，不 panic。`resolve_location`／
+    /// `fetch` 共用這個小工具，避免三個地方各寫一份幾乎一樣的 `Command::new`
+    /// 邏輯。
+    fn curl_json(url: &str) -> Option<Value> {
+        let output = Command::new("curl").args(["--silent", "--max-time", "5", url]).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8(output.stdout).ok()?;
+        serde_json::from_str(&text).ok()
     }
 
-    /// 解析 wttr.in `j1` JSON，組出一個地點的報告：欄位依序是 `now`（現在）、
-    /// 今天剩下還沒過去的每 3 小時時段、然後 `weather[]` 每一天（wttr.in 預設給
-    /// 今天起 3 天，含今天）；每一欄的內容都是三行——天氣描述、溫度、降雨機率
-    /// 各自獨立一行。
-    fn parse(body: &str, requested_location: &str) -> Option<LocationReport> {
-        let json: Value = serde_json::from_str(body).ok()?;
-        let current = json.get("current_condition")?.get(0)?;
-        let days = json.get("weather")?.as_array()?;
-        let today = days.first()?;
-        let now_minutes = Self::now_minutes();
-
-        let place = if requested_location.is_empty() {
-            json.get("nearest_area")?
-                .get(0)?
-                .get("areaName")?
-                .get(0)?
-                .get("value")?
-                .as_str()?
-                .to_string()
+    /// 把使用者輸入的地點字串換成 (緯度, 經度, 顯示名稱)：Open-Meteo 的
+    /// forecast API 只吃座標，不吃地名，且沒有「依來源 IP 自動判斷地點」這個
+    /// 功能（原本 wttr.in 兩件事都幫忙做，換了資料來源後得自己補這兩步）。
+    /// 空字串（`AUTO_DETECT`）打 ip-api.com 用來源 IP 查座標＋城市名；非空
+    /// 字串則透過 Open-Meteo 自己的地理編碼 API 查座標，顯示名稱維持使用者
+    /// 打的原始字串（不管查到的官方名稱是什麼，這樣 `remove` 時打的名字才會
+    /// 跟畫面上看到的一致，也不用另外存一份「原始輸入 -> 官方名稱」的對照）。
+    fn resolve_location(location: &str) -> Option<(f64, f64, String)> {
+        if location.is_empty() {
+            let body = Self::curl_json("http://ip-api.com/json")?;
+            let lat = body.get("lat")?.as_f64()?;
+            let lon = body.get("lon")?.as_f64()?;
+            let place = body.get("city").and_then(|v| v.as_str()).unwrap_or("自動偵測").to_string();
+            Some((lat, lon, place))
         } else {
-            requested_location.to_string()
-        };
-
-        let mut columns = vec![Self::now_column(current, today, now_minutes)];
-
-        if let Some(hourly) = today.get("hourly").and_then(|h| h.as_array()) {
-            columns.extend(hourly.iter().filter_map(|hour| Self::hourly_column(hour, now_minutes)));
+            let name = location.replace(' ', "+");
+            let url = format!("https://geocoding-api.open-meteo.com/v1/search?name={name}&count=1");
+            let body = Self::curl_json(&url)?;
+            let result = body.get("results")?.as_array()?.first()?;
+            let lat = result.get("latitude")?.as_f64()?;
+            let lon = result.get("longitude")?.as_f64()?;
+            Some((lat, lon, location.to_string()))
         }
-        columns.extend(days.iter().enumerate().filter_map(|(i, day)| Self::daily_column(day, i == 0)));
+    }
 
+    /// 先查座標（`resolve_location`），再拿座標打 Open-Meteo 的 forecast API：
+    /// `current`（現在）／`hourly`（逐小時，`forecast_days` 天數內都有）／
+    /// `daily`（每日彙總）三個區塊一次要齊，`timezone=auto` 讓 Open-Meteo 依
+    /// 座標算出當地時區，回應裡的所有時間字串都已經換算成當地時間（不是
+    /// UTC）——這比原本 wttr.in 那套「拿這台機器自己的本地時間當『現在』去猜
+    /// 今天過了幾點」準確，因為現在是直接用查詢地點真正的當地時間，`add` 加
+    /// 的外國城市不會再有時差誤差。`forecast_days=4` 是「今天 + 未來 3
+    /// 天」，`daily[]` 第一筆固定是今天（見 `WeatherColumnKind::Day` 的
+    /// `is_today` 說明）。任何一步查不到都回傳 `None`，讓呼叫端顯示狀態訊息，
+    /// 不 panic。只會在 `spawn_refresh` 開的背景執行緒裡呼叫，不會卡住任何
+    /// 持有鎖的執行緒。
+    fn fetch(location: &str) -> LocationReport {
+        Self::fetch_inner(location).unwrap_or_else(|| Self::placeholder(location, "無法取得天氣資訊（沒有網路或未安裝 curl）"))
+    }
+
+    fn fetch_inner(location: &str) -> Option<LocationReport> {
+        let (lat, lon, place) = Self::resolve_location(location)?;
+        let url = format!(
+            "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code&hourly=temperature_2m,weather_code,precipitation_probability&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=4"
+        );
+        let body = Self::curl_json(&url)?;
+        let current = body.get("current")?;
+        let hourly = body.get("hourly")?;
+        let daily = body.get("daily")?;
+        let mut columns = vec![Self::now_column(current, hourly)?];
+        columns.extend(Self::hourly_columns(current, hourly));
+        columns.extend(Self::daily_columns(daily));
         Some(LocationReport { place, status: None, columns })
     }
 
-    /// `now` 那一欄：氣溫/天氣描述直接用 `current_condition`，降雨機率取「現在
-    /// 這個時段」（見 `current_chance_of_rain`）。
-    fn now_column(current: &Value, today: &Value, now_minutes: Option<u32>) -> WeatherColumn {
-        let temp_c = current.get("temp_C").map(Self::parse_i32).unwrap_or(0);
-        let feels_like_c = current.get("FeelsLikeC").map(Self::parse_i32).unwrap_or(temp_c);
-        let humidity = current.get("humidity").map(Self::parse_i32).unwrap_or(0);
-        let (slug, desc) = current.get("weatherCode").and_then(|v| v.as_str()).map(Self::classify).unwrap_or(("unknown", "Unknown"));
-        let chance = Self::current_chance_of_rain(today, now_minutes);
-        WeatherColumn {
+    /// `now` 那一欄：氣溫/天氣描述直接用 `current` 區塊，降雨機率取「現在
+    /// 這個整點」的 `hourly.precipitation_probability`（`current` 區塊本身
+    /// 沒有降雨機率這個欄位，只有 `hourly` 才有）。
+    fn now_column(current: &Value, hourly: &Value) -> Option<WeatherColumn> {
+        let temp_c = current.get("temperature_2m")?.as_f64()?.round() as i32;
+        let feels_like_c = current.get("apparent_temperature").and_then(|v| v.as_f64()).map(|v| v.round() as i32).unwrap_or(temp_c);
+        let humidity = current.get("relative_humidity_2m").and_then(|v| v.as_f64()).unwrap_or(0.0) as i32;
+        let code = current.get("weather_code").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+        let (slug, desc) = Self::classify(code);
+        let now_time = current.get("time")?.as_str()?;
+        let chance = Self::hour_chance_at(hourly, now_time).unwrap_or(0);
+        Some(WeatherColumn {
             header: "now".to_string(),
             slug,
             desc,
             chance_of_rain: chance,
             kind: WeatherColumnKind::Now { temp_c, feels_like_c, humidity },
-        }
-    }
-
-    /// 今天單一個 3 小時時段那一欄：時間已經過去（早於 `now_minutes`）就回傳
-    /// `None`，讓呼叫端直接跳過這一欄，不列進表格裡。
-    fn hourly_column(hour: &Value, now_minutes: Option<u32>) -> Option<WeatherColumn> {
-        let hhmm = Self::hour_hhmm(hour)?;
-        let slot_minutes = Self::hhmm_to_minutes(&hhmm)?;
-        if now_minutes.is_some_and(|now| slot_minutes < now) {
-            return None;
-        }
-        let temp_c: i32 = hour.get("tempC")?.as_str()?.parse().ok()?;
-        let chance: u32 = hour.get("chanceofrain")?.as_str()?.parse().ok()?;
-        let (slug, desc) = hour.get("weatherCode").and_then(|v| v.as_str()).map(Self::classify).unwrap_or(("unknown", "Unknown"));
-        let header = format!("{}:00", &hhmm[0..2]);
-        Some(WeatherColumn { header, slug, desc, chance_of_rain: chance, kind: WeatherColumnKind::Hour { temp_c } })
-    }
-
-    /// `weather[]` 裡一整天那一欄：表頭是「月/日」短日期，內容是天氣描述/氣溫
-    /// 範圍/當天最高降雨機率；天氣描述挑中午（`1200`）那個時段代表這一天，
-    /// wttr.in 自己選每日圖示也是這樣挑的，沒有中午這筆就退回第一筆。`is_today`
-    /// 見 `WeatherColumnKind::Day` 的說明。
-    fn daily_column(day: &Value, is_today: bool) -> Option<WeatherColumn> {
-        let date = day.get("date")?.as_str()?;
-        let min_c: i32 = day.get("mintempC")?.as_str()?.parse().ok()?;
-        let max_c: i32 = day.get("maxtempC")?.as_str()?.parse().ok()?;
-        let chance = Self::day_chance_of_rain(day);
-        let hourly = day.get("hourly").and_then(|h| h.as_array());
-        let noon = hourly.and_then(|hourly| {
-            hourly
-                .iter()
-                .find(|hour| hour.get("time").and_then(|v| v.as_str()) == Some("1200"))
-                .or_else(|| hourly.first())
-        });
-        let (slug, desc) =
-            noon.and_then(|hour| hour.get("weatherCode")).and_then(|v| v.as_str()).map(Self::classify).unwrap_or(("unknown", "Unknown"));
-        Some(WeatherColumn {
-            header: Self::short_date(date),
-            slug,
-            desc,
-            chance_of_rain: chance,
-            kind: WeatherColumnKind::Day { min_c, max_c, is_today },
         })
     }
 
-    /// wttr.in 數字欄位都是以字串形式存放（`"28"`），解析失敗（格式跑掉）就
-    /// 當成 0，不讓整個地點因為一個次要欄位解析失敗就顯示不出來。
-    fn parse_i32(value: &Value) -> i32 {
-        value.as_str().and_then(|s| s.parse().ok()).unwrap_or(0)
+    /// `now_time`（例如 `"2026-08-06T07:30"`）落在哪個整點，就用那個整點的
+    /// `precipitation_probability` 當「現在」的降雨機率——`hourly[]` 只有
+    /// 整點資料，沒有精確對到分鐘的資料可用，取所在整點已經是最接近的近似值。
+    fn hour_chance_at(hourly: &Value, now_time: &str) -> Option<u32> {
+        let bucket = format!("{}:00", now_time.get(0..13)?);
+        let times = hourly.get("time")?.as_array()?;
+        let rains = hourly.get("precipitation_probability")?.as_array()?;
+        let idx = times.iter().position(|t| t.as_str() == Some(bucket.as_str()))?;
+        rains.get(idx)?.as_f64().map(|v| v as u32)
+    }
+
+    /// 今天剩下的時段：`hourly[]` 是逐小時資料，篩「日期跟 `current.time`
+    /// 同一天、時間不早於現在」，再取每 3 小時一筆（跟改之前 wttr.in 3 小時
+    /// 一筆的密度一致，逐小時全部列出來一天會有到 20 幾筆，太密）。任何一筆
+    /// 資料格式不對就跳過那一筆，不影響其他筆。
+    fn hourly_columns(current: &Value, hourly: &Value) -> Vec<WeatherColumn> {
+        let mut out = Vec::new();
+        let Some(now_time) = current.get("time").and_then(|v| v.as_str()) else { return out };
+        let Some(today) = now_time.get(0..10) else { return out };
+        let Some(times) = hourly.get("time").and_then(|v| v.as_array()) else { return out };
+        let temps = hourly.get("temperature_2m").and_then(|v| v.as_array());
+        let codes = hourly.get("weather_code").and_then(|v| v.as_array());
+        let rains = hourly.get("precipitation_probability").and_then(|v| v.as_array());
+
+        for (i, t) in times.iter().enumerate() {
+            let Some(t) = t.as_str() else { continue };
+            if t.get(0..10) != Some(today) || t < now_time {
+                continue;
+            }
+            let Some(hour) = t.get(11..13).and_then(|h| h.parse::<u32>().ok()) else { continue };
+            if hour % 3 != 0 {
+                continue;
+            }
+            let Some(temp_c) = temps.and_then(|a| a.get(i)).and_then(|v| v.as_f64()) else { continue };
+            let code = codes.and_then(|a| a.get(i)).and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+            let chance = rains.and_then(|a| a.get(i)).and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+            let (slug, desc) = Self::classify(code);
+            out.push(WeatherColumn {
+                header: format!("{hour:02}:00"),
+                slug,
+                desc,
+                chance_of_rain: chance,
+                kind: WeatherColumnKind::Hour { temp_c: temp_c.round() as i32 },
+            });
+        }
+        out
+    }
+
+    /// `daily[]` 依序是今天、明天、後天……（`forecast_days=4` 給今天 + 未來
+    /// 3 天），第一筆（`i == 0`）固定是今天，`is_today` 見
+    /// `WeatherColumnKind::Day` 的說明。
+    fn daily_columns(daily: &Value) -> Vec<WeatherColumn> {
+        let mut out = Vec::new();
+        let Some(times) = daily.get("time").and_then(|v| v.as_array()) else { return out };
+        let codes = daily.get("weather_code").and_then(|v| v.as_array());
+        let maxes = daily.get("temperature_2m_max").and_then(|v| v.as_array());
+        let mins = daily.get("temperature_2m_min").and_then(|v| v.as_array());
+        let rains = daily.get("precipitation_probability_max").and_then(|v| v.as_array());
+
+        for (i, t) in times.iter().enumerate() {
+            let Some(date) = t.as_str() else { continue };
+            let Some(max_c) = maxes.and_then(|a| a.get(i)).and_then(|v| v.as_f64()) else { continue };
+            let Some(min_c) = mins.and_then(|a| a.get(i)).and_then(|v| v.as_f64()) else { continue };
+            let code = codes.and_then(|a| a.get(i)).and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+            let chance = rains.and_then(|a| a.get(i)).and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
+            let (slug, desc) = Self::classify(code);
+            out.push(WeatherColumn {
+                header: Self::short_date(date),
+                slug,
+                desc,
+                chance_of_rain: chance,
+                kind: WeatherColumnKind::Day { min_c: min_c.round() as i32, max_c: max_c.round() as i32, is_today: i == 0 },
+            });
+        }
+        out
     }
 
     /// `"2026-07-18"` 這種 ISO 日期簡化成 `"7/18"`（月/日，不補零），當表頭用。
@@ -518,97 +611,27 @@ impl WeatherPlugin {
         format!("{month}/{day}")
     }
 
-    /// wttr.in（World Weather Online）的 `weatherCode` 分類成 (slug, 英文描述)：
-    /// `desc` 沿用改之前 `weather_text()` 的英文描述，給 `text()` 純文字輸出用
-    /// （原因見改之前的說明：emoji 兩邊寬度不一致、中文字型容易跑掉，純 ASCII
-    /// 最穩）；`slug` 是新加的，給 `snapshot()` 的 JSON 輸出用，tablet 前端拿
-    /// 這個字串選圖示／背景動畫（tablet.html 是獨立頁面，不受純文字等寬表格
-    /// 的限制，可以用圖示）。沒對到的代碼給一個中性的分類，不讓整格空著。
-    fn classify(code: &str) -> (&'static str, &'static str) {
+    /// Open-Meteo 用的 WMO Weather interpretation code（<https://open-meteo.com/en/docs>
+    /// 有完整對照表）分類成 (slug, 英文描述)：`desc` 沿用改之前
+    /// `weather_text()` 的英文描述，給 `text()` 純文字輸出用（原因見改之前的
+    /// 說明：emoji 兩邊寬度不一致、中文字型容易跑掉，純 ASCII 最穩）；`slug`
+    /// 給 `snapshot()` 的 JSON 輸出用，tablet／webui 前端拿這個字串選圖示／
+    /// 背景動畫。沒對到的代碼（含查不到值時傳進來的 `u64::MAX`）給一個中性的
+    /// 分類，不讓整格空著。
+    fn classify(code: u64) -> (&'static str, &'static str) {
         match code {
-            "113" => ("sunny", "Sunny"),
-            "116" => ("partly-cloudy", "Partly cloudy"),
-            "119" => ("cloudy", "Cloudy"),
-            "122" => ("overcast", "Overcast"),
-            "143" | "248" | "260" => ("fog", "Fog"),
-            "176" | "263" | "266" | "293" | "353" => ("showers", "Showers"),
-            "179" | "182" | "227" | "230" | "317" | "320" | "323" | "326" | "329" | "332" | "335" | "338" | "362"
-            | "365" | "368" | "371" => ("snow", "Snow"),
-            "185" | "281" | "284" | "296" | "299" | "302" | "305" | "308" | "311" | "314" | "356" => ("rain", "Rain"),
-            "200" | "359" | "386" | "389" | "392" | "395" => ("thunderstorm", "Thunderstorm"),
-            "350" | "374" | "377" => ("ice-pellets", "Ice pellets"),
+            0 => ("sunny", "Sunny"),
+            1 => ("partly-cloudy", "Partly cloudy"),
+            2 => ("cloudy", "Cloudy"),
+            3 => ("overcast", "Overcast"),
+            45 | 48 => ("fog", "Fog"),
+            51 | 53 | 55 | 56 | 57 | 61 | 80 => ("showers", "Showers"),
+            63 | 65 | 82 => ("rain", "Rain"),
+            66 | 67 => ("ice-pellets", "Ice pellets"),
+            71 | 73 | 75 | 77 | 85 | 86 => ("snow", "Snow"),
+            95 | 96 | 99 => ("thunderstorm", "Thunderstorm"),
             _ => ("unknown", "Unknown"),
         }
-    }
-
-    /// `hour.time` 那種數字字串（`"0"`/`"300"`/`"1500"`…）補 0 成 4 碼的
-    /// `"HHMM"`，`hourly_column`/`current_chance_of_rain` 都要拿它去算分鐘數。
-    fn hour_hhmm(hour: &Value) -> Option<String> {
-        let time = hour.get("time")?.as_str()?;
-        Some(format!("{time:0>4}"))
-    }
-
-    /// 一天裡每個時段 `chanceofrain` 的最大值，當作那一天的降雨機率代表值
-    /// （未來預報那幾欄用這個，「今天」那一整天也是）。
-    fn day_chance_of_rain(day: &Value) -> u32 {
-        day.get("hourly")
-            .and_then(|h| h.as_array())
-            .map(|hourly| {
-                hourly
-                    .iter()
-                    .filter_map(|hour| hour.get("chanceofrain")?.as_str()?.parse::<u32>().ok())
-                    .max()
-                    .unwrap_or(0)
-            })
-            .unwrap_or(0)
-    }
-
-    /// 「現在這個時段」的降雨機率：拿 `now_minutes`（`now_minutes()` 這台機器
-    /// 自己的本地時間）跟 `today.hourly[]` 每一筆（每 3 小時一筆）的時間比對，
-    /// 取最接近的那一筆的 `chanceofrain`。`now_minutes` 是 `None`（抓不到本機
-    /// 時間）就退回「今天最高機率」，不要讓整個 panel 因為這個而顯示不出來。
-    fn current_chance_of_rain(today: &Value, now_minutes: Option<u32>) -> u32 {
-        let Some(now) = now_minutes else {
-            return Self::day_chance_of_rain(today);
-        };
-        let hourly = today.get("hourly").and_then(|h| h.as_array());
-        let Some(hourly) = hourly else {
-            return Self::day_chance_of_rain(today);
-        };
-
-        hourly
-            .iter()
-            .filter_map(|hour| {
-                let slot_minutes = Self::hhmm_to_minutes(&Self::hour_hhmm(hour)?)?;
-                let diff = slot_minutes.abs_diff(now).min(1440 - slot_minutes.abs_diff(now));
-                let chance = hour.get("chanceofrain")?.as_str()?.parse::<u32>().ok()?;
-                Some((diff, chance))
-            })
-            .min_by_key(|(diff, _)| *diff)
-            .map(|(_, chance)| chance)
-            .unwrap_or_else(|| Self::day_chance_of_rain(today))
-    }
-
-    /// 把 wttr.in `hourly[].time` 那種 4 位數字字串（`"0"`/`"300"`/`"1500"`…，
-    /// 已經補好 0 成 4 碼的 `"HHMM"`）換算成當天的分鐘數。
-    fn hhmm_to_minutes(hhmm: &str) -> Option<u32> {
-        let value: u32 = hhmm.parse().ok()?;
-        Some((value / 100) * 60 + value % 100)
-    }
-
-    /// 這台機器目前的本地時間（分鐘數，0-1439），拿來判斷「今天每 3 小時」欄位
-    /// 哪些時段已經過去。wttr.in 的回應裡查得到的時間欄位（`observation_time`）
-    /// 實際上是 UTC，不是查詢地點的當地時間，而且回應裡也沒有任何時區資訊可以
-    /// 換算——所以退而求其次用這台機器自己的本地時間當「現在」：對 auto-detect
-    /// （依來源 IP 定位，通常就是這台機器所在地）會很準，對用 `add`
-    /// 手動加的其他城市則只是近似值（可能跟當地實際時間差到時差那麼多）。
-    fn now_minutes() -> Option<u32> {
-        let output = Command::new("date").arg("+%H%M").output().ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let text = String::from_utf8(output.stdout).ok()?;
-        Self::hhmm_to_minutes(text.trim())
     }
 }
 
