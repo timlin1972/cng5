@@ -68,19 +68,13 @@ weather：抓 Open-Meteo 的天氣資料，用純文字表格顯示現在/今天
 幾天。
 
 範例：
-  show          顯示表格（第一列永遠是依來源 IP 自動判斷的地點，後面接著
-                add 加過的城市）
+  show          顯示表格（列出 add 加過的城市）
   add Tokyo     加一個城市，之後 show/panel 都會列出來
   remove Tokyo  移除一個城市
 
 資料每 300 秒（CACHE_TTL）快取一次，過期後背景執行緒重新抓，show/panel 顯示的
 都是目前的快取值（或「抓取中」），不會讓你等網路回應卡住畫面。
 ";
-
-/// 空字串這個 key 代表依來源 IP 自動判斷地點（見 `resolve_location`），
-/// `text()` 永遠把它排表格第一列，`locations` 裡 `add` 加進來的城市依序排在
-/// 後面。
-const AUTO_DETECT: &str = "";
 
 /// 一欄的內容種類：`now`／今天剩下的時段／未來的日期，各自需要的數值不一樣
 /// （`now`／`hour` 是單一氣溫，`day` 是氣溫範圍），拆成 enum 而不是塞進共用的
@@ -168,10 +162,9 @@ pub(crate) struct WeatherDayJson {
 
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct LocationJson {
-    /// 地點清單裡的識別碼：自動偵測地點是空字串，其餘是 `add` 時用的城市名
-    /// 字串本身（也是 `remove <city>` 要打的那個名字），前端拿這個當「切換
-    /// 地區」時要記住/送出的 key，`place` 只是給人看的顯示名稱（自動偵測地點
-    /// 會被 IP 查到的實際地名取代，兩者不一定相同）。
+    /// 地點清單裡的識別碼：就是 `add` 時用的城市名字串本身（也是
+    /// `remove <city>` 要打的那個名字），前端拿這個當「切換地區」時要
+    /// 記住/送出的 key，`place` 只是給人看的顯示名稱。
     key: String,
     place: String,
     status: Option<String>,
@@ -242,8 +235,8 @@ impl WeatherPlugin {
         Ok(())
     }
 
-    /// 把「IP 反查」跟每個 `add` 加進去的城市合併成同一張表格：第一欄是
-    /// `location`，後面依序是 `now`/今天剩下的時段/未來幾天。
+    /// 把每個 `add` 加進去的城市併成同一張表格：第一欄是 `location`，
+    /// 後面依序是 `now`/今天剩下的時段/未來幾天。
     ///
     /// 表頭不能只挑「欄數最多的那一份」直接套用——`hourly_columns` 是依每個
     /// 地點自己的當地時間各自獨立過濾出「今天剩下的時段」（`timezone=auto`
@@ -257,8 +250,7 @@ impl WeatherPlugin {
     /// 不同列不保證是同一個絕對時刻。還在抓取中或抓失敗的地點整列留空
     /// （只在第一個資料欄放狀態訊息）。
     fn text(&self) -> String {
-        let mut reports = Vec::with_capacity(1 + self.locations.len());
-        reports.push(self.display(AUTO_DETECT));
+        let mut reports = Vec::with_capacity(self.locations.len());
         for city in &self.locations {
             reports.push(self.display(city));
         }
@@ -323,16 +315,11 @@ impl WeatherPlugin {
     }
 
     /// 給 tablet 前端用的結構化清單（`web.rs` 的 `/api/weather/list` 呼叫這個
-    /// 轉成 JSON）：跟 `text()` 一樣，第一筆永遠是自動偵測地點，後面依序是
-    /// `add` 加過的城市；跟 `text()` 不一樣的是這裡回傳的是可以直接拿去畫圖示/
-    /// 背景動畫的數字跟分類，不是拼好的顯示字串。
+    /// 轉成 JSON）：跟 `text()` 一樣依序是 `add` 加過的城市；跟 `text()`
+    /// 不一樣的是這裡回傳的是可以直接拿去畫圖示/背景動畫的數字跟分類，不是
+    /// 拼好的顯示字串。
     pub(crate) fn snapshot(&self) -> Vec<LocationJson> {
-        let mut items = Vec::with_capacity(1 + self.locations.len());
-        items.push(Self::location_json(AUTO_DETECT, self.display(AUTO_DETECT)));
-        for city in &self.locations {
-            items.push(Self::location_json(city, self.display(city)));
-        }
-        items
+        self.locations.iter().map(|city| Self::location_json(city, self.display(city))).collect()
     }
 
     /// 把一個地點的 `LocationReport` 轉成 JSON 結構：`now`／`today`（今天剩下
@@ -410,8 +397,7 @@ impl WeatherPlugin {
     /// 只有一句狀態訊息、沒有任何欄位的報告，`display()`（還沒抓過）跟
     /// `fetch()`（抓失敗）共用。
     fn placeholder(location: &str, message: &str) -> LocationReport {
-        let place = if location.is_empty() { "自動偵測".to_string() } else { location.to_string() };
-        LocationReport { place, status: Some(message.to_string()), columns: Vec::new() }
+        LocationReport { place: location.to_string(), status: Some(message.to_string()), columns: Vec::new() }
     }
 
     /// 開一個背景執行緒去抓 `location` 的天氣，抓完寫回 `cache`；如果這個地點
@@ -429,8 +415,7 @@ impl WeatherPlugin {
         let pending = self.pending.clone();
         let ctx = self.ctx.clone();
         thread::spawn(move || {
-            let log_location = if location.is_empty() { "auto-detect (IP)".to_string() } else { location.clone() };
-            ctx.lock().unwrap().log_activity("external", format!("GET Open-Meteo forecast for {log_location}"));
+            ctx.lock().unwrap().log_activity("external", format!("GET Open-Meteo forecast for {location}"));
             let report = Self::fetch(&location);
             cache.lock().unwrap().insert(location.clone(), CacheEntry { fetched_at: Instant::now(), report });
             pending.lock().unwrap().remove(&location);
@@ -439,7 +424,7 @@ impl WeatherPlugin {
 
     /// 用 `curl` 打一個網址、把回應內容當 JSON 解析，網路/curl 不存在/逾時
     /// （5 秒）/回應不是合法 JSON 都回傳 `None`，不 panic。`resolve_location`／
-    /// `fetch` 共用這個小工具，避免三個地方各寫一份幾乎一樣的 `Command::new`
+    /// `fetch` 共用這個小工具，避免兩個地方各寫一份幾乎一樣的 `Command::new`
     /// 邏輯。
     fn curl_json(url: &str) -> Option<Value> {
         let output = Command::new("curl").args(["--silent", "--max-time", "5", url]).output().ok()?;
@@ -451,28 +436,18 @@ impl WeatherPlugin {
     }
 
     /// 把使用者輸入的地點字串換成 (緯度, 經度, 顯示名稱)：Open-Meteo 的
-    /// forecast API 只吃座標，不吃地名，且沒有「依來源 IP 自動判斷地點」這個
-    /// 功能（原本 wttr.in 兩件事都幫忙做，換了資料來源後得自己補這兩步）。
-    /// 空字串（`AUTO_DETECT`）打 ip-api.com 用來源 IP 查座標＋城市名；非空
-    /// 字串則透過 Open-Meteo 自己的地理編碼 API 查座標，顯示名稱維持使用者
-    /// 打的原始字串（不管查到的官方名稱是什麼，這樣 `remove` 時打的名字才會
-    /// 跟畫面上看到的一致，也不用另外存一份「原始輸入 -> 官方名稱」的對照）。
+    /// forecast API 只吃座標，不吃地名，透過 Open-Meteo 自己的地理編碼 API
+    /// 查座標，顯示名稱維持使用者打的原始字串（不管查到的官方名稱是什麼，
+    /// 這樣 `remove` 時打的名字才會跟畫面上看到的一致，也不用另外存一份
+    /// 「原始輸入 -> 官方名稱」的對照）。
     fn resolve_location(location: &str) -> Option<(f64, f64, String)> {
-        if location.is_empty() {
-            let body = Self::curl_json("http://ip-api.com/json")?;
-            let lat = body.get("lat")?.as_f64()?;
-            let lon = body.get("lon")?.as_f64()?;
-            let place = body.get("city").and_then(|v| v.as_str()).unwrap_or("自動偵測").to_string();
-            Some((lat, lon, place))
-        } else {
-            let name = location.replace(' ', "+");
-            let url = format!("https://geocoding-api.open-meteo.com/v1/search?name={name}&count=1");
-            let body = Self::curl_json(&url)?;
-            let result = body.get("results")?.as_array()?.first()?;
-            let lat = result.get("latitude")?.as_f64()?;
-            let lon = result.get("longitude")?.as_f64()?;
-            Some((lat, lon, location.to_string()))
-        }
+        let name = location.replace(' ', "+");
+        let url = format!("https://geocoding-api.open-meteo.com/v1/search?name={name}&count=1");
+        let body = Self::curl_json(&url)?;
+        let result = body.get("results")?.as_array()?.first()?;
+        let lat = result.get("latitude")?.as_f64()?;
+        let lon = result.get("longitude")?.as_f64()?;
+        Some((lat, lon, location.to_string()))
     }
 
     /// 先查座標（`resolve_location`），再拿座標打 Open-Meteo 的 forecast API：

@@ -2193,7 +2193,7 @@
         icon.innerHTML = weatherIconSvg(loc.now ? loc.now.category : "unknown");
         const name = document.createElement("span");
         name.className = "weather-loc-name";
-        name.textContent = loc.key === "" ? `${loc.place}（自動偵測）` : loc.place;
+        name.textContent = loc.place;
         const temp = document.createElement("span");
         temp.className = "weather-loc-temp";
         temp.textContent = loc.now ? `${loc.now.temp_c}°` : "…";

@@ -174,9 +174,9 @@ async fn global_list(ctx: web::Data<SharedContext>) -> impl Responder {
     HttpResponse::Ok().json(items)
 }
 
-/// `GET /api/weather/list`：tablet 前端的 weather 分頁用，回傳每個地點（自動
-/// 偵測 + `add` 過的城市）目前的結構化天氣資料（分類/數字，不是拼好的顯示
-/// 字串），見 `WeatherPlugin::snapshot` 的說明。跟 `table_snapshot_json` 同一個
+/// `GET /api/weather/list`：tablet 前端的 weather 分頁用，回傳每個 `add` 過的
+/// 城市目前的結構化天氣資料（分類/數字，不是拼好的顯示字串），見
+/// `WeatherPlugin::snapshot` 的說明。跟 `table_snapshot_json` 同一個
 /// 「向下轉型拿具體型別」的做法，這裡不用比對「有沒有變化才推播」（不像
 /// `global`/`device` 那樣走 SSE snapshot channel），因為 weather 是每 300 秒才
 /// 換一次資料（`CACHE_TTL`），前端定期 poll 就夠了，不需要另開一組 broadcast

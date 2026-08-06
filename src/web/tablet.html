@@ -891,8 +891,8 @@
 
   // 建立 weather 分頁：定期打 `/api/weather/list` 拿目前所有地點的結構化天氣
   // 資料，左側清單點哪個地區、右側大圖就換成那個地區的圖示／背景／預報，
-  // `selectedKey` 跨每一輪 poll 保留（除非那個地區被移除了才退回清單第一個，
-  // 通常是自動偵測地點）。回傳 `stop` 函式，切分頁時清掉 interval。
+  // `selectedKey` 跨每一輪 poll 保留（除非那個地區被移除了才退回清單第一個）。
+  // 回傳 `stop` 函式，切分頁時清掉 interval。
   function startWeatherTab(container) {
     const wrap = document.createElement("div");
     wrap.className = "weather-body";
@@ -918,7 +918,7 @@
         icon.innerHTML = weatherIconSvg(loc.now ? loc.now.category : "unknown");
         const name = document.createElement("span");
         name.className = "weather-loc-name";
-        name.textContent = loc.key === "" ? `${loc.place}（自動偵測）` : loc.place;
+        name.textContent = loc.place;
         const temp = document.createElement("span");
         temp.className = "weather-loc-temp";
         temp.textContent = loc.now ? `${loc.now.temp_c}°` : "…";
