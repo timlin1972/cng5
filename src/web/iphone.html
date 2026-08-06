@@ -38,12 +38,26 @@
      自己補 padding，不然畫面上緣/下緣的內容會被瀏海或 home indicator 蓋掉/
      擋住點擊。`viewport-fit=cover`（見 `<meta name="viewport">`）是讓這幾個
      `env()` 變數有值的前提。 */
-  #content { flex: 1; overflow: auto; padding-top: env(safe-area-inset-top); }
+  /* `#tabbar` 用 `position: fixed` 貼死在螢幕最下緣（不是靠 flex 排在
+     `#content` 下面）：部分 iOS Safari／PWA 版本上，`100dvh` 撐滿的
+     `body` 底部跟裝置實際螢幕下緣之間會留一條縫（`env(safe-area-inset-
+     bottom)` 只補了分頁列自己的內距，並不保證外層容器的高度精準貼齊），
+     用 `bottom: 0` 直接錨定視窗底部才能保證緊貼——即使貼到圓角區域被
+     切掉一角也沒關係。`#content` 額外留一塊底部 padding 讓內容不被蓋住。 */
+  #content {
+    flex: 1;
+    overflow: auto;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: calc(58px + env(safe-area-inset-bottom));
+  }
   #tabbar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
     display: flex;
     background: #1b1e26;
     border-top: 1px solid #3a4150;
-    flex: none;
     padding-bottom: env(safe-area-inset-bottom);
   }
   #tabbar button {
@@ -77,10 +91,18 @@
      一律靠畫面裡的「‹ 返回」按鈕。 */
   .ld-wrap { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
   .ld-list { flex: 1; overflow: auto; }
-  .ld-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
-  .ld-back-bar { flex: none; padding: 10px 14px; border-bottom: 1px solid #262a33; background: #1b1e26; }
+  /* `.ld-detail` 是 `position: relative`，讓下面的「返回」按鈕能絕對定位
+     浮在左下角、貼著底下分頁列正上方；`.ld-detail-body` 本身 `overflow:
+     hidden`，實際內容（各分頁自己的 detail 容器）自己有 `overflow: auto`
+     負責捲動，這樣浮動按鈕才不會被捲動內容帶著跑。 */
+  .ld-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; position: relative; }
+  .ld-detail-body { flex: 1; overflow: hidden; }
   .ld-back-btn {
-    background: #262a33;
+    position: absolute;
+    left: 12px;
+    bottom: 12px;
+    z-index: 2;
+    background: rgba(38, 42, 51, 0.92);
     border: 1px solid #3a4150;
     color: #6f9dff;
     border-radius: 8px;
@@ -91,12 +113,6 @@
     min-height: 44px;
   }
   .ld-back-btn:active { background: #323844; }
-  .ld-detail-body { flex: 1; overflow: hidden; position: relative; }
-  /* player 單曲畫面的「返回」不放在頂部 back bar，改成浮在詳細畫面左下角、
-     緊貼底下分頁列（`#tabbar`）正上方——`.ld-detail-body` 是 `position:
-     relative` 但本身不捲動，`.player-detail-content` 才會捲動，所以絕對定位
-     的按鈕永遠貼在同一個位置，不會被捲動內容帶走。 */
-  .player-back-btn { position: absolute; left: 12px; bottom: 12px; z-index: 2; background: rgba(38, 42, 51, 0.92); }
 
   /* device/global：清單改成一列一張卡片（id/ip/alive），點一列進 detail
      顯示該裝置全部欄位。跟桌面版/tablet 表格是同一份資料來源
@@ -412,7 +428,7 @@
   }
   .player-cover-slot {
     width: 100%;
-    max-width: 260px;
+    max-width: 320px;
     aspect-ratio: 1 / 1;
     background: #0d0f13;
     border: 1px solid #3a4150;
@@ -420,7 +436,7 @@
     cursor: pointer;
   }
   .player-cover { object-fit: cover; }
-  .player-seek-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 260px; }
+  .player-seek-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 320px; }
   .player-seek { flex: 1; min-width: 0; accent-color: #6f9dff; }
   .player-time { flex-shrink: 0; font-size: 12px; color: #9aa3b2; white-space: nowrap; }
   .player-track-name {
@@ -436,20 +452,22 @@
   .player-lyric-line { padding: 3px 0; }
   .player-lyric-line.active { color: #6f9dff; font-weight: bold; }
   .player-lyrics-empty { color: #5a6272; padding: 8px 0; }
-  .player-controls { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; }
-  .player-transport { display: flex; gap: 10px; }
+  .player-controls { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100%; }
+  .player-transport { display: flex; align-items: center; gap: 22px; }
+  .player-mode-row { display: flex; justify-content: center; width: 100%; }
   .player-controls button {
-    background: #262a33;
-    border: 1px solid #3a4150;
+    background: none;
+    border: none;
     color: #d8dee9;
-    border-radius: 8px;
-    padding: 12px 18px;
+    padding: 8px;
     font: inherit;
-    font-size: 18px;
+    font-size: 32px;
+    line-height: 1;
     cursor: pointer;
     min-height: 44px;
+    min-width: 44px;
   }
-  .player-controls button:active { background: #323844; }
+  .player-controls button:active { opacity: 0.5; }
 
   /* storage 分頁：資料夾瀏覽維持清單+breadcrumb（本來就是「點下去、看清單」
      的模式，不用改）；點一個「檔案」（非資料夾）改成進詳細畫面，顯示檔名/
@@ -788,16 +806,16 @@
   // 每個分頁共用的「清單 → 詳細畫面」骨架：`listEl` 放清單內容，
   // `detailBody` 放詳細畫面內容，`showList()`/`showDetail()` 互斥切換兩個
   // 畫面（不是路由跳頁，純粹是同一個 DOM 樹裡兩塊內容的顯示/隱藏），
-  // 詳細畫面預設在最上面放一顆「‹ 返回」按鈕。分頁切換（`switchTo`）時
+  // 詳細畫面切換（`switchTo`）時
   // `#content` 會整個被清空重建，所以每次進入分頁一律從清單畫面開始，不
   // 記憶上次停在哪個畫面（player 分頁的播放狀態是例外，見該分頁的說明，
   // 那是播放核心狀態本身跨分頁存活，跟這裡的清單/詳細畫面切換是兩件事）。
   //
-  // `opts.hideBackBar`：player 分頁的單曲畫面不用這顆固定在最上面的
-  // 「返回」，改在自己的版面裡把「返回」放在控制列（播放模式/上一首/
-  // 播放/下一首）上面（見 `startPlayerTab`），這裡就把預設的頂部返回列
-  // 藏起來，呼叫端改用回傳的 `showList` 自己接一顆按鈕。
-  function createListDetailView(container, opts) {
+  // 「‹ 返回」按鈕浮在詳細畫面左下角、貼著底下分頁列正上方（不放在畫面
+  // 最上面）：`detailEl` 是 `position: relative`，按鈕絕對定位在它裡面，
+  // 跟會捲動的 `detailBody`（實際內容自己有 `overflow: auto`）是兩個獨立
+  // 的 sibling，不會被捲動內容帶走。
+  function createListDetailView(container) {
     const wrap = document.createElement("div");
     wrap.className = "ld-wrap";
     const listEl = document.createElement("div");
@@ -805,17 +823,13 @@
     const detailEl = document.createElement("div");
     detailEl.className = "ld-detail";
     detailEl.style.display = "none";
-    const backBar = document.createElement("div");
-    backBar.className = "ld-back-bar";
-    if (opts && opts.hideBackBar) backBar.style.display = "none";
+    const detailBody = document.createElement("div");
+    detailBody.className = "ld-detail-body";
     const backBtn = document.createElement("button");
     backBtn.className = "ld-back-btn";
     backBtn.textContent = "‹ 返回";
-    backBar.appendChild(backBtn);
-    const detailBody = document.createElement("div");
-    detailBody.className = "ld-detail-body";
-    detailEl.appendChild(backBar);
     detailEl.appendChild(detailBody);
+    detailEl.appendChild(backBtn);
     wrap.appendChild(listEl);
     wrap.appendChild(detailEl);
     container.appendChild(wrap);
@@ -1991,10 +2005,7 @@
   // `playerAudioCtx`——音樂會在切到其他分頁時繼續放，Media Session 的
   // 鎖屏控制也才有意義。
   function startPlayerTab(container) {
-    // 單曲畫面的「返回」不用固定在最上面那顆（跟其他分頁不一樣），改放在
-    // 控制列（播放模式/上一首/播放/下一首）上面，見下面 `right.appendChild`
-    // 那一段。
-    const ld = createListDetailView(container, { hideBackBar: true });
+    const ld = createListDetailView(container);
 
     // ---- 清單畫面 ----
     const listWrap = document.createElement("div");
@@ -2055,13 +2066,13 @@
     lyricsEl.title = cover.title;
     const spectrum = document.createElement("canvas");
     spectrum.className = "player-cover-slot player-spectrum";
-    spectrum.width = 220;
-    spectrum.height = 220;
+    spectrum.width = 300;
+    spectrum.height = 300;
     spectrum.title = cover.title;
     const radial = document.createElement("canvas");
     radial.className = "player-cover-slot player-radial";
-    radial.width = 220;
-    radial.height = 220;
+    radial.width = 300;
+    radial.height = 300;
     radial.title = cover.title;
     const seekRow = document.createElement("div");
     seekRow.className = "player-seek-row";
@@ -2108,17 +2119,12 @@
     transport.appendChild(prevBtn);
     transport.appendChild(playPauseBtn);
     transport.appendChild(nextBtn);
-    rightControls.appendChild(modeBtn);
+    // 播放模式自己一排，放在上一首/播放/下一首那排下面，兩排都置中。
+    const modeRow = document.createElement("div");
+    modeRow.className = "player-mode-row";
+    modeRow.appendChild(modeBtn);
     rightControls.appendChild(transport);
-    // 單曲畫面的「返回」不放在頂部（`createListDetailView` 這次是
-    // `hideBackBar: true`），也不跟著內容捲動——浮在畫面左下角、緊貼底下
-    // 分頁列（topology/weather/...那一排）正上方，直接掛在 `ld.detailBody`
-    // 底下（跟會捲動的 `right` 是兩個獨立的 sibling），靠 CSS 絕對定位固定
-    // 位置，呼叫 `ld.showList()` 回清單。
-    const playerBackBtn = document.createElement("button");
-    playerBackBtn.className = "ld-back-btn player-back-btn";
-    playerBackBtn.textContent = "‹ 返回";
-    playerBackBtn.addEventListener("click", () => ld.showList());
+    rightControls.appendChild(modeRow);
     right.appendChild(cover);
     right.appendChild(lyricsEl);
     right.appendChild(spectrum);
@@ -2127,7 +2133,6 @@
     right.appendChild(trackName);
     right.appendChild(rightControls);
     ld.detailBody.appendChild(right);
-    ld.detailBody.appendChild(playerBackBtn);
 
     // 接回模組層級的持久 `musicUi`：播放狀態（playlist/currentName/
     // playMode）維持原樣，只換上這次畫面用的 DOM 元素。
