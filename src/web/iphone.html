@@ -783,11 +783,16 @@
   // 每個分頁共用的「清單 → 詳細畫面」骨架：`listEl` 放清單內容，
   // `detailBody` 放詳細畫面內容，`showList()`/`showDetail()` 互斥切換兩個
   // 畫面（不是路由跳頁，純粹是同一個 DOM 樹裡兩塊內容的顯示/隱藏），
-  // 詳細畫面固定在最上面放一顆「‹ 返回」按鈕。分頁切換（`switchTo`）時
+  // 詳細畫面預設在最上面放一顆「‹ 返回」按鈕。分頁切換（`switchTo`）時
   // `#content` 會整個被清空重建，所以每次進入分頁一律從清單畫面開始，不
   // 記憶上次停在哪個畫面（player 分頁的播放狀態是例外，見該分頁的說明，
   // 那是播放核心狀態本身跨分頁存活，跟這裡的清單/詳細畫面切換是兩件事）。
-  function createListDetailView(container) {
+  //
+  // `opts.hideBackBar`：player 分頁的單曲畫面不用這顆固定在最上面的
+  // 「返回」，改在自己的版面裡把「返回」放在控制列（播放模式/上一首/
+  // 播放/下一首）上面（見 `startPlayerTab`），這裡就把預設的頂部返回列
+  // 藏起來，呼叫端改用回傳的 `showList` 自己接一顆按鈕。
+  function createListDetailView(container, opts) {
     const wrap = document.createElement("div");
     wrap.className = "ld-wrap";
     const listEl = document.createElement("div");
@@ -797,6 +802,7 @@
     detailEl.style.display = "none";
     const backBar = document.createElement("div");
     backBar.className = "ld-back-bar";
+    if (opts && opts.hideBackBar) backBar.style.display = "none";
     const backBtn = document.createElement("button");
     backBtn.className = "ld-back-btn";
     backBtn.textContent = "‹ 返回";
@@ -1962,7 +1968,10 @@
   // `playerAudioCtx`——音樂會在切到其他分頁時繼續放，Media Session 的
   // 鎖屏控制也才有意義。
   function startPlayerTab(container) {
-    const ld = createListDetailView(container);
+    // 單曲畫面的「返回」不用固定在最上面那顆（跟其他分頁不一樣），改放在
+    // 控制列（播放模式/上一首/播放/下一首）上面，見下面 `right.appendChild`
+    // 那一段。
+    const ld = createListDetailView(container, { hideBackBar: true });
 
     // ---- 清單畫面 ----
     const listWrap = document.createElement("div");
@@ -2078,12 +2087,20 @@
     transport.appendChild(nextBtn);
     rightControls.appendChild(modeBtn);
     rightControls.appendChild(transport);
+    // 單曲畫面的「返回」放在控制列（播放模式/上一首/播放/下一首）上面，
+    // 不是固定在畫面最上面那顆（`createListDetailView` 這次是
+    // `hideBackBar: true`），直接呼叫 `ld.showList()` 回清單。
+    const playerBackBtn = document.createElement("button");
+    playerBackBtn.className = "ld-back-btn player-back-btn";
+    playerBackBtn.textContent = "‹ 返回";
+    playerBackBtn.addEventListener("click", () => ld.showList());
     right.appendChild(cover);
     right.appendChild(lyricsEl);
     right.appendChild(spectrum);
     right.appendChild(radial);
     right.appendChild(seekRow);
     right.appendChild(trackName);
+    right.appendChild(playerBackBtn);
     right.appendChild(rightControls);
     ld.detailBody.appendChild(right);
 
