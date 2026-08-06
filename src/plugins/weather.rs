@@ -64,17 +64,59 @@ const CACHE_TTL: Duration = Duration::from_secs(300);
 
 /// `manual` 指令的說明。
 const MANUAL_TEXT: &str = "\
-weather：抓 Open-Meteo 的天氣資料，用純文字表格顯示現在/今天剩下時段/未來
-幾天。
+weather：抓天氣資料，用純文字表格顯示現在/今天剩下時段/未來幾天。台灣的
+縣市＋行政區（例如「新北市新莊區」）走中央氣象署開放資料平台（CWA），
+其他地點走 Open-Meteo。
 
 範例：
-  show          顯示表格（列出 add 加過的城市）
-  add Tokyo     加一個城市，之後 show/panel 都會列出來
-  remove Tokyo  移除一個城市
+  show               顯示表格（列出 add 加過的城市）
+  add Tokyo          加一個城市，之後 show/panel 都會列出來
+  add 新北市新莊區    台灣地點要打完整的縣市＋行政區
+  remove Tokyo        移除一個城市
+
+CWA 那條路徑需要一個 cwa-api-key 檔案（放在跑這個程式的當前目錄，內容是
+https://opendata.cwa.gov.tw/ 註冊會員申請到的授權碼，不進版控），沒有這個
+檔案的話那個地點會一直顯示「無法取得天氣資訊」。
 
 資料每 300 秒（CACHE_TTL）快取一次，過期後背景執行緒重新抓，show/panel 顯示的
 都是目前的快取值（或「抓取中」），不會讓你等網路回應卡住畫面。
 ";
+
+/// CWA API 授權碼檔案路徑（見 `.gitignore` 的 `/cwa-api-key`），跟
+/// `crypto.rs` 的 `KEY_FILE`／`remote-key` 同一個做法：純文字放一份、
+/// 不進版控，去 <https://opendata.cwa.gov.tw/> 註冊會員申請。讀不到就讓
+/// `fetch_cwa` 直接回 `None`，跟其他步驟查不到值時的處理方式一致，不特別
+/// 報錯。
+const CWA_KEY_FILE: &str = "cwa-api-key";
+
+/// 每個縣市對應的 CWA 逐 3 小時天氣預報 dataset id（見 `fetch_cwa` 的
+/// 說明）。`add` 打的字串如果是這裡任何一個縣市名開頭（用「台」正規化成
+/// 「臺」比對，`台北市`/`臺北市` 兩種寫法都認得），就不查 Open-Meteo，改走
+/// CWA——`match_taiwan_location` 負責判斷。
+const CWA_COUNTIES: &[(&str, &str)] = &[
+    ("宜蘭縣", "F-D0047-001"),
+    ("桃園市", "F-D0047-005"),
+    ("新竹縣", "F-D0047-009"),
+    ("苗栗縣", "F-D0047-013"),
+    ("彰化縣", "F-D0047-017"),
+    ("南投縣", "F-D0047-021"),
+    ("雲林縣", "F-D0047-025"),
+    ("嘉義縣", "F-D0047-029"),
+    ("屏東縣", "F-D0047-033"),
+    ("臺東縣", "F-D0047-037"),
+    ("花蓮縣", "F-D0047-041"),
+    ("澎湖縣", "F-D0047-045"),
+    ("基隆市", "F-D0047-049"),
+    ("新竹市", "F-D0047-053"),
+    ("嘉義市", "F-D0047-057"),
+    ("臺北市", "F-D0047-061"),
+    ("高雄市", "F-D0047-065"),
+    ("新北市", "F-D0047-069"),
+    ("臺中市", "F-D0047-073"),
+    ("臺南市", "F-D0047-077"),
+    ("連江縣", "F-D0047-081"),
+    ("金門縣", "F-D0047-085"),
+];
 
 /// 一欄的內容種類：`now`／今天剩下的時段／未來的日期，各自需要的數值不一樣
 /// （`now`／`hour` 是單一氣溫，`day` 是氣溫範圍），拆成 enum 而不是塞進共用的
@@ -218,10 +260,27 @@ impl WeatherPlugin {
         Ok(())
     }
 
+    /// 判斷 `location` 是不是「台灣縣市＋行政區」，是的話回傳（該縣市對應
+    /// 的 CWA dataset id, 行政區名稱）。行政區名稱可能是空字串（使用者只打
+    /// 了縣市沒打區），呼叫端（`add`／`fetch_inner`）要自己擋，這裡不擋是
+    /// 因為兩邊擋掉之後要做的事不一樣（`add` 直接 `bail!`，`fetch_inner`
+    /// 顯示狀態訊息）。
+    fn match_taiwan_location(location: &str) -> Option<(&'static str, String)> {
+        let normalized = location.replace('台', "臺");
+        CWA_COUNTIES
+            .iter()
+            .find_map(|&(county, resource_id)| normalized.strip_prefix(county).map(|rest| (resource_id, rest.trim().to_string())))
+    }
+
     fn add(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let city = args.join(" ");
         if city.is_empty() {
             bail!("add 需要接城市名稱");
+        }
+        if let Some((_, district)) = Self::match_taiwan_location(&city)
+            && district.is_empty()
+        {
+            bail!("台灣地點要打完整的縣市＋行政區，例如 新北市新莊區");
         }
         if self.locations.iter().any(|l| l == &city) {
             out.push(&format!("weather 已經有 {city} 了\n"));
@@ -473,10 +532,18 @@ impl WeatherPlugin {
     /// 不 panic。只會在 `spawn_refresh` 開的背景執行緒裡呼叫，不會卡住任何
     /// 持有鎖的執行緒。
     fn fetch(location: &str) -> LocationReport {
-        Self::fetch_inner(location).unwrap_or_else(|| Self::placeholder(location, "無法取得天氣資訊（沒有網路或未安裝 curl）"))
+        Self::fetch_inner(location).unwrap_or_else(|| Self::placeholder(location, "無法取得天氣資訊（網路異常、cwa-api-key 檔案不存在，或地點查無資料）"))
     }
 
+    /// 台灣縣市＋行政區（`match_taiwan_location` 判斷出來）走 `fetch_cwa`，
+    /// 其他地點照舊走 Open-Meteo。
     fn fetch_inner(location: &str) -> Option<LocationReport> {
+        if let Some((resource_id, district)) = Self::match_taiwan_location(location) {
+            if district.is_empty() {
+                return None;
+            }
+            return Self::fetch_cwa(resource_id, &district, location);
+        }
         let (lat, lon, place) = Self::resolve_location(location)?;
         let url = format!(
             "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code&hourly=temperature_2m,weather_code,precipitation_probability&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=4"
@@ -618,6 +685,353 @@ impl WeatherPlugin {
             71 | 73 | 75 | 77 | 85 | 86 => ("snow", "Snow"),
             95 | 96 | 99 => ("thunderstorm", "Thunderstorm"),
             _ => ("unknown", "Unknown"),
+        }
+    }
+
+    /// 台灣行政區改用中央氣象署開放資料平台（CWA），不查 Open-Meteo：
+    /// `resource_id`／`district` 是 `match_taiwan_location` 查出來的縣市
+    /// dataset id／行政區名稱，`place` 保留使用者輸入的原始字串當顯示名稱
+    /// （跟 Open-Meteo 那條路徑一致，`remove` 打的名字才會跟畫面上看到的
+    /// 一致）。
+    ///
+    /// `now` 用最近氣象站的即時觀測（`nearest_cwa_station`），不是模型
+    /// 預報——這是這次改用 CWA 的理由：Open-Meteo 的 `now` 只是全球模型算
+    /// 出來的「這個時刻」數值，跟氣象站實測的落差在台灣夏天午後對流雨這種
+    /// 很局部的天氣上特別明顯（同一個縣市，這裡在下、那裡沒下）。
+    /// `今天剩下時段`／`未來幾天` 吃同一份逐 3 小時預報（`溫度`/`天氣現象`/
+    /// `3小時降雨機率`/`體感溫度`），不用再多打一次 API。讀不到
+    /// `CWA_KEY_FILE`（見該常數的說明）就直接回傳 `None` 讓呼叫端顯示狀態
+    /// 訊息。
+    fn fetch_cwa(resource_id: &str, district: &str, place: &str) -> Option<LocationReport> {
+        let api_key = Self::cwa_api_key()?;
+        let now = Self::cwa_now()?;
+        let url = format!(
+            "https://opendata.cwa.gov.tw/api/v1/rest/datastore/{resource_id}?Authorization={api_key}&format=JSON&LocationName={}",
+            Self::url_encode(district)
+        );
+        let body = Self::curl_json(&url)?;
+        let location = body.get("records")?.get("Locations")?.as_array()?.first()?.get("Location")?.as_array()?.first()?;
+        let elements = location.get("WeatherElement")?.as_array()?;
+        let element = |name: &str| elements.iter().find(|e| e.get("ElementName").and_then(|v| v.as_str()) == Some(name));
+        let temps = element("溫度")?;
+        let feels = element("體感溫度");
+        let rains = element("3小時降雨機率")?;
+        let codes = element("天氣現象")?;
+        let lat: f64 = location.get("Latitude")?.as_str()?.parse().ok()?;
+        let lon: f64 = location.get("Longitude")?.as_str()?.parse().ok()?;
+
+        let mut columns = vec![Self::cwa_now_column(&api_key, lat, lon, rains, feels, &now)?];
+        columns.extend(Self::cwa_hourly_columns(temps, codes, rains, &now));
+        columns.extend(Self::cwa_daily_columns(temps, codes, rains, &now));
+        Some(LocationReport { place: place.to_string(), status: None, columns })
+    }
+
+    /// 讀 `CWA_KEY_FILE` 拿授權碼，去頭尾空白（含檔案結尾常見的換行）；
+    /// 檔案不存在或內容整個是空白都算「沒有 key」。
+    fn cwa_api_key() -> Option<String> {
+        let text = std::fs::read_to_string(CWA_KEY_FILE).ok()?;
+        let key = text.trim();
+        if key.is_empty() {
+            None
+        } else {
+            Some(key.to_string())
+        }
+    }
+
+    /// 台灣（Asia/Taipei，沒有夏令時間）現在的當地時間，格式
+    /// `"YYYY-MM-DDTHH:MM"`，用來跟 CWA 回應裡的時間字串比對。跟
+    /// `curl_json` 一樣叫系統指令（`date`）取，不用為了這一個換算拉時區/
+    /// 日期函式庫進來。
+    fn cwa_now() -> Option<String> {
+        let output = Command::new("date").env("TZ", "Asia/Taipei").args(["+%Y-%m-%dT%H:%M"]).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
+    }
+
+    /// 手動 percent-encode（逐 byte 處理，UTF-8 的中文字元自然也會被正確
+    /// 編碼）：CWA 的 `LocationName` 參數要吃中文行政區名，Open-Meteo
+    /// geocoding 那條路徑原本只用 `.replace(' ', "+")` 打發（只會是英文
+    /// 拼音），這裡沒有現成的 URL-encoding 函式庫依賴，資料量小，自己寫比
+    /// 多拉一個 crate 進來划算。
+    fn url_encode(s: &str) -> String {
+        let mut out = String::new();
+        for b in s.as_bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(*b as char),
+                _ => out.push_str(&format!("%{b:02X}")),
+            }
+        }
+        out
+    }
+
+    /// 找離 `(lat, lon)` 最近的中央氣象署自動氣象站，回傳該站的完整記錄
+    /// （`records.Station[]` 其中一筆）。用經緯度歐幾里得距離找最近站——
+    /// 台灣範圍小，這個近似不會有太大誤差，不需要真正的球面距離公式。
+    /// 忽略沒有回傳氣溫的站（sentinel 值或缺欄位），不然可能選到故障中的
+    /// 測站。
+    fn nearest_cwa_station(api_key: &str, lat: f64, lon: f64) -> Option<Value> {
+        let url = format!("https://opendata.cwa.gov.tw/api/v1/rest/datastore/O-A0003-001?Authorization={api_key}&format=JSON");
+        let body = Self::curl_json(&url)?;
+        let stations = body.get("records")?.get("Station")?.as_array()?;
+        stations
+            .iter()
+            .filter_map(|s| {
+                let temp = s.get("WeatherElement")?.get("AirTemperature")?.as_str()?.parse::<f64>().ok()?;
+                if temp < -90.0 {
+                    return None;
+                }
+                let coords = s.get("GeoInfo")?.get("Coordinates")?.as_array()?;
+                let wgs = coords.iter().find(|c| c.get("CoordinateName").and_then(|v| v.as_str()) == Some("WGS84"))?;
+                let slat = wgs.get("StationLatitude")?.as_str()?.parse::<f64>().ok()?;
+                let slon = wgs.get("StationLongitude")?.as_str()?.parse::<f64>().ok()?;
+                let dist = (slat - lat).powi(2) + (slon - lon).powi(2);
+                Some((dist, s.clone()))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, s)| s)
+    }
+
+    /// `now` 欄：氣溫/濕度/天氣描述用最近氣象站的即時觀測（見
+    /// `nearest_cwa_station`），降雨機率跟體感溫度氣象站沒有測，借用同一份
+    /// 3 小時預報覆蓋「現在」這個時間點的值頂替。
+    fn cwa_now_column(api_key: &str, lat: f64, lon: f64, rains: &Value, feels: Option<&Value>, now: &str) -> Option<WeatherColumn> {
+        let station = Self::nearest_cwa_station(api_key, lat, lon)?;
+        let we = station.get("WeatherElement")?;
+        let temp_c = we.get("AirTemperature")?.as_str()?.parse::<f64>().ok()?.round() as i32;
+        let humidity = we.get("RelativeHumidity").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) as i32;
+        let weather_text = we.get("Weather").and_then(|v| v.as_str()).unwrap_or("");
+        let (slug, desc) = Self::classify_cwa(weather_text);
+        let chance = Self::cwa_block_value_at(rains, now, "ProbabilityOfPrecipitation").unwrap_or(0.0).round() as u32;
+        let feels_like_c = feels
+            .and_then(|f| Self::cwa_hourly_value_at(f, now, "ApparentTemperature"))
+            .map(|v| v.round() as i32)
+            .unwrap_or(temp_c);
+        let obs_time = station.get("ObsTime")?.get("DateTime")?.as_str()?;
+        let local_time = obs_time.get(11..16)?.to_string();
+        Some(WeatherColumn {
+            header: "now".to_string(),
+            slug,
+            desc,
+            chance_of_rain: chance,
+            kind: WeatherColumnKind::Now { temp_c, feels_like_c, humidity, local_time },
+        })
+    }
+
+    /// 在 `element`（`StartTime`/`EndTime` 3 小時區塊格式）裡找覆蓋 `now`
+    /// 這個時間點的那一格，回傳 `key` 欄位的值。`cwa_now_column` 拿這個借
+    /// 「現在」所在時段的預報值頂替氣象站沒測的欄位（降雨機率/體感溫度）。
+    fn cwa_block_value_at(element: &Value, now: &str, key: &str) -> Option<f64> {
+        let times = element.get("Time")?.as_array()?;
+        for t in times {
+            let Some(start) = t.get("StartTime").and_then(|v| v.as_str()).and_then(|s| s.get(0..16)) else { continue };
+            let Some(end) = t.get("EndTime").and_then(|v| v.as_str()).and_then(|s| s.get(0..16)) else { continue };
+            if !(start <= now && now < end) {
+                continue;
+            }
+            let Some(raw) = t.get("ElementValue").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|ev| ev.get(key)).and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if let Ok(value) = raw.parse::<f64>() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// 在 `element`（`DataTime` 逐時格式，例如 `溫度`/`體感溫度`）裡找 `now`
+    /// 所在整點的那一筆，回傳 `key` 欄位的值。
+    fn cwa_hourly_value_at(element: &Value, now: &str, key: &str) -> Option<f64> {
+        let bucket = format!("{}:00", now.get(0..13)?);
+        let times = element.get("Time")?.as_array()?;
+        for t in times {
+            let Some(time) = t.get("DataTime").and_then(|v| v.as_str()) else { continue };
+            if time.get(0..16) != Some(bucket.as_str()) {
+                continue;
+            }
+            let Some(raw) = t.get("ElementValue").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|ev| ev.get(key)).and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if let Ok(value) = raw.parse::<f64>() {
+                return Some(value);
+            }
+        }
+        None
+    }
+
+    /// 把 `element`（`DataTime` 逐時格式）整份轉成 `time -> value` 的表，
+    /// `cwa_hourly_columns`／`cwa_daily_columns` 拿這個查逐時溫度，比每欄
+    /// 都線性掃一次 `Time` 陣列快。
+    fn cwa_hourly_map(element: &Value, key: &str) -> HashMap<String, f64> {
+        let mut map = HashMap::new();
+        let Some(times) = element.get("Time").and_then(|v| v.as_array()) else { return map };
+        for t in times {
+            let Some(time) = t.get("DataTime").and_then(|v| v.as_str()) else { continue };
+            let Some(raw) = t.get("ElementValue").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|ev| ev.get(key)).and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if let Ok(value) = raw.parse::<f64>() {
+                map.insert(time.to_string(), value);
+            }
+        }
+        map
+    }
+
+    /// 把 `element`（`StartTime`/`EndTime` 3 小時區塊格式，例如
+    /// `3小時降雨機率`）轉成 `StartTime -> value` 的表。
+    fn cwa_block_map(element: &Value, key: &str) -> HashMap<String, f64> {
+        let mut map = HashMap::new();
+        let Some(times) = element.get("Time").and_then(|v| v.as_array()) else { return map };
+        for t in times {
+            let Some(start) = t.get("StartTime").and_then(|v| v.as_str()) else { continue };
+            let Some(raw) = t.get("ElementValue").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|ev| ev.get(key)).and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            if let Ok(value) = raw.parse::<f64>() {
+                map.insert(start.to_string(), value);
+            }
+        }
+        map
+    }
+
+    /// 把 `天氣現象` 拆成 `(StartTime, EndTime, Weather 文字)` 的清單，順序
+    /// 跟 API 回應一樣（由早到晚）。`cwa_hourly_columns`／`cwa_daily_columns`
+    /// 都以這份清單為主軸去對應溫度/降雨機率。
+    fn cwa_weather_blocks(element: &Value) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        let Some(times) = element.get("Time").and_then(|v| v.as_array()) else { return out };
+        for t in times {
+            let Some(start) = t.get("StartTime").and_then(|v| v.as_str()) else { continue };
+            let Some(end) = t.get("EndTime").and_then(|v| v.as_str()) else { continue };
+            let Some(text) = t.get("ElementValue").and_then(|v| v.as_array()).and_then(|a| a.first()).and_then(|ev| ev.get("Weather")).and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            out.push((start.to_string(), end.to_string(), text.to_string()));
+        }
+        out
+    }
+
+    /// 今天剩下時段：`codes`（天氣現象）本身就是 3 小時一格，不用像
+    /// Open-Meteo 那樣再篩「每 3 小時取一筆」，直接篩「跟現在同一天、還沒
+    /// 開始（`now` 之後才開始）」就好——已經開始的那一格由 `now` 欄代表。
+    /// 氣溫抓同一個起始時間點的逐時溫度（3 小時格線剛好對得上整點溫度
+    /// 資料），降雨機率抓同一個起始時間的預報值，兩者缺資料就跳過那一欄，
+    /// 不影響其他欄。
+    fn cwa_hourly_columns(temps: &Value, codes: &Value, rains: &Value, now: &str) -> Vec<WeatherColumn> {
+        let mut out = Vec::new();
+        let Some(today) = now.get(0..10) else { return out };
+        let temp_map = Self::cwa_hourly_map(temps, "Temperature");
+        let rain_map = Self::cwa_block_map(rains, "ProbabilityOfPrecipitation");
+        for (start, _end, text) in Self::cwa_weather_blocks(codes) {
+            if start.get(0..10) != Some(today) {
+                continue;
+            }
+            let Some(start16) = start.get(0..16) else { continue };
+            if start16 <= now {
+                continue;
+            }
+            let Some(hour) = start.get(11..13).and_then(|h| h.parse::<u32>().ok()) else { continue };
+            let Some(&temp_c) = temp_map.get(&start) else { continue };
+            let chance = rain_map.get(&start).copied().unwrap_or(0.0).round() as u32;
+            let (slug, desc) = Self::classify_cwa(&text);
+            out.push(WeatherColumn {
+                header: format!("{hour:02}:00"),
+                slug,
+                desc,
+                chance_of_rain: chance,
+                kind: WeatherColumnKind::Hour { temp_c: temp_c.round() as i32 },
+            });
+        }
+        out
+    }
+
+    /// 未來幾天：把 3 小時一格的資料依日期分組，`min_c`/`max_c` 用同一天
+    /// 所有逐時溫度的最小/最大值，`slug`/`desc` 挑白天（06 點開始那一格）
+    /// 當代表，沒有就用當天第一格頂替，降雨機率取當天所有時段的最大值。
+    /// 跟現在同一天的那一筆 `is_today=true`，理由跟 Open-Meteo 那條路徑
+    /// 一樣（見 `WeatherColumnKind::Day` 的說明）。當天完全沒有溫度資料
+    /// （超出這份預報覆蓋的時間範圍）就跳過，不硬湊一筆假資料。
+    fn cwa_daily_columns(temps: &Value, codes: &Value, rains: &Value, now: &str) -> Vec<WeatherColumn> {
+        let mut out = Vec::new();
+        let Some(today) = now.get(0..10) else { return out };
+        let temp_map = Self::cwa_hourly_map(temps, "Temperature");
+        let rain_map = Self::cwa_block_map(rains, "ProbabilityOfPrecipitation");
+        let blocks = Self::cwa_weather_blocks(codes);
+
+        let mut dates: Vec<&str> = Vec::new();
+        for (start, _, _) in &blocks {
+            let Some(date) = start.get(0..10) else { continue };
+            if !dates.contains(&date) {
+                dates.push(date);
+            }
+        }
+
+        for date in dates {
+            let day_temps: Vec<f64> = temp_map.iter().filter(|(t, _)| t.get(0..10) == Some(date)).map(|(_, v)| *v).collect();
+            if day_temps.is_empty() {
+                continue;
+            }
+            let min_c = day_temps.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max_c = day_temps.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let chance = blocks
+                .iter()
+                .filter(|(start, _, _)| start.get(0..10) == Some(date))
+                .filter_map(|(start, _, _)| rain_map.get(start))
+                .cloned()
+                .fold(0.0, f64::max) as u32;
+            let representative = blocks
+                .iter()
+                .find(|(start, _, _)| start.get(0..10) == Some(date) && start.get(11..13) == Some("06"))
+                .or_else(|| blocks.iter().find(|(start, _, _)| start.get(0..10) == Some(date)));
+            let Some((_, _, text)) = representative else { continue };
+            let (slug, desc) = Self::classify_cwa(text);
+            out.push(WeatherColumn {
+                header: Self::short_date(date),
+                slug,
+                desc,
+                chance_of_rain: chance,
+                kind: WeatherColumnKind::Day { min_c: min_c.round() as i32, max_c: max_c.round() as i32, is_today: date == today },
+            });
+        }
+        out
+    }
+
+    /// CWA 的天氣描述是固定詞彙組合出來的中文字串（例如「短暫陣雨」、
+    /// 「多雲時晴」），不像 Open-Meteo 給一個 WMO 代碼可以直接查表，這裡改
+    /// 用關鍵字比對分類成跟 `classify` 一樣的 (slug, 英文描述) 組合，兩個
+    /// 資料源共用同一套圖示/背景分類鍵，前端不用分 Open-Meteo/CWA 兩套。
+    /// 關鍵字判斷順序有意義：先比對「雷」「雪」「霧」這些沒有歧義的字，再
+    /// 比對「陣雨」/「雨」（陣雨要先比對，不然「短暫陣雨」會先被「雨」比
+    /// 對到但分類邏輯其實一樣，純粹保留語意上的優先順序），最後才是單純的
+    /// 晴/多雲/陰組合，避免「多雲時晴短暫陣雨」這種複合描述被歸到錯的
+    /// 分類。
+    fn classify_cwa(text: &str) -> (&'static str, &'static str) {
+        if text.contains('雷') {
+            ("thunderstorm", "Thunderstorm")
+        } else if text.contains('雪') {
+            ("snow", "Snow")
+        } else if text.contains('霧') {
+            ("fog", "Fog")
+        } else if text.contains("陣雨") {
+            ("showers", "Showers")
+        } else if text.contains('雨') {
+            ("rain", "Rain")
+        } else if text.contains('晴') && text.contains("多雲") {
+            ("partly-cloudy", "Partly cloudy")
+        } else if text.contains('陰') {
+            ("overcast", "Overcast")
+        } else if text.contains("多雲") {
+            ("cloudy", "Cloudy")
+        } else if text.contains('晴') {
+            ("sunny", "Sunny")
+        } else {
+            ("unknown", "Unknown")
         }
     }
 }

@@ -39,6 +39,8 @@ target
 
 /remote-key
 
+/cwa-api-key
+
 /upgrade-respawn.log
 
 /.worktrees

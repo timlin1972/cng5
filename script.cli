@@ -15,9 +15,9 @@ show
 
 # weather
 plugin enter weather
-add Xindian District
-add Xinzhuang District
-add Tainan
+add 新北市新店區
+add 新北市新莊區
+add 臺南市中西區
 add Tokyo
 add Eindhoven
 ~
