@@ -1723,17 +1723,12 @@
   let playerFreqData = null;
   function ensurePlayerAnalyser() {
     if (playerAudioCtx) return;
-    playerAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
+    playerAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const source = playerAudioCtx.createMediaElementSource(player);
     playerAnalyser = playerAudioCtx.createAnalyser();
     playerAnalyser.fftSize = 128;
-    const splitter = playerAudioCtx.createChannelSplitter(2);
-    const merger = playerAudioCtx.createChannelMerger(2);
     source.connect(playerAnalyser);
-    playerAnalyser.connect(splitter);
-    splitter.connect(merger, 0, 0);
-    splitter.connect(merger, 1, 1);
-    merger.connect(playerAudioCtx.destination);
+    playerAnalyser.connect(playerAudioCtx.destination);
     playerFreqData = new Uint8Array(playerAnalyser.frequencyBinCount);
   }
 
