@@ -360,6 +360,48 @@
   }
   .storage-table button:hover { color: #d8dee9; }
 
+  /* todo 分頁：跟 storage 分頁一樣是 toolbar + 可捲動清單，但清單本身一列
+     一個 `<div>`（不是 `<table>`）——每列欄位只有勾選/文字/刪除三個，不需要
+     表格排版，`<div>` 加 `flex` 更好排文字自動換行（待辦內容可能很長）。 */
+  .todo-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .todo-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #3a4150;
+  }
+  .todo-toolbar input[type="text"] {
+    flex: 1;
+    background: #1b1e26;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 15px;
+  }
+  .todo-toolbar button {
+    background: #232833;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 4px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+  }
+  .todo-toolbar button:hover { background: #2b3140; }
+  .todo-list { flex: 1; overflow: auto; padding: 4px 0; }
+  .todo-empty { padding: 20px 14px; color: #9aa4b8; font-size: 15px; }
+  .todo-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-top: 1px solid #262a33; }
+  .todo-row input[type="checkbox"] { width: 20px; height: 20px; flex: none; }
+  .todo-text { flex: 1; font-size: 15px; overflow-wrap: anywhere; }
+  .todo-row.done .todo-text { color: #6c7280; text-decoration: line-through; }
+  .todo-row button { background: none; border: none; color: #9aa4b8; cursor: pointer; font-size: 16px; padding: 4px; }
+  .todo-row button:hover { color: #d8dee9; }
+
   /* notepad 分頁：跟桌面版一樣，但 Ctrl-E／Ctrl-F／Ctrl-S／Ctrl-X 這幾個
      組合鍵全部換成按鈕（見 `startNotepadTab` 開頭的說明）。 */
   .notepad-body { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
@@ -2651,6 +2693,91 @@
     return function stop() {};
   }
 
+  // 建立 todo 分頁：toolbar 一個輸入框＋新增按鈕，下面是可捲動的待辦清單，
+  // 每列勾選框切換完成/未完成、右邊垃圾桶刪除。跟 storage 分頁一樣，新增/
+  // 勾選/刪除都是打完 API 就整份 `refresh()` 重新抓，不用自己維護本地
+  // state 跟伺服器對不對得上。
+  function startTodoTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "todo-body";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "todo-toolbar";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "新增待辦事項...";
+    const addBtn = document.createElement("button");
+    addBtn.textContent = "＋ 新增";
+    toolbar.appendChild(input);
+    toolbar.appendChild(addBtn);
+
+    const list = document.createElement("div");
+    list.className = "todo-list";
+
+    wrap.appendChild(toolbar);
+    wrap.appendChild(list);
+    container.appendChild(wrap);
+
+    async function refresh() {
+      let items;
+      try {
+        const res = await fetch("/api/todo/list");
+        items = await res.json();
+      } catch (_err) {
+        return; // 這次沒抓到就算了，使用者下一次操作會再觸發一次 refresh。
+      }
+      list.innerHTML = "";
+      if (items.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "todo-empty";
+        empty.textContent = "（沒有待辦事項）";
+        list.appendChild(empty);
+        return;
+      }
+      for (const item of items) {
+        const row = document.createElement("div");
+        row.className = "todo-row" + (item.done ? " done" : "");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = item.done;
+        checkbox.addEventListener("change", async () => {
+          await fetch(`/api/todo/toggle?id=${item.id}`, { method: "POST" });
+          refresh();
+        });
+        const text = document.createElement("span");
+        text.className = "todo-text";
+        text.textContent = item.text;
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "🗑";
+        delBtn.addEventListener("click", async () => {
+          await fetch(`/api/todo/remove?id=${item.id}`, { method: "POST" });
+          refresh();
+        });
+        row.appendChild(checkbox);
+        row.appendChild(text);
+        row.appendChild(delBtn);
+        list.appendChild(row);
+      }
+    }
+
+    async function addItem() {
+      const text = input.value.trim();
+      if (!text) return;
+      await fetch(`/api/todo/add?text=${encodeURIComponent(text)}`, { method: "POST" });
+      input.value = "";
+      refresh();
+    }
+
+    addBtn.addEventListener("click", addItem);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addItem();
+    });
+
+    refresh();
+
+    return function stop() {};
+  }
+
   // 建立 notepad 分頁：跟桌面版 notepad panel 同一套檢視/編輯/切換檔案
   // 功能，但編輯（原本 Ctrl-E）／切換檔案（原本 Ctrl-F）／儲存（Ctrl-S）／
   // 取消（Ctrl-X）全部改成按鈕——平板很難按這種組合鍵。切換檔案的輸入框
@@ -2844,6 +2971,7 @@
     { name: "player", icon: "🎵", label: "player" },
     { name: "storage", icon: "🗂️", label: "storage" },
     { name: "notepad", icon: "📝", label: "notepad" },
+    { name: "todo", icon: "✅", label: "todo" },
   ];
 
   // `TAB_MODULES` 把每個分頁名稱對應到一個模組：`start(container)` 掛上
@@ -2858,6 +2986,7 @@
     player: { start: startPlayerTab },
     storage: { start: startStorageTab },
     notepad: { start: startNotepadTab },
+    todo: { start: startTodoTab },
   };
 
   const content = document.getElementById("content");

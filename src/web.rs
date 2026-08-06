@@ -21,8 +21,8 @@ use crate::plugin::{
 };
 use crate::plugins::{
     list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
-    DevicePlugin, GlobalPlugin, WeatherPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR,
-    SUBTITLE_LANG_PRIORITY,
+    DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR,
+    STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -124,6 +124,10 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/device/list", web::get().to(device_list))
             .route("/api/global/list", web::get().to(global_list))
             .route("/api/weather/list", web::get().to(weather_list))
+            .route("/api/todo/list", web::get().to(todo_list))
+            .route("/api/todo/add", web::post().to(todo_add))
+            .route("/api/todo/toggle", web::post().to(todo_toggle))
+            .route("/api/todo/remove", web::post().to(todo_remove))
             .route("/api/remote/cross-relay", web::post().to(remote_cross_relay))
             .route("/api/music/copy", web::get().to(music_copy_list))
             .route("/api/music/copy/{name}", web::get().to(music_copy_download))
@@ -188,6 +192,68 @@ async fn weather_list(shell: web::Data<SharedShell>) -> impl Responder {
         .map(|w| w.snapshot())
         .unwrap_or_default();
     HttpResponse::Ok().json(items)
+}
+
+/// `GET /api/todo/list`：tablet/webui 的 todo 分頁用，回傳目前所有待辦事項
+/// （結構化 JSON，不是 `panel_text()` 那份純文字），跟 `weather_list` 一樣
+/// 「向下轉型拿具體型別」直接讀 `TodoPlugin` 的記憶體狀態，不用另外走 SSE
+/// snapshot channel——待辦清單只會因為使用者自己在這個分頁操作而改變，前端
+/// 自己在新增/打勾/刪除後主動重新 `GET` 一次就夠了，不需要背景 push。
+async fn todo_list(shell: web::Data<SharedShell>) -> impl Responder {
+    let items = lock_shell(&shell)
+        .plugin_mut("todo")
+        .and_then(|p| p.as_any_mut().downcast_mut::<TodoPlugin>())
+        .map(|t| t.snapshot())
+        .unwrap_or_default();
+    HttpResponse::Ok().json(items)
+}
+
+#[derive(Deserialize)]
+struct TodoAddQuery {
+    text: String,
+}
+
+/// `POST /api/todo/add?text=<內容>`：新增一筆待辦。跟 `storage` 的寫入端點
+/// 一樣只回成功/失敗、不夾帶資料，前端收到 200 之後自己重新 `GET
+/// /api/todo/list` 拿最新清單。
+async fn todo_add(shell: web::Data<SharedShell>, query: web::Query<TodoAddQuery>) -> HttpResponse {
+    let mut sh = lock_shell(&shell);
+    let Some(todo) = sh.plugin_mut("todo").and_then(|p| p.as_any_mut().downcast_mut::<TodoPlugin>()) else {
+        return HttpResponse::InternalServerError().finish();
+    };
+    match todo.add_item(query.text.clone()) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::BadRequest().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct TodoIdQuery {
+    id: u64,
+}
+
+/// `POST /api/todo/toggle?id=<id>`：切換完成/未完成。
+async fn todo_toggle(shell: web::Data<SharedShell>, query: web::Query<TodoIdQuery>) -> HttpResponse {
+    let mut sh = lock_shell(&shell);
+    let Some(todo) = sh.plugin_mut("todo").and_then(|p| p.as_any_mut().downcast_mut::<TodoPlugin>()) else {
+        return HttpResponse::InternalServerError().finish();
+    };
+    match todo.toggle_item(query.id) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::BadRequest().finish(),
+    }
+}
+
+/// `POST /api/todo/remove?id=<id>`：刪除一筆待辦。
+async fn todo_remove(shell: web::Data<SharedShell>, query: web::Query<TodoIdQuery>) -> HttpResponse {
+    let mut sh = lock_shell(&shell);
+    let Some(todo) = sh.plugin_mut("todo").and_then(|p| p.as_any_mut().downcast_mut::<TodoPlugin>()) else {
+        return HttpResponse::InternalServerError().finish();
+    };
+    match todo.remove_item(query.id) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::BadRequest().finish(),
+    }
 }
 
 #[derive(Deserialize)]
