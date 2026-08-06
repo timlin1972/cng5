@@ -49,17 +49,19 @@ pub(crate) struct TodoItemJson {
     done: bool,
 }
 
+/// 待辦清單不在 struct 裡快取，每次讀寫都直接開檔——`storage`/`sync`
+/// plugin 隨時可能在背景把別台機器同步過來的 `todo.json` 蓋掉這個檔案，
+/// 如果啟動時讀一次就存進 `self.items`，之後就會一直看著過期的舊資料，
+/// 直到整個 plugin 被重新 `new()` 才會發現檔案已經變了。把檔案當成唯一的
+/// 真相來源，才能讓 `list`／web 分頁即時反映其他裝置同步過來的異動。
 pub struct TodoPlugin {
     #[allow(dead_code)]
     ctx: SharedContext,
-    next_id: u64,
-    items: Vec<TodoItem>,
 }
 
 impl TodoPlugin {
     pub fn new(ctx: SharedContext) -> Self {
-        let TodoFile { next_id, items } = Self::load();
-        Self { ctx, next_id, items }
+        Self { ctx }
     }
 
     /// 檔案不存在或內容壞掉都當成「還沒有任何待辦」，不是錯誤——跟
@@ -68,67 +70,70 @@ impl TodoPlugin {
         fs::read_to_string(TODO_FILE).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
     }
 
-    fn save(&self) -> Result<()> {
+    fn save(file: &TodoFile) -> Result<()> {
         fs::create_dir_all(TODO_DIR).context("建立 todo 目錄失敗")?;
-        let file = TodoFile { next_id: self.next_id, items: self.items.clone() };
-        let text = serde_json::to_string_pretty(&file).context("序列化待辦清單失敗")?;
+        let text = serde_json::to_string_pretty(file).context("序列化待辦清單失敗")?;
         fs::write(TODO_FILE, text).context("儲存待辦清單失敗")
     }
 
-    fn find_mut(&mut self, id: u64) -> Option<&mut TodoItem> {
-        self.items.iter_mut().find(|item| item.id == id)
+    fn find_mut(items: &mut [TodoItem], id: u64) -> Option<&mut TodoItem> {
+        items.iter_mut().find(|item| item.id == id)
     }
 
     /// `add`（CLI）／`add_item`（web）共用：內容去頭尾空白，空字串當錯誤。
-    fn push_item(&mut self, text: String) -> Result<u64> {
+    fn push_item(text: String) -> Result<u64> {
         let text = text.trim().to_string();
         if text.is_empty() {
             bail!("待辦內容不能空白");
         }
-        let id = self.next_id;
-        self.next_id += 1;
-        self.items.push(TodoItem { id, text, done: false });
-        self.save()?;
+        let mut file = Self::load();
+        let id = file.next_id;
+        file.next_id += 1;
+        file.items.push(TodoItem { id, text, done: false });
+        Self::save(&file)?;
         Ok(id)
     }
 
     fn add(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
-        let id = self.push_item(args.join(" "))?;
+        let id = Self::push_item(args.join(" "))?;
         out.push(&format!("todo 新增 #{id}\n"));
         Ok(())
     }
 
     fn set_done(&mut self, args: &[String], done: bool, out: &OutputBuffer) -> Result<()> {
         let id: u64 = args.first().context("需要接 id")?.parse().context("id 要是數字")?;
-        let Some(item) = self.find_mut(id) else { bail!("找不到 id {id}") };
+        let mut file = Self::load();
+        let Some(item) = Self::find_mut(&mut file.items, id) else { bail!("找不到 id {id}") };
         item.done = done;
-        self.save()?;
+        Self::save(&file)?;
         out.push(&format!("todo #{id} 標成{}\n", if done { "完成" } else { "還沒做" }));
         Ok(())
     }
 
     fn remove(&mut self, args: &[String], out: &OutputBuffer) -> Result<()> {
         let id: u64 = args.first().context("remove 需要接 id")?.parse().context("id 要是數字")?;
-        if !self.remove_by_id(id) {
+        let mut file = Self::load();
+        if !Self::remove_by_id(&mut file.items, id) {
             bail!("找不到 id {id}");
         }
-        self.save()?;
+        Self::save(&file)?;
         out.push(&format!("todo 刪除 #{id}\n"));
         Ok(())
     }
 
-    fn remove_by_id(&mut self, id: u64) -> bool {
-        let before = self.items.len();
-        self.items.retain(|item| item.id != id);
-        self.items.len() != before
+    fn remove_by_id(items: &mut Vec<TodoItem>, id: u64) -> bool {
+        let before = items.len();
+        items.retain(|item| item.id != id);
+        items.len() != before
     }
 
     /// `list`（CLI）跟 `panel_text()`（GUI/web 的純文字 panel）共用的內容。
     fn text(&self) -> String {
-        if self.items.is_empty() {
+        let file = Self::load();
+        if file.items.is_empty() {
             return "（沒有待辦事項）".to_string();
         }
-        self.items
+        file.items
             .iter()
             .map(|item| format!("[{}] #{} {}", if item.done { "x" } else { " " }, item.id, item.text))
             .collect::<Vec<_>>()
@@ -137,25 +142,27 @@ impl TodoPlugin {
 
     /// `/api/todo/list` 用的結構化清單，順序跟存檔一樣（新增的排最後）。
     pub(crate) fn snapshot(&self) -> Vec<TodoItemJson> {
-        self.items.iter().map(|item| TodoItemJson { id: item.id, text: item.text.clone(), done: item.done }).collect()
+        Self::load().items.into_iter().map(|item| TodoItemJson { id: item.id, text: item.text, done: item.done }).collect()
     }
 
     pub(crate) fn add_item(&mut self, text: String) -> Result<()> {
-        self.push_item(text)?;
+        Self::push_item(text)?;
         Ok(())
     }
 
     pub(crate) fn toggle_item(&mut self, id: u64) -> Result<()> {
-        let Some(item) = self.find_mut(id) else { bail!("找不到 id {id}") };
+        let mut file = Self::load();
+        let Some(item) = Self::find_mut(&mut file.items, id) else { bail!("找不到 id {id}") };
         item.done = !item.done;
-        self.save()
+        Self::save(&file)
     }
 
     pub(crate) fn remove_item(&mut self, id: u64) -> Result<()> {
-        if !self.remove_by_id(id) {
+        let mut file = Self::load();
+        if !Self::remove_by_id(&mut file.items, id) {
             bail!("找不到 id {id}");
         }
-        self.save()
+        Self::save(&file)
     }
 }
 
@@ -274,5 +281,30 @@ mod tests {
         let mut plugin = TodoPlugin::new(ctx());
         assert!(plugin.dispatch("done", &["999".to_string()], &out).is_err());
         assert!(plugin.dispatch("remove", &["999".to_string()], &out).is_err());
+    }
+
+    #[test]
+    fn external_file_change_is_picked_up_without_reconstructing_plugin() {
+        let dir = std::env::temp_dir().join("cng5-todo-test-external-sync");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("建立測試用暫存目錄失敗");
+        let _guard = CwdGuard::enter(&dir);
+
+        let plugin = TodoPlugin::new(ctx());
+        assert_eq!(plugin.snapshot().len(), 0);
+
+        // 模擬 `sync` plugin 在背景把別台機器同步過來的 todo.json 直接蓋掉
+        // 這個檔案，同一個 plugin 實例接下來的讀取要能看到新內容，不能還
+        // 停留在建構時讀到的舊狀態。
+        fs::create_dir_all(TODO_DIR).unwrap();
+        let synced = TodoFile {
+            next_id: 5,
+            items: vec![TodoItem { id: 4, text: "別台機器加的".to_string(), done: false }],
+        };
+        fs::write(TODO_FILE, serde_json::to_string_pretty(&synced).unwrap()).unwrap();
+
+        let snap = plugin.snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].text, "別台機器加的");
     }
 }
