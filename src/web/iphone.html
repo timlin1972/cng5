@@ -29,7 +29,6 @@
     color: #d8dee9;
     height: 100vh;
     height: 100dvh;
-    overflow: hidden;
     display: flex;
     flex-direction: column;
   }
@@ -43,7 +42,12 @@
      `body` 底部跟裝置實際螢幕下緣之間會留一條縫（`env(safe-area-inset-
      bottom)` 只補了分頁列自己的內距，並不保證外層容器的高度精準貼齊），
      用 `bottom: 0` 直接錨定視窗底部才能保證緊貼——即使貼到圓角區域被
-     切掉一角也沒關係。`#content` 額外留一塊底部 padding 讓內容不被蓋住。 */
+     切掉一角也沒關係。`#content` 額外留一塊底部 padding 讓內容不被蓋住。
+     `body` 這裡故意不設 `overflow: hidden`：舊版 WebKit 有個已知問題，
+     祖先元素設 `overflow: hidden` 時，`position: fixed` 的子元素有機會被
+     一起裁切、貼不到真正的視窗邊緣——`#content` 自己已經有 `overflow:
+     auto` 負責捲動，`body` 不需要另外裁切，拿掉才能保證 `#tabbar` 的
+     `fixed` 定位不會被波及。 */
   #content {
     flex: 1;
     overflow: auto;
@@ -468,6 +472,20 @@
     min-width: 44px;
   }
   .player-controls button:active { opacity: 0.5; }
+  /* 播放/暫停跟其他三顆（模式/上一首/下一首）不一樣：自己放大一階、圓形
+     外框、反白（淺底深 icon），視覺上當成整排的主按鈕。 */
+  .player-playpause-btn {
+    width: 72px;
+    height: 72px;
+    min-width: 72px;
+    border-radius: 50%;
+    background: #d8dee9;
+    color: #111318;
+    font-size: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
 
   /* storage 分頁：資料夾瀏覽維持清單+breadcrumb（本來就是「點下去、看清單」
      的模式，不用改）；點一個「檔案」（非資料夾）改成進詳細畫面，顯示檔名/
@@ -1966,15 +1984,15 @@
   // `<audio>` 元素本身還在播放，聲音也會變成啞的。分頁切換只需要停掉畫布
   // 動畫的 `requestAnimationFrame` 迴圈，不要動 `playerAudioCtx`。
   //
-  // 這裡在模組載入時就立刻建立（不是等第一次要畫頻譜/放射狀頻譜才建立）：
-  // `createMediaElementSource` 接上一個「正在播放中」的 `<audio>` 會讓聲音
-  // 斷一下再接回來（瀏覽器重新接管音訊輸出造成的短暫中斷），如果拖到使用者
-  // 中途切到頻譜畫面才接，那個斷點就會在歌曲播放到一半時發生、很明顯；提前
-  // 在還沒開始播放時就接好，就不會有這個中斷。副作用：接上 Web Audio 之後
-  // 聲音輸出永久改道，之後不管有沒有看過頻譜圖，App 被切到背景時都可能被
-  // 系統暫停音訊（這是瀏覽器省電機制，不是這裡的程式碼能完全避免的）——
-  // 下面用 `play`/`visibilitychange` 兩個地方補 `resume()`，盡量在恢復到
-  // 前景/開始播放時把聲音接回來。
+  // 故意維持「第一次真的要畫頻譜/放射狀頻譜才建立」（不要提前在模組載入
+  // 時就建立）：手機瀏覽器對一般 `<audio>` 元素的背景播放支援得比 Web
+  // Audio API 好很多——一旦接上 `createMediaElementSource`，聲音輸出永久
+  // 改道經過 Web Audio，App 被切到背景時系統幾乎必定會暫停這個
+  // `AudioContext`（跟一般 `<audio>` 元素靠 Media Session 能穩定在背景
+  // 播放是兩種不同的機制）。維持 lazy 建立，只要使用者沒切去看頻譜/放射
+  // 狀頻譜，最常見的封面/歌詞模式播放在背景就能正常繼續，跟以前一樣；
+  // 代價是使用者一旦看過頻譜/放射狀頻譜，那次 session 之後背景播放才會
+  // 變得不穩定（見下面 `play`/`visibilitychange` 的 `resume()` 補救）。
   let playerAudioCtx = null;
   let playerAnalyser = null;
   let playerFreqData = null;
@@ -1988,12 +2006,11 @@
     playerAnalyser.connect(playerAudioCtx.destination);
     playerFreqData = new Uint8Array(playerAnalyser.frequencyBinCount);
   }
-  ensurePlayerAnalyser();
   player.addEventListener("play", () => {
-    if (playerAudioCtx.state !== "running") playerAudioCtx.resume();
+    if (playerAudioCtx && playerAudioCtx.state !== "running") playerAudioCtx.resume();
   });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible" && playerAudioCtx.state !== "running") {
+    if (document.visibilityState === "visible" && playerAudioCtx && playerAudioCtx.state !== "running") {
       playerAudioCtx.resume();
     }
   });
@@ -2109,6 +2126,7 @@
     prevBtn.textContent = "⏮" + PLAYER_TEXT_STYLE;
     prevBtn.title = "上一首";
     const playPauseBtn = document.createElement("button");
+    playPauseBtn.className = "player-playpause-btn";
     playPauseBtn.textContent = (player.paused ? "▶" : "⏸") + PLAYER_TEXT_STYLE;
     playPauseBtn.title = "播放/暫停";
     const nextBtn = document.createElement("button");
