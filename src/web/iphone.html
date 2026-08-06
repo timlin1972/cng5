@@ -702,6 +702,42 @@
   .notepad-preview tbody tr:not(:first-child) td {
     border-top: 1px solid #262a33;
   }
+
+  /* 分頁列最右邊「⋯ 更多」按鈕點開的清單：從底部滑出的 sheet，蓋在分頁列
+     上面（`z-index` 比 topology 的節點 modal 更高，兩個不會同時出現，但
+     保險起見還是分開兩層）。跟 topology 的 modal 同一種「點遮罩關掉」
+     互動。 */
+  .more-sheet-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: flex-end;
+    justify-content: center;
+    z-index: 50;
+  }
+  .more-sheet-overlay.open { display: flex; }
+  .more-sheet {
+    width: 100%;
+    background: #1b1e26;
+    border-top: 1px solid #3a4150;
+    border-radius: 14px 14px 0 0;
+    padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  .more-sheet-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 20px;
+    cursor: pointer;
+    min-height: 44px;
+  }
+  .more-sheet-item:active { background: #262a33; }
+  .more-sheet-item .icon { font-size: 20px; width: 28px; text-align: center; flex: none; }
+  .more-sheet-item .label { font-size: 16px; color: #d8dee9; }
+  .more-sheet-item.active .label { color: #6f9dff; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -3210,16 +3246,23 @@
     return function stop() {};
   }
 
-  const TABS = [
-    { name: "device", icon: "📟", label: "device" },
-    { name: "global", icon: "🌍", label: "global" },
+  // 底下分頁列螢幕太窄，9 個分頁塞不下——只留最常用的 4 個
+  // （topology/weather/player/todo）直接放分頁列，其餘（device/global/
+  // system/storage/notepad）收進最右邊「⋯ 更多」按鈕點開的清單，跟 iOS
+  // 常見的「More」分頁模式一樣。`TAB_MODULES` 兩邊共用，不管從分頁列還是
+  // 「更多」清單點進來，都是同一個 `switchTo`。
+  const PRIMARY_TABS = [
     { name: "topology", icon: "🌐", label: "topology" },
     { name: "weather", icon: "🌤️", label: "weather" },
-    { name: "system", icon: "⚙️", label: "system" },
     { name: "player", icon: "🎵", label: "player" },
+    { name: "todo", icon: "✅", label: "todo" },
+  ];
+  const SECONDARY_TABS = [
+    { name: "device", icon: "📟", label: "device" },
+    { name: "global", icon: "🌍", label: "global" },
+    { name: "system", icon: "⚙️", label: "system" },
     { name: "storage", icon: "🗂️", label: "storage" },
     { name: "notepad", icon: "📝", label: "notepad" },
-    { name: "todo", icon: "✅", label: "todo" },
   ];
 
   // `TAB_MODULES` 把每個分頁名稱對應到一個模組：`start(container)` 掛上
@@ -3242,6 +3285,47 @@
   let activeName = null;
   let activeStop = null;
 
+  // 「更多」清單用一個蓋滿全螢幕的 overlay + 從底部滑出的 sheet，跟
+  // topology 分頁的節點詳細資訊 modal 是同一種「觸控裝置點擊開合」模式。
+  // 掛在 `document.body`（不是 `#content`），這樣才能蓋住整個畫面（包含
+  // 分頁列本身），不受 `#content` 的 `overflow: auto` 影響。
+  const moreOverlay = document.createElement("div");
+  moreOverlay.className = "more-sheet-overlay";
+  const moreSheet = document.createElement("div");
+  moreSheet.className = "more-sheet";
+  moreOverlay.appendChild(moreSheet);
+  document.body.appendChild(moreOverlay);
+
+  function closeMoreSheet() {
+    moreOverlay.classList.remove("open");
+  }
+  function openMoreSheet() {
+    moreOverlay.classList.add("open");
+  }
+  moreOverlay.addEventListener("click", (e) => {
+    if (e.target === moreOverlay) closeMoreSheet();
+  });
+
+  const moreItemEls = new Map();
+  for (const t of SECONDARY_TABS) {
+    const item = document.createElement("div");
+    item.className = "more-sheet-item";
+    const icon = document.createElement("span");
+    icon.className = "icon";
+    icon.textContent = t.icon;
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = t.label;
+    item.appendChild(icon);
+    item.appendChild(label);
+    item.addEventListener("click", () => {
+      closeMoreSheet();
+      switchTo(t.name);
+    });
+    moreSheet.appendChild(item);
+    moreItemEls.set(t.name, item);
+  }
+
   function switchTo(name) {
     if (activeName === name) return;
     if (activeStop) {
@@ -3251,12 +3335,20 @@
     content.innerHTML = "";
     activeStop = TAB_MODULES[name].start(content);
     activeName = name;
-    for (const btn of tabbar.querySelectorAll("button")) {
+    for (const btn of tabbar.querySelectorAll("button[data-name]")) {
       btn.classList.toggle("active", btn.dataset.name === name);
+    }
+    // 目前分頁是「更多」清單裡的其中一個時，分頁列上顯示 active 的是
+    // 「⋯ 更多」這顆按鈕本身（表示目前所在的分頁藏在裡面），清單裡對應的
+    // 那一項也標成 active，下次點開「更多」能看出目前在哪個分頁。
+    const isSecondary = SECONDARY_TABS.some((t) => t.name === name);
+    moreBtn.classList.toggle("active", isSecondary);
+    for (const [tname, el] of moreItemEls) {
+      el.classList.toggle("active", tname === name);
     }
   }
 
-  for (const t of TABS) {
+  for (const t of PRIMARY_TABS) {
     const btn = document.createElement("button");
     btn.dataset.name = t.name;
     const icon = document.createElement("div");
@@ -3271,7 +3363,19 @@
     tabbar.appendChild(btn);
   }
 
-  switchTo("device");
+  const moreBtn = document.createElement("button");
+  const moreIcon = document.createElement("div");
+  moreIcon.className = "tab-icon";
+  moreIcon.textContent = "⋯";
+  const moreLabel = document.createElement("div");
+  moreLabel.className = "tab-label";
+  moreLabel.textContent = "更多";
+  moreBtn.appendChild(moreIcon);
+  moreBtn.appendChild(moreLabel);
+  moreBtn.addEventListener("click", openMoreSheet);
+  tabbar.appendChild(moreBtn);
+
+  switchTo("topology");
 })();
 </script>
 </body>
