@@ -452,7 +452,7 @@
     overflow-y: auto;
     text-align: center;
     color: #6a7383;
-    font-size: 13px;
+    font-size: 15px;
     line-height: 1.5em;
   }
   .player-lyric-line { padding: 3px 0; }
@@ -1776,6 +1776,7 @@
         title: name,
         artwork: [{ src: `/api/music/file/${encodeURIComponent(name)}/cover` }],
       });
+      setMediaSessionActionHandlers();
     }
     if (musicUi.seekBar) {
       musicUi.seekBar.max = "0";
@@ -1980,13 +1981,34 @@
   };
 
   // 自然播完、Media Session 的上一首/下一首/播放/暫停都是跟播放本身有關
-  // 的邏輯，不管 player 分頁有沒有開著都該生效，只註冊一次。
+  // 的邏輯，不管 player 分頁有沒有開著都該生效。
   player.addEventListener("ended", () => advanceOnEnded(musicUi));
+  // 鎖屏/背景的媒體控制列要顯示「上一首/下一首」而不是預設的 -10s/+10s
+  // 快退快進，關鍵是要有註冊 `previoustrack`/`nexttrack` 這兩個 action
+  // handler。單獨包 try/catch 是因為 MDN 有記載：某些瀏覽器/版本不支援
+  // 特定 action 時，`setActionHandler` 會直接 throw——不包起來的話，一個
+  // 不支援的 action 會讓迴圈裡排在後面的 handler 全部註冊不到。另外在
+  // `playByName` 每次真的換歌、更新 `mediaSession.metadata` 時也重新呼叫
+  // 一次：部分瀏覽器要在「now playing」session 更新的同時重新確認這些
+  // handler 才會正確反映到系統的鎖屏/控制中心 UI 上。
+  function setMediaSessionActionHandlers() {
+    if (!("mediaSession" in navigator)) return;
+    const handlers = {
+      play: () => player.play(),
+      pause: () => player.pause(),
+      previoustrack: () => offsetTrack(musicUi, -1),
+      nexttrack: () => goToNextTrack(musicUi),
+    };
+    for (const [action, handler] of Object.entries(handlers)) {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {
+        // 這個瀏覽器/版本不支援這個 action，跳過即可。
+      }
+    }
+  }
+  setMediaSessionActionHandlers();
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.setActionHandler("play", () => player.play());
-    navigator.mediaSession.setActionHandler("pause", () => player.pause());
-    navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
-    navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
     player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
     player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
   }
