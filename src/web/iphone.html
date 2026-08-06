@@ -100,7 +100,8 @@
     border: none;
     color: #6f9dff;
     font: inherit;
-    font-size: 34px;
+    font-size: 48px;
+    font-weight: 700;
     line-height: 1;
     padding: 8px 14px;
     cursor: pointer;
@@ -422,6 +423,13 @@
     padding: 20px 16px 76px;
     overflow: auto;
   }
+  /* flex column 底下所有子元素預設 flex-shrink:1，內容總高度超過可視
+     範圍時瀏覽器會把每一個子元素都往下壓縮，包括歌名這種單行文字（連
+     line-height 都會被壓扁，看起來像被裁切一樣）——歌詞區塊加高之後就
+     踩到這個問題。這裡固定每個子元素維持自己原本的高度，超出的部分交給
+     `.player-detail-content` 自己的 `overflow: auto` 捲動，不要讓瀏覽器
+     去壓縮個別子元素。 */
+  .player-detail-content > * { flex-shrink: 0; }
   .player-cover-slot {
     width: 100%;
     max-width: 320px;
@@ -441,7 +449,9 @@
     white-space: nowrap;
     color: #d8dee9;
     text-align: center;
-    font-size: 16px;
+    font-size: 18px;
+    line-height: 1.6;
+    padding: 4px 0;
   }
   /* 迷你歌詞：放在播放模式按鈕下面，固定只留 2~3 行的高度（不是像封面
      那樣佔滿整個方框），`scrollActiveLyricIntoView` 會捲動這個小視窗讓
@@ -449,7 +459,7 @@
   .player-lyrics-mini {
     width: 100%;
     max-width: 320px;
-    max-height: 6.5em;
+    max-height: 8.5em;
     overflow-y: auto;
     text-align: center;
     color: #6a7383;
