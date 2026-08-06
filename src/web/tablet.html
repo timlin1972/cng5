@@ -276,7 +276,12 @@
     cursor: pointer;
   }
   .player-download-row button:hover { background: #323844; }
-  .player-right { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; overflow: hidden; }
+  .player-right { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; overflow: auto; }
+  /* flex column 底下子元素預設 flex-shrink:1，內容總高度超過可視範圍時
+     瀏覽器會把每個子元素（包括歌名這種單行文字）都往下壓縮，看起來像被
+     裁切——固定每個子元素維持自己原本的高度，超出的部分交給
+     `.player-right` 自己的 `overflow: auto` 捲動。 */
+  .player-right > * { flex-shrink: 0; }
   .player-cover-slot {
     width: 100%;
     max-width: 220px;
@@ -284,7 +289,6 @@
     background: #0d0f13;
     border: 1px solid #3a4150;
     border-radius: 4px;
-    cursor: pointer;
   }
   .player-cover { object-fit: cover; }
   .player-seek-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 220px; }
@@ -297,24 +301,62 @@
     white-space: nowrap;
     color: #d8dee9;
     text-align: center;
+    line-height: 1.6;
+    padding: 4px 0;
   }
-  .player-lyrics { overflow: auto; text-align: center; color: #6a7383; font-size: 13px; }
+  /* 迷你歌詞：放在播放模式按鈕下面，固定只留幾行的高度（不是像封面那樣
+     佔滿整個方框），`scrollActiveLyricIntoView` 會捲動這個小視窗讓目前
+     唱到的那一行保持在可視範圍內。 */
+  .player-lyrics-mini {
+    width: 100%;
+    max-width: 220px;
+    max-height: 5em;
+    overflow-y: auto;
+    text-align: center;
+    color: #6a7383;
+    font-size: 14px;
+    line-height: 1.5em;
+  }
   .player-lyric-line { padding: 3px 0; }
   .player-lyric-line.active { color: #6f9dff; font-weight: bold; }
   .player-lyrics-empty { color: #5a6272; padding: 8px 0; }
-  .player-controls { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; }
-  .player-transport { display: flex; gap: 8px; }
+  .player-controls { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100%; }
+  .player-transport { display: flex; align-items: center; gap: 18px; }
+  .player-mode-row { display: flex; justify-content: center; width: 100%; }
   .player-controls button {
-    background: #262a33;
-    border: 1px solid #3a4150;
+    background: none;
+    border: none;
     color: #d8dee9;
-    border-radius: 3px;
-    padding: 8px 16px;
+    padding: 6px;
     font: inherit;
-    font-size: 17px;
+    font-size: 26px;
+    line-height: 1;
     cursor: pointer;
   }
-  .player-controls button:hover { background: #323844; }
+  .player-controls button:hover { opacity: 0.75; }
+  /* 播放/暫停跟其他三顆（模式/上一首/下一首）不一樣：自己放大一階、圓形
+     外框、反白（淺底深 icon），視覺上當成整排的主按鈕。用
+     `.player-controls button.player-playpause-btn` 拉高 CSS 優先度，
+     不然單純 `.player-playpause-btn`（1 個 class）會被上面
+     `.player-controls button`（1 個 class + 1 個 element）蓋掉。 */
+  .player-controls button.player-playpause-btn {
+    width: 52px;
+    height: 52px;
+    min-width: 52px;
+    border-radius: 50%;
+    background: #d8dee9;
+    color: #111318;
+    font-size: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+  /* `▶`（play，暫停中顯示）這個字符在等寬字型裡的視覺墨色偏左下，跟
+     `⏸`（正在播放時顯示）不對稱，額外補一點不對稱的 padding 推回圓心。 */
+  .player-controls button.player-playpause-btn.is-play-icon {
+    padding: 0 0 0.1em 0.12em;
+  }
 
   /* storage 分頁：跟桌面版 frontend.html 的 storage panel 是同一套設計，
      這裡各自一份（同一種取捨，見 topology 那段的說明）。 */
@@ -1494,6 +1536,7 @@
         title: name,
         artwork: [{ src: `/api/music/file/${encodeURIComponent(name)}/cover` }],
       });
+      setMediaSessionActionHandlers();
     }
     if (musicUi.seekBar) {
       musicUi.seekBar.max = "0";
@@ -1698,47 +1741,49 @@
   };
 
   // 自然播完、Media Session 的上一首/下一首/播放/暫停都是跟播放本身有關
-  // 的邏輯，不管 player 分頁有沒有開著都該生效，只註冊一次。
+  // 的邏輯，不管 player 分頁有沒有開著都該生效。
   player.addEventListener("ended", () => advanceOnEnded(musicUi));
+  // 鎖屏/背景的媒體控制列要顯示「上一首/下一首」而不是預設的快退快進，
+  // 關鍵是要有註冊 `previoustrack`/`nexttrack` 這兩個 action handler。
+  // 單獨包 try/catch 是因為 MDN 有記載：某些瀏覽器/版本不支援特定 action
+  // 時，`setActionHandler` 會直接 throw——不包起來的話，一個不支援的
+  // action 會讓迴圈裡排在後面的 handler 全部註冊不到。另外在 `playByName`
+  // 每次真的換歌、更新 `mediaSession.metadata` 時也重新呼叫一次：部分
+  // 瀏覽器要在「now playing」session 更新的同時重新確認這些 handler 才會
+  // 正確反映到系統的鎖屏/控制中心 UI 上。
+  function setMediaSessionActionHandlers() {
+    if (!("mediaSession" in navigator)) return;
+    const handlers = {
+      play: () => player.play(),
+      pause: () => player.pause(),
+      previoustrack: () => offsetTrack(musicUi, -1),
+      nexttrack: () => goToNextTrack(musicUi),
+    };
+    for (const [action, handler] of Object.entries(handlers)) {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {
+        // 這個瀏覽器/版本不支援這個 action，跳過即可。
+      }
+    }
+  }
+  setMediaSessionActionHandlers();
   if ("mediaSession" in navigator) {
-    navigator.mediaSession.setActionHandler("play", () => player.play());
-    navigator.mediaSession.setActionHandler("pause", () => player.pause());
-    navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
-    navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
     player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
     player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
   }
 
-  // Web Audio 的 `AudioContext`/`MediaElementAudioSourceNode` 同一個道理要
-  // 跨分頁切換持續存在：`createMediaElementSource` 對同一個 `<audio>` 元素
-  // 只能呼叫一次，而且一旦呼叫過，這個元素的聲音輸出就永久改成透過這個
-  // audio graph 才聽得到（不再是瀏覽器預設直接輸出）——如果切走分頁時把
-  // `audioCtx` 關掉，之後即使 `<audio>` 元素本身還在播放（`paused` 是
-  // `false`），聲音也會變成啞的。所以這裡只在第一次真的要畫頻譜/放射狀
-  // 頻譜時建立，之後永遠留著、不主動關閉；分頁切換只需要停掉畫布動畫的
-  // `requestAnimationFrame` 迴圈（見 `startPlayerTab` 的 `stop()`），不要
-  // 動 `playerAudioCtx`。
-  let playerAudioCtx = null;
-  let playerAnalyser = null;
-  let playerFreqData = null;
-  function ensurePlayerAnalyser() {
-    if (playerAudioCtx) return;
-    playerAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const source = playerAudioCtx.createMediaElementSource(player);
-    playerAnalyser = playerAudioCtx.createAnalyser();
-    playerAnalyser.fftSize = 128;
-    source.connect(playerAnalyser);
-    playerAnalyser.connect(playerAudioCtx.destination);
-    playerFreqData = new Uint8Array(playerAnalyser.frequencyBinCount);
-  }
-
-  // 建立 player 分頁：跟桌面版 player panel 完全同一套 DOM／功能（檔案清單＋
-  // 刪除＋YouTube 下載、封面/歌詞/頻譜/放射狀頻譜循環、播放模式、Media
-  // Session），只是不用桌面版浮動 panel 那層，直接把 `.player-body` 塞進
-  // 分頁的 `container`。切走這個分頁時 `stop()` 只停檔案清單 poll／畫布
-  // 動畫，不會暫停播放、也不會動上面模組層級的 `player`/`playerAudioCtx`
-  // ——音樂會在切到其他分頁（device/global/…）時繼續放，Media Session 的
-  // 鎖屏控制也才有意義。
+  // 建立 player 分頁：跟桌面版 player panel 類似邏輯（檔案清單＋刪除＋
+  // YouTube 下載、封面顯示、迷你歌詞、播放模式、Media Session），只是不用
+  // 桌面版浮動 panel 那層，直接把 `.player-body` 塞進分頁的 `container`。
+  // 詳細畫面刻意比舊版簡化：不用 Web Audio API 做即時頻譜/放射狀頻譜
+  // 視覺化——接上 `createMediaElementSource` 之後聲音輸出永久改道經過
+  // Web Audio，App 被切到背景/鎖屏時系統幾乎必定會暫停那個
+  // `AudioContext`（跟一般 `<audio>` 元素靠 Media Session 能穩定在背景
+  // 播放是兩種不同的機制）。聲音品質優先：只用普通 `<audio>` 元素播放，
+  // 不建立任何 Web Audio 的 graph。切走這個分頁時 `stop()` 只停檔案清單
+  // poll，不會暫停播放——音樂會在切到其他分頁（device/global/…）時繼續
+  // 放，Media Session 的鎖屏控制也才有意義。
   function startPlayerTab(container) {
     const wrap = document.createElement("div");
     wrap.className = "player-body";
@@ -1768,21 +1813,7 @@
     const cover = document.createElement("img");
     cover.className = "player-cover-slot player-cover";
     cover.alt = "";
-    cover.title = "點一下切換：封面 → 歌詞 → 頻譜 → 放射狀頻譜";
     cover.addEventListener("error", () => cover.removeAttribute("src"));
-    const lyricsEl = document.createElement("div");
-    lyricsEl.className = "player-cover-slot player-lyrics";
-    lyricsEl.title = cover.title;
-    const spectrum = document.createElement("canvas");
-    spectrum.className = "player-cover-slot player-spectrum";
-    spectrum.width = 220;
-    spectrum.height = 220;
-    spectrum.title = cover.title;
-    const radial = document.createElement("canvas");
-    radial.className = "player-cover-slot player-radial";
-    radial.width = 220;
-    radial.height = 220;
-    radial.title = cover.title;
     const seekRow = document.createElement("div");
     seekRow.className = "player-seek-row";
     const seekBar = document.createElement("input");
@@ -1818,7 +1849,12 @@
     prevBtn.textContent = "⏮" + PLAYER_TEXT_STYLE;
     prevBtn.title = "上一首";
     const playPauseBtn = document.createElement("button");
-    playPauseBtn.textContent = (player.paused ? "▶" : "⏸") + PLAYER_TEXT_STYLE;
+    playPauseBtn.className = "player-playpause-btn";
+    function setPlayPauseIcon(paused) {
+      playPauseBtn.textContent = (paused ? "▶" : "⏸") + PLAYER_TEXT_STYLE;
+      playPauseBtn.classList.toggle("is-play-icon", paused);
+    }
+    setPlayPauseIcon(player.paused);
     playPauseBtn.title = "播放/暫停";
     const nextBtn = document.createElement("button");
     nextBtn.textContent = "⏭" + PLAYER_TEXT_STYLE;
@@ -1828,15 +1864,21 @@
     transport.appendChild(prevBtn);
     transport.appendChild(playPauseBtn);
     transport.appendChild(nextBtn);
-    rightControls.appendChild(modeBtn);
+    // 播放模式自己一排，放在上一首/播放/下一首那排下面，兩排都置中。
+    const modeRow = document.createElement("div");
+    modeRow.className = "player-mode-row";
+    modeRow.appendChild(modeBtn);
     rightControls.appendChild(transport);
+    rightControls.appendChild(modeRow);
+    // 迷你歌詞：放在播放模式按鈕下面，只留幾行高度，自動捲動讓目前唱到
+    // 的那一行維持在可視範圍內。
+    const lyricsMini = document.createElement("div");
+    lyricsMini.className = "player-lyrics-mini";
     right.appendChild(cover);
-    right.appendChild(lyricsEl);
-    right.appendChild(spectrum);
-    right.appendChild(radial);
     right.appendChild(seekRow);
     right.appendChild(trackName);
     right.appendChild(rightControls);
+    right.appendChild(lyricsMini);
 
     wrap.appendChild(left);
     wrap.appendChild(right);
@@ -1850,7 +1892,7 @@
     musicUi.trackName = trackName;
     musicUi.seekBar = seekBar;
     musicUi.timeLabel = timeLabel;
-    musicUi.lyricsEl = lyricsEl;
+    musicUi.lyricsEl = lyricsMini;
 
     // 音樂可能是在其他分頁時就已經開始播放/換歌了，剛打開這個分頁要把畫面
     // 立刻同步成目前的實際播放狀態，不要空等下一次 `timeupdate`/檔案清單
@@ -1864,176 +1906,6 @@
     seekBar.max = String(player.duration || 0);
     seekBar.value = String(player.currentTime || 0);
     updateTimeLabel(musicUi);
-
-    let spectrumRafId = null;
-    let radialRafId = null;
-    const spectrumCtx = spectrum.getContext("2d");
-    const radialCtx = radial.getContext("2d");
-
-    const SPECTRUM_CELL_W = 8;
-    const SPECTRUM_CELL_H = 4;
-    const SPECTRUM_GAP = 2;
-    const SPECTRUM_PITCH_X = SPECTRUM_CELL_W + SPECTRUM_GAP;
-    const SPECTRUM_PITCH_Y = SPECTRUM_CELL_H + SPECTRUM_GAP;
-    const spectrumColumns = Math.max(1, Math.floor(spectrum.width / SPECTRUM_PITCH_X));
-    const spectrumRows = Math.max(1, Math.floor(spectrum.height / SPECTRUM_PITCH_Y));
-    const spectrumRowColors = Array.from({ length: spectrumRows }, (_, row) => {
-      const t = spectrumRows === 1 ? 0 : row / (spectrumRows - 1);
-      const r = t < 0.5 ? Math.round(255 * (t / 0.5)) : 255;
-      const g = t < 0.5 ? 255 : Math.round(255 * (1 - (t - 0.5) / 0.5));
-      return {
-        on: `rgb(${r}, ${g}, 0)`,
-        off: `rgba(${r}, ${g}, 0, 0.15)`,
-      };
-    });
-    function drawSpectrum() {
-      spectrumRafId = requestAnimationFrame(drawSpectrum);
-      playerAnalyser.getByteFrequencyData(playerFreqData);
-      const h = spectrum.height;
-      spectrumCtx.clearRect(0, 0, spectrum.width, h);
-      const binsPerColumn = playerFreqData.length / spectrumColumns;
-      for (let col = 0; col < spectrumColumns; col++) {
-        const from = Math.floor(col * binsPerColumn);
-        const to = Math.max(from + 1, Math.floor((col + 1) * binsPerColumn));
-        let sum = 0;
-        for (let i = from; i < to; i++) sum += playerFreqData[i];
-        const value = sum / (to - from) / 255;
-        const lit = Math.round(value * spectrumRows);
-        const x = col * SPECTRUM_PITCH_X;
-        for (let row = 0; row < spectrumRows; row++) {
-          const y = h - (row + 1) * SPECTRUM_PITCH_Y;
-          const colors = spectrumRowColors[row];
-          spectrumCtx.fillStyle = row < lit ? colors.on : colors.off;
-          spectrumCtx.fillRect(x, y, SPECTRUM_CELL_W, SPECTRUM_CELL_H);
-        }
-      }
-    }
-
-    const RADIAL_BAR_COUNT = 48;
-    const RADIAL_INNER_RADIUS = 40;
-    const RADIAL_MAX_LEN = 55;
-    const RADIAL_CX = radial.width / 2;
-    const RADIAL_CY = radial.height / 2;
-    const radialBarGradient = radialCtx.createRadialGradient(
-      RADIAL_CX,
-      RADIAL_CY,
-      RADIAL_INNER_RADIUS,
-      RADIAL_CX,
-      RADIAL_CY,
-      RADIAL_INNER_RADIUS + RADIAL_MAX_LEN,
-    );
-    radialBarGradient.addColorStop(0, "rgb(0, 255, 0)");
-    radialBarGradient.addColorStop(0.5, "rgb(255, 255, 0)");
-    radialBarGradient.addColorStop(1, "rgb(255, 0, 0)");
-    const RADIAL_RING_RADIUS = RADIAL_INNER_RADIUS - 4;
-    function drawRadial() {
-      radialRafId = requestAnimationFrame(drawRadial);
-      playerAnalyser.getByteFrequencyData(playerFreqData);
-      radialCtx.clearRect(0, 0, radial.width, radial.height);
-
-      const binsPerBar = playerFreqData.length / RADIAL_BAR_COUNT;
-      radialCtx.strokeStyle = radialBarGradient;
-      radialCtx.lineWidth = 3;
-      radialCtx.lineCap = "round";
-      for (let i = 0; i < RADIAL_BAR_COUNT; i++) {
-        const from = Math.floor(i * binsPerBar);
-        const to = Math.max(from + 1, Math.floor((i + 1) * binsPerBar));
-        let sum = 0;
-        for (let b = from; b < to; b++) sum += playerFreqData[b];
-        const value = sum / (to - from) / 255;
-        const angle = (i / RADIAL_BAR_COUNT) * Math.PI * 2 - Math.PI / 2;
-        const len = value * RADIAL_MAX_LEN;
-        const cosA = Math.cos(angle);
-        const sinA = Math.sin(angle);
-        radialCtx.beginPath();
-        radialCtx.moveTo(RADIAL_CX + cosA * RADIAL_INNER_RADIUS, RADIAL_CY + sinA * RADIAL_INNER_RADIUS);
-        radialCtx.lineTo(
-          RADIAL_CX + cosA * (RADIAL_INNER_RADIUS + len),
-          RADIAL_CY + sinA * (RADIAL_INNER_RADIUS + len),
-        );
-        radialCtx.stroke();
-      }
-
-      radialCtx.beginPath();
-      radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_INNER_RADIUS - 8, 0, Math.PI * 2);
-      radialCtx.fillStyle = "#0d0f13";
-      radialCtx.fill();
-
-      radialCtx.lineWidth = 3;
-      radialCtx.strokeStyle = "#3a4150";
-      radialCtx.beginPath();
-      radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, 0, Math.PI * 2);
-      radialCtx.stroke();
-      const duration = player.duration;
-      const progress =
-        Number.isFinite(duration) && duration > 0 ? Math.min(1, Math.max(0, player.currentTime / duration)) : 0;
-      if (progress > 0) {
-        radialCtx.strokeStyle = "#6f9dff";
-        radialCtx.beginPath();
-        radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
-        radialCtx.stroke();
-      }
-
-      radialCtx.fillStyle = "#d8dee9";
-      radialCtx.font = "16px sans-serif";
-      radialCtx.textAlign = "center";
-      radialCtx.textBaseline = "middle";
-      radialCtx.fillText(formatTime(player.currentTime), RADIAL_CX, RADIAL_CY);
-    }
-
-    function stopSpectrumAnim() {
-      if (spectrumRafId !== null) {
-        cancelAnimationFrame(spectrumRafId);
-        spectrumRafId = null;
-      }
-    }
-
-    function stopRadialAnim() {
-      if (radialRafId !== null) {
-        cancelAnimationFrame(radialRafId);
-        radialRafId = null;
-      }
-    }
-
-    const coverViews = [
-      { el: cover, onShow: () => {}, onHide: () => {} },
-      { el: lyricsEl, onShow: () => scrollActiveLyricIntoView(musicUi), onHide: () => {} },
-      {
-        el: spectrum,
-        onShow: () => {
-          ensurePlayerAnalyser();
-          playerAudioCtx.resume();
-          drawSpectrum();
-        },
-        onHide: stopSpectrumAnim,
-      },
-      {
-        el: radial,
-        onShow: () => {
-          ensurePlayerAnalyser();
-          playerAudioCtx.resume();
-          drawRadial();
-        },
-        onHide: stopRadialAnim,
-      },
-    ];
-    let coverViewIndex = 0;
-    coverViews.forEach((v, i) => {
-      v.el.style.display = i === 0 ? "" : "none";
-    });
-
-    function cycleCoverView() {
-      coverViews[coverViewIndex].onHide();
-      coverViewIndex = (coverViewIndex + 1) % coverViews.length;
-      coverViews.forEach((v, i) => {
-        v.el.style.display = i === coverViewIndex ? "" : "none";
-      });
-      coverViews[coverViewIndex].onShow();
-    }
-    cover.addEventListener("click", cycleCoverView);
-    lyricsEl.addEventListener("click", cycleCoverView);
-    spectrum.addEventListener("click", cycleCoverView);
-    radial.addEventListener("click", cycleCoverView);
 
     prevBtn.addEventListener("click", () => offsetTrack(musicUi, -1));
     nextBtn.addEventListener("click", () => goToNextTrack(musicUi));
@@ -2055,10 +1927,10 @@
     // （`stop()` 會呼叫 `removeEventListener`，見下面）。
     let seeking = false;
     function onPlay() {
-      playPauseBtn.textContent = "⏸" + PLAYER_TEXT_STYLE;
+      setPlayPauseIcon(false);
     }
     function onPause() {
-      playPauseBtn.textContent = "▶" + PLAYER_TEXT_STYLE;
+      setPlayPauseIcon(true);
     }
     function onLoadedMetadata() {
       seekBar.max = String(player.duration || 0);
@@ -2099,15 +1971,13 @@
 
     return function stop() {
       musicUi.stopPolling();
-      stopSpectrumAnim();
-      stopRadialAnim();
       player.removeEventListener("play", onPlay);
       player.removeEventListener("pause", onPause);
       player.removeEventListener("loadedmetadata", onLoadedMetadata);
       player.removeEventListener("timeupdate", onTimeUpdate);
-      // 注意：不關閉 `playerAudioCtx`、不暫停 `player`——音樂繼續在背景播放
-      // （見上面模組層級那段的說明）。畫面欄位清成 `null`，讓 `playByName`
-      // 等函式在分頁沒開著時正確跳過畫面更新。
+      // 注意：不暫停 `player`——音樂繼續在背景播放（見上面模組層級那段的
+      // 說明）。畫面欄位清成 `null`，讓 `playByName` 等函式在分頁沒開著時
+      // 正確跳過畫面更新。
       musicUi.fileList = null;
       musicUi.fileCount = null;
       musicUi.cover = null;
