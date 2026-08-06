@@ -96,17 +96,18 @@
     left: 12px;
     bottom: 12px;
     z-index: 2;
-    background: rgba(38, 42, 51, 0.92);
-    border: 1px solid #3a4150;
+    background: none;
+    border: none;
     color: #6f9dff;
-    border-radius: 8px;
-    padding: 10px 18px;
     font: inherit;
-    font-size: 15px;
+    font-size: 34px;
+    line-height: 1;
+    padding: 8px 14px;
     cursor: pointer;
     min-height: 44px;
+    min-width: 44px;
   }
-  .ld-back-btn:active { background: #323844; }
+  .ld-back-btn:active { opacity: 0.5; }
 
   /* device/global：清單改成一列一張卡片（id/ip/alive），點一列進 detail
      顯示該裝置全部欄位。跟桌面版/tablet 表格是同一份資料來源
@@ -448,11 +449,11 @@
   .player-lyrics-mini {
     width: 100%;
     max-width: 320px;
-    max-height: 4.6em;
+    max-height: 6.5em;
     overflow-y: auto;
     text-align: center;
     color: #6a7383;
-    font-size: 15px;
+    font-size: 18px;
     line-height: 1.5em;
   }
   .player-lyric-line { padding: 3px 0; }
@@ -859,7 +860,8 @@
     detailBody.className = "ld-detail-body";
     const backBtn = document.createElement("button");
     backBtn.className = "ld-back-btn";
-    backBtn.textContent = "‹ 返回";
+    backBtn.textContent = "‹";
+    backBtn.title = "返回";
     detailEl.appendChild(detailBody);
     detailEl.appendChild(backBtn);
     wrap.appendChild(listEl);
