@@ -92,6 +92,11 @@
   }
   .ld-back-btn:active { background: #323844; }
   .ld-detail-body { flex: 1; overflow: hidden; position: relative; }
+  /* player 單曲畫面的「返回」不放在頂部 back bar，改成浮在詳細畫面左下角、
+     緊貼底下分頁列（`#tabbar`）正上方——`.ld-detail-body` 是 `position:
+     relative` 但本身不捲動，`.player-detail-content` 才會捲動，所以絕對定位
+     的按鈕永遠貼在同一個位置，不會被捲動內容帶走。 */
+  .player-back-btn { position: absolute; left: 12px; bottom: 12px; z-index: 2; background: rgba(38, 42, 51, 0.92); }
 
   /* device/global：清單改成一列一張卡片（id/ip/alive），點一列進 detail
      顯示該裝置全部欄位。跟桌面版/tablet 表格是同一份資料來源
@@ -402,7 +407,7 @@
     flex-direction: column;
     align-items: center;
     gap: 12px;
-    padding: 20px 16px;
+    padding: 20px 16px 76px;
     overflow: auto;
   }
   .player-cover-slot {
@@ -1944,9 +1949,18 @@
   // 跨分頁切換持續存在：`createMediaElementSource` 對同一個 `<audio>` 元素
   // 只能呼叫一次，而且一旦呼叫過，這個元素的聲音輸出就永久改成透過這個
   // audio graph 才聽得到——如果切走分頁時把 `audioCtx` 關掉，之後即使
-  // `<audio>` 元素本身還在播放，聲音也會變成啞的。所以這裡只在第一次真的
-  // 要畫頻譜/放射狀頻譜時建立，之後永遠留著、不主動關閉；分頁切換只需要
-  // 停掉畫布動畫的 `requestAnimationFrame` 迴圈，不要動 `playerAudioCtx`。
+  // `<audio>` 元素本身還在播放，聲音也會變成啞的。分頁切換只需要停掉畫布
+  // 動畫的 `requestAnimationFrame` 迴圈，不要動 `playerAudioCtx`。
+  //
+  // 這裡在模組載入時就立刻建立（不是等第一次要畫頻譜/放射狀頻譜才建立）：
+  // `createMediaElementSource` 接上一個「正在播放中」的 `<audio>` 會讓聲音
+  // 斷一下再接回來（瀏覽器重新接管音訊輸出造成的短暫中斷），如果拖到使用者
+  // 中途切到頻譜畫面才接，那個斷點就會在歌曲播放到一半時發生、很明顯；提前
+  // 在還沒開始播放時就接好，就不會有這個中斷。副作用：接上 Web Audio 之後
+  // 聲音輸出永久改道，之後不管有沒有看過頻譜圖，App 被切到背景時都可能被
+  // 系統暫停音訊（這是瀏覽器省電機制，不是這裡的程式碼能完全避免的）——
+  // 下面用 `play`/`visibilitychange` 兩個地方補 `resume()`，盡量在恢復到
+  // 前景/開始播放時把聲音接回來。
   let playerAudioCtx = null;
   let playerAnalyser = null;
   let playerFreqData = null;
@@ -1960,6 +1974,15 @@
     playerAnalyser.connect(playerAudioCtx.destination);
     playerFreqData = new Uint8Array(playerAnalyser.frequencyBinCount);
   }
+  ensurePlayerAnalyser();
+  player.addEventListener("play", () => {
+    if (playerAudioCtx.state !== "running") playerAudioCtx.resume();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && playerAudioCtx.state !== "running") {
+      playerAudioCtx.resume();
+    }
+  });
 
   // 建立 player 分頁：清單畫面（檔案清單＋YouTube 下載列＋底部 Now
   // Playing 米帶）+ 詳細畫面（封面/歌詞/頻譜/放射狀頻譜循環、進度條、
@@ -2087,9 +2110,11 @@
     transport.appendChild(nextBtn);
     rightControls.appendChild(modeBtn);
     rightControls.appendChild(transport);
-    // 單曲畫面的「返回」放在控制列（播放模式/上一首/播放/下一首）上面，
-    // 不是固定在畫面最上面那顆（`createListDetailView` 這次是
-    // `hideBackBar: true`），直接呼叫 `ld.showList()` 回清單。
+    // 單曲畫面的「返回」不放在頂部（`createListDetailView` 這次是
+    // `hideBackBar: true`），也不跟著內容捲動——浮在畫面左下角、緊貼底下
+    // 分頁列（topology/weather/...那一排）正上方，直接掛在 `ld.detailBody`
+    // 底下（跟會捲動的 `right` 是兩個獨立的 sibling），靠 CSS 絕對定位固定
+    // 位置，呼叫 `ld.showList()` 回清單。
     const playerBackBtn = document.createElement("button");
     playerBackBtn.className = "ld-back-btn player-back-btn";
     playerBackBtn.textContent = "‹ 返回";
@@ -2100,9 +2125,9 @@
     right.appendChild(radial);
     right.appendChild(seekRow);
     right.appendChild(trackName);
-    right.appendChild(playerBackBtn);
     right.appendChild(rightControls);
     ld.detailBody.appendChild(right);
+    ld.detailBody.appendChild(playerBackBtn);
 
     // 接回模組層級的持久 `musicUi`：播放狀態（playlist/currentName/
     // playMode）維持原樣，只換上這次畫面用的 DOM 元素。
