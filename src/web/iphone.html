@@ -21,48 +21,38 @@
      的說明。 */
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
+  html { height: 100%; }
+  /* `body` 用 `position: fixed; inset: 0` 而不是 `height: 100vh`/`100dvh`：
+     vh/dvh 這兩個單位在部分 iOS Safari／PWA 版本上跟裝置實際可視區域的
+     換算不完全可靠（就是之前貼底部貼不齊、跟安全區域邊界對不上的來源），
+     `position: fixed; inset: 0` 直接定義成「精準等於視窗」，沒有換算誤差
+     的空間。這樣 `#tabbar` 只要留在正常的 flex 排列裡（不用自己另外設
+     `position: fixed`）就會自然貼在這個「精準等於視窗」的 `body` 最下緣。 */
   body {
+    position: fixed;
+    inset: 0;
     margin: 0;
     font-family: "Sarasa Term SC", "Sarasa Term TC", "Sarasa Mono SC", "Sarasa Mono TC", "Noto Sans Mono CJK SC",
       "Noto Sans Mono CJK TC", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     background: #111318;
     color: #d8dee9;
-    height: 100vh;
-    height: 100dvh;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
   }
   /* `env(safe-area-inset-*)`：iPhone 有 notch/瀏海跟底部 home indicator，
      PWA 全螢幕模式（`display: standalone`）下這兩塊區域不會自動避開，要
-     自己補 padding，不然畫面上緣/下緣的內容會被瀏海或 home indicator 蓋掉/
-     擋住點擊。`viewport-fit=cover`（見 `<meta name="viewport">`）是讓這幾個
-     `env()` 變數有值的前提。 */
-  /* `#tabbar` 用 `position: fixed` 貼死在螢幕最下緣（不是靠 flex 排在
-     `#content` 下面）：部分 iOS Safari／PWA 版本上，`100dvh` 撐滿的
-     `body` 底部跟裝置實際螢幕下緣之間會留一條縫（`env(safe-area-inset-
-     bottom)` 只補了分頁列自己的內距，並不保證外層容器的高度精準貼齊），
-     用 `bottom: 0` 直接錨定視窗底部才能保證緊貼——即使貼到圓角區域被
-     切掉一角也沒關係。`#content` 額外留一塊底部 padding 讓內容不被蓋住。
-     `body` 這裡故意不設 `overflow: hidden`：舊版 WebKit 有個已知問題，
-     祖先元素設 `overflow: hidden` 時，`position: fixed` 的子元素有機會被
-     一起裁切、貼不到真正的視窗邊緣——`#content` 自己已經有 `overflow:
-     auto` 負責捲動，`body` 不需要另外裁切，拿掉才能保證 `#tabbar` 的
-     `fixed` 定位不會被波及。 */
-  #content {
-    flex: 1;
-    overflow: auto;
-    padding-top: env(safe-area-inset-top);
-    padding-bottom: calc(58px + env(safe-area-inset-bottom));
-  }
+     自己補 padding，不然畫面上緣的內容會被瀏海蓋掉/擋住點擊。
+     `viewport-fit=cover`（見 `<meta name="viewport">`）是讓這幾個 `env()`
+     變數有值的前提。底部故意不用 `env(safe-area-inset-bottom)` 留白——
+     那樣會把分頁列撐得比實際內容高一截，貼到圓角/home indicator 那塊
+     區域就直接讓它被裁掉，不特別留安全區。 */
+  #content { flex: 1; overflow: auto; padding-top: env(safe-area-inset-top); }
   #tabbar {
-    position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
     display: flex;
     background: #1b1e26;
     border-top: 1px solid #3a4150;
-    padding-bottom: env(safe-area-inset-bottom);
+    flex: none;
   }
   #tabbar button {
     flex: 1;
@@ -70,7 +60,7 @@
     border: none;
     color: #9aa4b8;
     font: inherit;
-    padding: 10px 0 8px;
+    padding: 8px 0 6px;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -473,18 +463,23 @@
   }
   .player-controls button:active { opacity: 0.5; }
   /* 播放/暫停跟其他三顆（模式/上一首/下一首）不一樣：自己放大一階、圓形
-     外框、反白（淺底深 icon），視覺上當成整排的主按鈕。 */
-  .player-playpause-btn {
-    width: 72px;
-    height: 72px;
-    min-width: 72px;
+     外框、反白（淺底深 icon），視覺上當成整排的主按鈕。用
+     `.player-controls button.player-playpause-btn` 是因為單純
+     `.player-playpause-btn`（1 個 class）specificity 比上面
+     `.player-controls button`（1 個 class + 1 個 element）低，會被蓋掉
+     ——之前 background/color 都被蓋回去、圓圈變透明看不出來就是這樣。 */
+  .player-controls button.player-playpause-btn {
+    width: 80px;
+    height: 80px;
+    min-width: 80px;
     border-radius: 50%;
     background: #d8dee9;
     color: #111318;
-    font-size: 32px;
+    font-size: 40px;
     display: flex;
     align-items: center;
     justify-content: center;
+    padding: 0;
   }
 
   /* storage 分頁：資料夾瀏覽維持清單+breadcrumb（本來就是「點下去、看清單」
@@ -2014,6 +2009,17 @@
       playerAudioCtx.resume();
     }
   });
+  // 背景/鎖屏繼續播放是最高原則：只要曾經看過頻譜/放射狀頻譜（`playerAudioCtx`
+  // 已經建立），瀏覽器把 App 切到背景時還是有機會把這個 `AudioContext`
+  // 停掉。靠一個固定週期的計時器持續嘗試 `resume()`——只要正在播放中的
+  // `<audio>` 元素本身還活著（這是瀏覽器願意讓背景頁面繼續跑計時器的
+  // 前提），這個計時器就有機會把聲音接回來，盡量不要真的靜音。這是跟
+  // 系統電源管理拔河，沒辦法保證在所有 iOS 版本都 100%有效。
+  setInterval(() => {
+    if (playerAudioCtx && !player.paused && playerAudioCtx.state !== "running") {
+      playerAudioCtx.resume();
+    }
+  }, 800);
 
   // 建立 player 分頁：清單畫面（檔案清單＋YouTube 下載列＋底部 Now
   // Playing 米帶）+ 詳細畫面（封面/歌詞/頻譜/放射狀頻譜循環、進度條、
