@@ -15,7 +15,8 @@ show
 
 # weather
 plugin enter weather
-add Xidian
+add Xindian District
+add Xinzhuang District
 add Tainan
 add Tokyo
 add Eindhoven

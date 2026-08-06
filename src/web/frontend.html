@@ -329,6 +329,7 @@
     flex: none;
   }
   .weather-hero-icon { width: 84px; height: 84px; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3)); }
+  .weather-hero-time { font-size: 13px; opacity: .75; letter-spacing: .05em; }
   .weather-hero-temp { font-size: 34px; font-weight: 600; }
   .weather-hero-desc { font-size: 14px; }
   .weather-hero-sub { font-size: 12px; opacity: .85; }
@@ -2232,6 +2233,9 @@
         return;
       }
 
+      const time = document.createElement("div");
+      time.className = "weather-hero-time";
+      time.textContent = `當地時間 ${loc.now.local_time}`;
       const temp = document.createElement("div");
       temp.className = "weather-hero-temp";
       temp.textContent = `${loc.now.temp_c}°C`;
@@ -2241,6 +2245,7 @@
       const sub = document.createElement("div");
       sub.className = "weather-hero-sub";
       sub.textContent = `體感 ${loc.now.feels_like_c}° · 濕度 ${loc.now.humidity}% · 降雨機率 ${loc.now.chance_of_rain}%`;
+      hero.appendChild(time);
       hero.appendChild(temp);
       hero.appendChild(desc);
       hero.appendChild(sub);

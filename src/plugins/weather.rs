@@ -82,7 +82,10 @@ weather：抓 Open-Meteo 的天氣資料，用純文字表格顯示現在/今天
 /// 跟分類（`WeatherColumn::slug`），不能只有 `cells()` 拼好的顯示字串。
 #[derive(Clone)]
 enum WeatherColumnKind {
-    Now { temp_c: i32, feels_like_c: i32, humidity: i32 },
+    /// `local_time`：`"HH:MM"`，該地點當地的現在時間（`current.time`，
+    /// `timezone=auto` 換算過），不同地點時區不同，所以放在欄位內容裡而不是
+    /// 表頭（表頭 `"now"` 是所有地點共用的）。
+    Now { temp_c: i32, feels_like_c: i32, humidity: i32, local_time: String },
     Hour { temp_c: i32 },
     /// `is_today`：`weather[]` 第一筆本來就是今天，`snapshot()` 的 `days`
     /// （給前端畫「未來預報」用）要排除這一筆——今天已經有 `now`／`today`
@@ -104,12 +107,17 @@ struct WeatherColumn {
 }
 
 impl WeatherColumn {
-    /// `text()`/CLI/TUI 用的純文字表格儲存格：跟改之前的 `cell()` 輸出完全
+    /// `text()`/CLI/TUI 用的純文字表格儲存格：跟改之前的 `cell()` 輸出基本上
     /// 一樣（描述/氣溫/降雨機率各一行），只是資料來源從原本三個各自獨立的
-    /// `(String, Vec<String>)` 改成從這個結構算出來。
+    /// `(String, Vec<String>)` 改成從這個結構算出來。`Now` 多補一行當地時間
+    /// （見 `WeatherColumnKind::Now` 的說明），`Hour` 不需要——它的表頭本身
+    /// 就是時間點。
     fn cells(&self) -> Vec<String> {
         match &self.kind {
-            WeatherColumnKind::Now { temp_c, .. } | WeatherColumnKind::Hour { temp_c } => {
+            WeatherColumnKind::Now { temp_c, local_time, .. } => {
+                vec![local_time.clone(), self.desc.to_string(), format!("{temp_c}°C"), format!("{}%", self.chance_of_rain)]
+            }
+            WeatherColumnKind::Hour { temp_c } => {
                 vec![self.desc.to_string(), format!("{temp_c}°C"), format!("{}%", self.chance_of_rain)]
             }
             WeatherColumnKind::Day { min_c, max_c, .. } => {
@@ -139,6 +147,8 @@ pub(crate) struct WeatherNowJson {
     feels_like_c: i32,
     humidity: i32,
     chance_of_rain: u32,
+    /// 該地點當地的現在時間，`"HH:MM"`，見 `WeatherColumnKind::Now` 的說明。
+    local_time: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -332,7 +342,7 @@ impl WeatherPlugin {
             let mut days = Vec::new();
             for column in report.columns {
                 match column.kind {
-                    WeatherColumnKind::Now { temp_c, feels_like_c, humidity } => {
+                    WeatherColumnKind::Now { temp_c, feels_like_c, humidity, local_time } => {
                         now = Some(WeatherNowJson {
                             category: column.slug.to_string(),
                             desc: column.desc.to_string(),
@@ -340,6 +350,7 @@ impl WeatherPlugin {
                             feels_like_c,
                             humidity,
                             chance_of_rain: column.chance_of_rain,
+                            local_time,
                         });
                     }
                     WeatherColumnKind::Hour { temp_c } => {
@@ -491,12 +502,13 @@ impl WeatherPlugin {
         let (slug, desc) = Self::classify(code);
         let now_time = current.get("time")?.as_str()?;
         let chance = Self::hour_chance_at(hourly, now_time).unwrap_or(0);
+        let local_time = now_time.get(11..16)?.to_string();
         Some(WeatherColumn {
             header: "now".to_string(),
             slug,
             desc,
             chance_of_rain: chance,
-            kind: WeatherColumnKind::Now { temp_c, feels_like_c, humidity },
+            kind: WeatherColumnKind::Now { temp_c, feels_like_c, humidity, local_time },
         })
     }
 
