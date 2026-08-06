@@ -59,6 +59,12 @@
     line-height: 1;
     padding: 4px 10px;
   }
+  #hostname-label {
+    color: #d8dee9;
+    white-space: nowrap;
+    font-size: 15px;
+    font-weight: 600;
+  }
   #version-label {
     color: #6b7280;
     white-space: nowrap;
@@ -1101,6 +1107,7 @@
 <body>
 <div id="toolbar">
   <button id="menu-btn" title="選單">☰</button>
+  <span id="hostname-label"></span>
   <span id="version-label"></span>
   <div id="menu-dropdown"></div>
 </div>
@@ -1127,6 +1134,7 @@
   "use strict";
 
   const desk = document.getElementById("desk");
+  const hostnameLabel = document.getElementById("hostname-label");
   const versionLabel = document.getElementById("version-label");
   const menuBtn = document.getElementById("menu-btn");
   const menuDropdown = document.getElementById("menu-dropdown");
@@ -3926,7 +3934,10 @@
 
   fetch("/api/version")
     .then((r) => r.json())
-    .then((d) => { versionLabel.textContent = `${d.id} ${d.version}`; });
+    .then((d) => {
+      hostnameLabel.textContent = d.id;
+      versionLabel.textContent = d.version;
+    });
 
   // 選單裡每一項的統一外形：圖示 + 名字，點下去開對應的 panel（跟以前下拉
   // 選單+「開啟 panel」按鈕、或 player/shell 專屬按鈕，最後都是呼叫同一個
