@@ -1,0 +1,3278 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<title>cng5</title>
+<link rel="manifest" href="/iphone-manifest.json">
+<link rel="apple-touch-icon" href="/iphone-icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="cng5">
+<meta name="theme-color" content="#111318">
+<style>
+  /* 這個檔案是專門給 iPhone 用的 PWA 版面：跟 `tablet.html`/`frontend.html`
+     同一種「單一自足 HTML、`include_str!` 嵌進 binary、原樣回應」的做法，
+     這裡各自一份，不跟前兩套共用 JS/CSS 模組（跟 topology/player/weather
+     在 tablet 版的取捨一致）。跟 tablet 版最大的差異：iPhone 螢幕窄
+     （375–430px），塞不下左右並排的版面（weather 側邊清單+大圖、player
+     檔案清單+播放控制、notepad textarea/preview 都是左右並排），改成
+     「清單 → 點下去進入詳細畫面 → 按鈕返回清單」，見下面 `createListDetailView`
+     的說明。 */
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Sarasa Term SC", "Sarasa Term TC", "Sarasa Mono SC", "Sarasa Mono TC", "Noto Sans Mono CJK SC",
+      "Noto Sans Mono CJK TC", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    background: #111318;
+    color: #d8dee9;
+    height: 100vh;
+    height: 100dvh;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  /* `env(safe-area-inset-*)`：iPhone 有 notch/瀏海跟底部 home indicator，
+     PWA 全螢幕模式（`display: standalone`）下這兩塊區域不會自動避開，要
+     自己補 padding，不然畫面上緣/下緣的內容會被瀏海或 home indicator 蓋掉/
+     擋住點擊。`viewport-fit=cover`（見 `<meta name="viewport">`）是讓這幾個
+     `env()` 變數有值的前提。 */
+  #content { flex: 1; overflow: auto; padding-top: env(safe-area-inset-top); }
+  #tabbar {
+    display: flex;
+    background: #1b1e26;
+    border-top: 1px solid #3a4150;
+    flex: none;
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  #tabbar button {
+    flex: 1;
+    background: none;
+    border: none;
+    color: #9aa4b8;
+    font: inherit;
+    padding: 10px 0 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    cursor: pointer;
+  }
+  #tabbar button.active { color: #6f9dff; background: #262a33; }
+  .tab-icon { font-size: 20px; }
+  .tab-label { font-size: 11px; }
+
+  .empty-hint { color: #9aa4b8; padding: 16px; font-size: 15px; }
+  .plain-panel { white-space: pre-wrap; font-size: 15px; line-height: 1.6; padding: 16px; height: 100%; overflow: auto; }
+  @keyframes cellFlash {
+    from { background-color: rgba(255, 255, 255, 0.35); }
+    to { background-color: transparent; }
+  }
+  .cell-flash { animation: cellFlash 1s ease-out; }
+
+  /* 每個分頁內部通用的「清單 → 詳細畫面」骨架，見 `createListDetailView`。
+     `.ld-list`/`.ld-detail` 兩個畫面互斥顯示（`display: none` 切換），不是
+     同時存在、也不是路由跳頁——沒有瀏覽器上一頁/下一頁的概念，回上一層
+     一律靠畫面裡的「‹ 返回」按鈕。 */
+  .ld-wrap { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .ld-list { flex: 1; overflow: auto; }
+  .ld-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .ld-back-bar { flex: none; padding: 10px 14px; border-bottom: 1px solid #262a33; background: #1b1e26; }
+  .ld-back-btn {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #6f9dff;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font: inherit;
+    font-size: 15px;
+    cursor: pointer;
+    min-height: 44px;
+  }
+  .ld-back-btn:active { background: #323844; }
+  .ld-detail-body { flex: 1; overflow: hidden; position: relative; }
+
+  /* device/global：清單改成一列一張卡片（id/ip/alive），點一列進 detail
+     顯示該裝置全部欄位。跟桌面版/tablet 表格是同一份資料來源
+     （`/api/panel/<name>/snapshot-stream`），只是畫成清單不是表格。 */
+  .snap-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid #262a33;
+    cursor: pointer;
+    min-height: 44px;
+  }
+  .snap-row:active { background: #1b1e26; }
+  .snap-row.row-offline { color: #8a92a5; }
+  .snap-row .snap-id { flex: 1; font-size: 15px; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .snap-row .snap-ip { flex: none; font-size: 13px; color: #9aa4b8; }
+  .snap-row .snap-alive { flex: none; width: 18px; text-align: center; font-size: 16px; color: #6f9dff; }
+  .snap-detail-body { height: 100%; overflow: auto; padding: 8px 0; }
+  .snap-detail-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid #262a33;
+    font-size: 15px;
+  }
+  .snap-detail-row .k { color: #9aa4b8; white-space: pre; }
+  .snap-detail-row .v { text-align: right; white-space: pre-wrap; word-break: break-all; }
+
+  /* topology 分頁：跟 tablet 版同一套固定式階層佈局，這裡各自一份。觸控
+     裝置沒有可靠的 hover 事件，原本 tablet/桌面版用 `mouseenter`/
+     `mousemove`/`mouseleave` 顯示的 tooltip，這裡改成點一下節點彈出置中的
+     modal，點遮罩或「關閉」按鈕收起來。 */
+  #topology-wrap { position: relative; height: 100%; }
+  .topology-svg { width: 100%; height: 100%; }
+  .topology-node { cursor: default; }
+  .topology-node-label { font-size: 12px; fill: #d8dee9; text-anchor: middle; pointer-events: none; }
+  .topology-domain-box { fill: none; stroke: #3a4150; stroke-width: 1; stroke-dasharray: 5,3; }
+  .topology-domain-label { font-size: 11px; fill: #6b7280; }
+  .topology-edge { stroke: #5a6272; stroke-width: 1.5; }
+  .topology-broker { fill: #1b1e26; stroke: #d8dee9; stroke-width: 2; }
+  .topology-modal-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 30;
+  }
+  .topology-modal-overlay.open { display: flex; }
+  .topology-modal {
+    background: #1b1e26;
+    border: 1px solid #3a4150;
+    border-radius: 10px;
+    padding: 18px 20px;
+    max-width: 85%;
+    color: #d8dee9;
+    font-size: 15px;
+    white-space: pre-wrap;
+  }
+  .topology-modal button {
+    margin-top: 14px;
+    width: 100%;
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 8px;
+    padding: 12px;
+    font: inherit;
+    font-size: 15px;
+    cursor: pointer;
+    min-height: 44px;
+  }
+
+  /* weather 分頁：清單（地區）跟詳細畫面（動態背景＋大圖示＋今天/未來
+     預報）是 tablet 版 `.weather-sidebar`/`.weather-main` 拆開後各自佔滿
+     一個整螢幕，內部結構跟視覺完全沿用（圖示/背景動畫/CSS class 命名都
+     不變），只是不再左右並排。 */
+  .weather-loc-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    cursor: pointer;
+    border-bottom: 1px solid #262a33;
+    color: #fff;
+    min-height: 44px;
+  }
+  .weather-loc-row:active { background: #1b1e26; }
+  .weather-loc-icon { width: 30px; height: 30px; flex: none; }
+  .weather-loc-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+  .weather-loc-temp { flex: none; font-size: 15px; color: #9aa4b8; }
+
+  .weather-detail-content { height: 100%; position: relative; overflow: auto; display: flex; flex-direction: column; color: #fff; }
+  .weather-bg { position: absolute; inset: 0; overflow: hidden; }
+  .weather-bg-dim::after { content: ""; position: absolute; inset: 0; background: rgba(0, 0, 0, 0.15); }
+  .weather-sun-glow {
+    position: absolute;
+    top: -15%;
+    left: 50%;
+    width: 220px;
+    height: 220px;
+    margin-left: -110px;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0));
+    border-radius: 50%;
+    animation: weatherSunPulse 6s ease-in-out infinite;
+  }
+  @keyframes weatherSunPulse {
+    0%, 100% { opacity: .7; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.08); }
+  }
+  .weather-cloud {
+    position: absolute;
+    left: -30%;
+    width: 180px;
+    height: 70px;
+    background: #fff;
+    border-radius: 60px;
+    animation-name: weatherCloudDrift;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  .weather-cloud::before, .weather-cloud::after { content: ""; position: absolute; background: #fff; border-radius: 50%; }
+  .weather-cloud::before { width: 70px; height: 70px; top: -30px; left: 20px; }
+  .weather-cloud::after { width: 50px; height: 50px; top: -18px; left: 90px; }
+  @keyframes weatherCloudDrift {
+    from { transform: translateX(0); }
+    to { transform: translateX(160vw); }
+  }
+  .weather-fog-band {
+    position: absolute;
+    left: -20%;
+    width: 140%;
+    height: 40px;
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+    animation-name: weatherFogDrift;
+    animation-timing-function: ease-in-out;
+    animation-iteration-count: infinite;
+  }
+  @keyframes weatherFogDrift {
+    0%, 100% { transform: translateX(-6%); }
+    50% { transform: translateX(6%); }
+  }
+  .weather-drop {
+    position: absolute;
+    top: -10%;
+    width: 2px;
+    height: 16px;
+    background: linear-gradient(rgba(255, 255, 255, 0), rgba(255, 255, 255, 0.7));
+    animation-name: weatherDropFall;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  @keyframes weatherDropFall {
+    from { top: -10%; }
+    to { top: 110%; }
+  }
+  .weather-flake {
+    position: absolute;
+    top: -5%;
+    background: #fff;
+    border-radius: 50%;
+    opacity: .85;
+    animation-name: weatherFlakeFall;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  @keyframes weatherFlakeFall {
+    from { top: -5%; transform: translateX(0); }
+    to { top: 110%; transform: translateX(20px); }
+  }
+  .weather-flash {
+    position: absolute;
+    inset: 0;
+    background: #fff;
+    opacity: 0;
+    animation: weatherLightning 7s infinite;
+  }
+  @keyframes weatherLightning {
+    0%, 92%, 100% { opacity: 0; }
+    93% { opacity: .8; }
+    94% { opacity: 0; }
+    95% { opacity: .5; }
+    96% { opacity: 0; }
+  }
+
+  .weather-hero {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 32px 16px 16px;
+    flex: none;
+  }
+  .weather-hero-icon { width: 130px; height: 130px; filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3)); }
+  .weather-hero-time { font-size: 15px; opacity: .75; letter-spacing: .05em; }
+  .weather-hero-temp { font-size: 50px; font-weight: 600; }
+  .weather-hero-desc { font-size: 19px; }
+  .weather-hero-sub { font-size: 13px; opacity: .85; }
+
+  .weather-forecast-section { position: relative; z-index: 1; padding: 8px 16px; flex: none; }
+  .weather-forecast-label { font-size: 13px; opacity: .75; margin-bottom: 6px; text-align: center; }
+  .weather-forecast-row { overflow-x: auto; padding-bottom: 4px; }
+  .weather-forecast-track { display: flex; gap: 16px; width: max-content; margin: 0 auto; }
+  .weather-forecast-item { display: flex; flex-direction: column; align-items: center; gap: 4px; flex: none; min-width: 56px; }
+  .weather-forecast-icon { width: 36px; height: 36px; }
+  .weather-forecast-item .label { font-size: 12px; opacity: .8; }
+  .weather-forecast-item .temp { font-size: 13px; }
+  .weather-forecast-item .rain { font-size: 11px; opacity: .75; }
+  .weather-forecast-empty { font-size: 13px; opacity: .6; padding: 8px 0; text-align: center; }
+
+  .weather-loc-icon svg, .weather-hero-icon svg, .weather-forecast-icon svg { width: 100%; height: 100%; display: block; }
+  .weather-icon-sun-rays { transform-box: fill-box; transform-origin: center; animation: weatherIconSunRotate 20s linear infinite; }
+  @keyframes weatherIconSunRotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  /* player 分頁：清單畫面（檔案清單＋YouTube 下載列＋底部 Now Playing
+     米帶）跟 tablet 版 `.player-left` 是同一批 class（`.music-*`），詳細畫面
+     是 tablet 版 `.player-right` 整套（封面/歌詞/頻譜/放射狀頻譜循環、進度
+     條、播放模式/上一首/播放/下一首），原樣沿用。點檔名直接播放＋跳詳細
+     畫面（不是先點小小的播放圖示），刪除按鈕另外處理 `stopPropagation`，
+     手機上比 tablet 版兩顆小按鈕更好按。 */
+  .music-files { flex: 1; overflow: auto; padding: 0 8px; }
+  .music-empty { color: #5a6272; padding: 8px 0; }
+  .music-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 4px;
+    border-bottom: 1px solid #262a33;
+    min-height: 44px;
+    cursor: pointer;
+  }
+  .music-row:active { background: #1b1e26; }
+  .music-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .music-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 15px;
+    cursor: pointer;
+    min-height: 40px;
+  }
+  .music-row.playing { background: #1e2530; border-radius: 6px; }
+  .music-row.playing .music-name { color: #6f9dff; }
+
+  .player-list-wrap { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .player-download-row { display: flex; gap: 6px; padding: 10px; border-top: 1px solid #262a33; flex: none; }
+  .player-file-count { flex: none; align-self: center; color: #8a92a5; white-space: nowrap; font-size: 13px; }
+  .player-url-input {
+    flex: 1;
+    min-width: 0;
+    background: #0d0f13;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 15px;
+  }
+  .player-download-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 6px;
+    padding: 8px 14px;
+    font: inherit;
+    cursor: pointer;
+    min-height: 40px;
+  }
+  .player-download-row button:active { background: #323844; }
+  .player-now-playing {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-top: 1px solid #3a4150;
+    background: #1b1e26;
+    cursor: pointer;
+    display: none;
+  }
+  .player-now-playing .npname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .player-now-playing button {
+    flex: none;
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 50%;
+    width: 42px;
+    height: 42px;
+    font-size: 16px;
+    cursor: pointer;
+  }
+
+  .player-detail-content {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    padding: 20px 16px;
+    overflow: auto;
+  }
+  .player-cover-slot {
+    width: 100%;
+    max-width: 260px;
+    aspect-ratio: 1 / 1;
+    background: #0d0f13;
+    border: 1px solid #3a4150;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .player-cover { object-fit: cover; }
+  .player-seek-row { display: flex; align-items: center; gap: 8px; width: 100%; max-width: 260px; }
+  .player-seek { flex: 1; min-width: 0; accent-color: #6f9dff; }
+  .player-time { flex-shrink: 0; font-size: 12px; color: #9aa3b2; white-space: nowrap; }
+  .player-track-name {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #d8dee9;
+    text-align: center;
+    font-size: 16px;
+  }
+  .player-lyrics { overflow: auto; text-align: center; color: #6a7383; font-size: 13px; }
+  .player-lyric-line { padding: 3px 0; }
+  .player-lyric-line.active { color: #6f9dff; font-weight: bold; }
+  .player-lyrics-empty { color: #5a6272; padding: 8px 0; }
+  .player-controls { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; }
+  .player-transport { display: flex; gap: 10px; }
+  .player-controls button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 8px;
+    padding: 12px 18px;
+    font: inherit;
+    font-size: 18px;
+    cursor: pointer;
+    min-height: 44px;
+  }
+  .player-controls button:active { background: #323844; }
+
+  /* storage 分頁：資料夾瀏覽維持清單+breadcrumb（本來就是「點下去、看清單」
+     的模式，不用改）；點一個「檔案」（非資料夾）改成進詳細畫面，顯示檔名/
+     大小/修改時間 + 大按鈕（下載／重新命名／刪除／[notepad 底下多一顆在
+     notepad 開啟]），取代表格裡塞不下的小圖示按鈕。資料夾維持原本表格列
+     內的刪除/重新命名兩顆小按鈕（資料夾沒有「下載」，本來就只有兩顆，
+     不像檔案原本擠三顆）。 */
+  .storage-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .storage-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #3a4150;
+  }
+  .storage-breadcrumb { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .storage-breadcrumb a { color: #6f9dff; text-decoration: none; margin-right: 4px; }
+  .storage-toolbar button {
+    background: #232833;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 6px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+    min-height: 40px;
+  }
+  .storage-table-scroll { flex: 1; overflow: auto; }
+  .storage-table { border-collapse: collapse; width: 100%; font-size: 15px; }
+  .storage-table td { height: 44px; padding: 8px 12px; border-top: 1px solid #262a33; white-space: nowrap; vertical-align: top; }
+  .storage-table a { color: #6f9dff; text-decoration: none; }
+  .storage-table button {
+    background: none;
+    border: none;
+    color: #9aa4b8;
+    cursor: pointer;
+    font-size: 17px;
+    margin-left: 8px;
+    padding: 6px;
+    min-height: 36px;
+  }
+
+  .storage-detail-content { height: 100%; overflow: auto; padding: 20px 16px; display: flex; flex-direction: column; gap: 14px; }
+  .storage-detail-name { font-size: 18px; font-weight: 600; word-break: break-all; }
+  .storage-detail-meta { font-size: 14px; color: #9aa4b8; }
+  .storage-detail-actions { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+  .storage-detail-actions a, .storage-detail-actions button {
+    display: block;
+    text-align: center;
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 8px;
+    padding: 14px;
+    font: inherit;
+    font-size: 16px;
+    cursor: pointer;
+    text-decoration: none;
+    min-height: 44px;
+  }
+  .storage-detail-actions .danger { color: #ff6b6b; border-color: #5a3030; }
+
+  /* todo 分頁：清單本身已經是觸控友善的單層結構（勾選/文字/刪除），不需要
+     詳細畫面，原樣沿用 tablet 版設計，勾選框跟每列間距再放大一點。 */
+  .todo-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .todo-toolbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-bottom: 1px solid #3a4150;
+  }
+  .todo-toolbar input[type="text"] {
+    flex: 1;
+    background: #1b1e26;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 6px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 15px;
+  }
+  .todo-toolbar button {
+    background: #232833;
+    color: #d8dee9;
+    border: 1px solid #3a4150;
+    border-radius: 6px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 14px;
+    min-height: 40px;
+  }
+  .todo-list { flex: 1; overflow: auto; padding: 4px 0; }
+  .todo-empty { padding: 20px 14px; color: #9aa4b8; font-size: 15px; }
+  .todo-row { display: flex; align-items: center; gap: 14px; padding: 14px; border-top: 1px solid #262a33; min-height: 44px; }
+  .todo-row input[type="checkbox"] { width: 26px; height: 26px; flex: none; }
+  .todo-text { flex: 1; font-size: 16px; overflow-wrap: anywhere; }
+  .todo-row.done .todo-text { color: #6c7280; text-decoration: line-through; }
+  .todo-row button { background: none; border: none; color: #9aa4b8; cursor: pointer; font-size: 18px; padding: 8px; min-height: 40px; }
+
+  /* notepad 分頁：跟桌面版一樣，Ctrl-E／Ctrl-F／Ctrl-S／Ctrl-X 這幾個組合鍵
+     全部換成按鈕（平板/手機都很難按組合鍵）。跟 tablet 版最大的差異：編輯
+     模式的 textarea/preview 改成上下堆疊（不是左右並排）——iPhone 螢幕窄
+     （375–430px），並排會擠到看不清楚，上下堆疊才是這個寬度該用的排法。 */
+  .notepad-body { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .notepad-view { flex: 1; overflow: auto; padding: 14px 16px; font-size: 15px; }
+  .notepad-edit { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .notepad-textarea {
+    flex: 1;
+    min-height: 0;
+    resize: none;
+    background: #0d0f13;
+    border: none;
+    border-bottom: 1px solid #262a33;
+    color: #d8dee9;
+    padding: 12px 14px;
+    font: inherit;
+    font-size: 15px;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    outline: none;
+  }
+  .notepad-preview { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px; font-size: 15px; }
+  .notepad-hint {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid #262a33;
+    color: #6b7280;
+    font-size: 13px;
+  }
+  .notepad-hint-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .notepad-hint button, .notepad-filename-row button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font: inherit;
+    font-size: 14px;
+    cursor: pointer;
+    min-height: 40px;
+  }
+  .notepad-hint-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .notepad-filename-row {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    border-top: 1px solid #262a33;
+    background: #0d0f13;
+  }
+  .notepad-filename-input {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid #3a4150;
+    border-radius: 6px;
+    background: #1b1e26;
+    color: #d8dee9;
+    font: inherit;
+    font-size: 15px;
+    outline: none;
+  }
+  .notepad-empty { color: #5a6272; }
+  .notepad-view h1, .notepad-view h2, .notepad-view h3,
+  .notepad-view h4, .notepad-view h5, .notepad-view h6,
+  .notepad-preview h1, .notepad-preview h2, .notepad-preview h3,
+  .notepad-preview h4, .notepad-preview h5, .notepad-preview h6 {
+    color: #6f9dff;
+    margin: 0.6em 0 0.3em;
+  }
+  .notepad-view h1, .notepad-view h2,
+  .notepad-preview h1, .notepad-preview h2 {
+    border-bottom: 1px solid #3a4150;
+    padding-bottom: 0.2em;
+  }
+  .notepad-view p, .notepad-preview p { margin: 0.4em 0; }
+  .notepad-view code, .notepad-preview code {
+    background: #a0a0a0;
+    color: #8b0000;
+    border-radius: 3px;
+    padding: 0 4px;
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  .notepad-view s, .notepad-preview s { text-decoration: line-through; }
+  .notepad-underline { text-decoration: underline; }
+  .notepad-highlight { background: #d8dee9; color: #1b1e26; }
+  .notepad-view pre, .notepad-preview pre {
+    background: #0d0f13;
+    border: 1px solid #262a33;
+    border-radius: 4px;
+    padding: 8px 10px;
+    overflow: auto;
+  }
+  .notepad-view pre code, .notepad-preview pre code { background: none; color: inherit; border: none; padding: 0; }
+  .notepad-view .tok-keyword, .notepad-preview .tok-keyword { color: #5c8ae6; font-weight: bold; }
+  .notepad-view .tok-string, .notepad-preview .tok-string { color: #d7ba48; }
+  .notepad-view .tok-number, .notepad-preview .tok-number { color: #c678dd; }
+  .notepad-view .tok-comment, .notepad-preview .tok-comment { color: #6b7280; font-style: italic; }
+  .notepad-view .line-no, .notepad-preview .line-no {
+    display: inline-block;
+    width: 2.5em;
+    margin-right: 0.8em;
+    padding-right: 0.4em;
+    border-right: 1px solid #3a4150;
+    text-align: right;
+    color: #6b7280;
+    user-select: none;
+  }
+  .notepad-view blockquote, .notepad-preview blockquote {
+    margin: 0.4em 0;
+    padding-left: 10px;
+    border-left: 3px solid #3a4150;
+    color: #8a92a5;
+    font-style: italic;
+  }
+  .notepad-view ul, .notepad-preview ul,
+  .notepad-view ol, .notepad-preview ol {
+    margin: 0.3em 0;
+    padding-left: 1.6em;
+  }
+  .notepad-view li.notepad-task, .notepad-preview li.notepad-task {
+    list-style: none;
+    margin-left: -1.6em;
+  }
+  .notepad-view li.notepad-task input, .notepad-preview li.notepad-task input {
+    margin-right: 4px;
+  }
+  .notepad-view hr, .notepad-preview hr {
+    border: none;
+    border-top: 1px solid #3a4150;
+    margin: 0.6em 0;
+  }
+  .notepad-view a, .notepad-preview a { color: #6f9dff; font-weight: bold; text-decoration: underline; }
+  .notepad-view table, .notepad-preview table {
+    border-collapse: collapse;
+    margin: 0.4em 0;
+  }
+  .notepad-view th, .notepad-preview th {
+    font-weight: bold;
+    text-align: left;
+    padding: 3px 10px;
+    border-bottom: 2px solid #3a4150;
+  }
+  .notepad-view td, .notepad-preview td { padding: 3px 10px; }
+  .notepad-view tbody tr:not(:first-child) td,
+  .notepad-preview tbody tr:not(:first-child) td {
+    border-top: 1px solid #262a33;
+  }
+</style>
+</head>
+<body>
+<div id="content"></div>
+<div id="tabbar"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  // 跟後端 device.rs/global.rs 的 ALIVE_TTL（REPORT_INTERVAL 10 秒 * 3）保持
+  // 一致——這裡沒有對應的 API 可以查，只能寫死並用註解註明依賴關係。topology
+  // 分頁還在用這個值算 alive（它走的是原始 `/api/device/list`／
+  // `/api/global/list`，不是 device/global 分頁用的 snapshot）。
+  const ALIVE_TTL_MS = 30000;
+
+  // 跟 `sysinfo::format_uptime` 算法一致，topology 分頁的詳細資訊 modal 在用。
+  function formatUptimeJs(secs) {
+    const days = Math.floor(secs / 86400);
+    const hours = Math.floor((secs % 86400) / 3600);
+    const minutes = Math.floor((secs % 3600) / 60);
+    const seconds = Math.floor(secs % 60);
+    const pad = (n) => String(n).padStart(2, "0");
+    return days > 0 ? `${days}d ${pad(hours)}:${pad(minutes)}:${pad(seconds)}` : `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  // 跟 `sysinfo::format_disk_usage`/`format_bytes_short` 算法一致。
+  function formatDiskJs(free, total) {
+    if (total === 0) return "N/A";
+    const short = (bytes) => {
+      const units = ["B", "K", "M", "G", "T"];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+      }
+      return unit === 0 ? `${bytes}${units[0]}` : `${value.toFixed(0)}${units[unit]}`;
+    };
+    return `${short(free)}/${short(total)}`;
+  }
+
+  // 每個分頁共用的「清單 → 詳細畫面」骨架：`listEl` 放清單內容，
+  // `detailBody` 放詳細畫面內容，`showList()`/`showDetail()` 互斥切換兩個
+  // 畫面（不是路由跳頁，純粹是同一個 DOM 樹裡兩塊內容的顯示/隱藏），
+  // 詳細畫面固定在最上面放一顆「‹ 返回」按鈕。分頁切換（`switchTo`）時
+  // `#content` 會整個被清空重建，所以每次進入分頁一律從清單畫面開始，不
+  // 記憶上次停在哪個畫面（player 分頁的播放狀態是例外，見該分頁的說明，
+  // 那是播放核心狀態本身跨分頁存活，跟這裡的清單/詳細畫面切換是兩件事）。
+  function createListDetailView(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "ld-wrap";
+    const listEl = document.createElement("div");
+    listEl.className = "ld-list";
+    const detailEl = document.createElement("div");
+    detailEl.className = "ld-detail";
+    detailEl.style.display = "none";
+    const backBar = document.createElement("div");
+    backBar.className = "ld-back-bar";
+    const backBtn = document.createElement("button");
+    backBtn.className = "ld-back-btn";
+    backBtn.textContent = "‹ 返回";
+    backBar.appendChild(backBtn);
+    const detailBody = document.createElement("div");
+    detailBody.className = "ld-detail-body";
+    detailEl.appendChild(backBar);
+    detailEl.appendChild(detailBody);
+    wrap.appendChild(listEl);
+    wrap.appendChild(detailEl);
+    container.appendChild(wrap);
+
+    function showList() {
+      detailEl.style.display = "none";
+      listEl.style.display = "";
+    }
+    function showDetail() {
+      listEl.style.display = "none";
+      detailEl.style.display = "flex";
+    }
+    backBtn.addEventListener("click", showList);
+    return { listEl, detailBody, showList, showDetail };
+  }
+
+  // device/global 分頁：跟桌面版/tablet 版同一份資料源
+  // （`table_snapshot_json`／`/api/panel/<name>/snapshot-stream`），alive 跟
+  // 「目前控制的機器」的 `* ` 前綴都是後端算好、原封不動顯示。清單一列
+  // 一張卡片（id/ip/alive），點一列進 detail 逐行列出該列全部欄位
+  // （headers/cells 直接 zip，不需要知道語意）。收到新 snapshot 時，如果
+  // 目前正在看某一列的 detail，同步重繪那一列的內容。
+  function renderSnapshotList(ld, snapshot, onSelect) {
+    ld.listEl.innerHTML = "";
+    if (snapshot.rows.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-hint";
+      empty.textContent = "(還沒有任何裝置資料)";
+      ld.listEl.appendChild(empty);
+      return;
+    }
+    const ipIdx = snapshot.headers.findIndex((h) => h.trim() === "ip");
+    for (const row of snapshot.rows) {
+      const idCell = row.cells[0];
+      const aliveCell = row.cells[row.cells.length - 1];
+      const offline = aliveCell && aliveCell.text !== "*";
+      const el = document.createElement("div");
+      el.className = "snap-row" + (offline ? " row-offline" : "");
+      if (idCell.flash_ms !== null && idCell.flash_ms !== undefined) {
+        el.classList.add("cell-flash");
+        el.style.animationDelay = `-${idCell.flash_ms / 1000}s`;
+      }
+      const idEl = document.createElement("span");
+      idEl.className = "snap-id";
+      idEl.textContent = idCell.text;
+      const ipEl = document.createElement("span");
+      ipEl.className = "snap-ip";
+      ipEl.textContent = ipIdx >= 0 ? row.cells[ipIdx].text : "";
+      const aliveEl = document.createElement("span");
+      aliveEl.className = "snap-alive";
+      aliveEl.textContent = aliveCell ? aliveCell.text : "";
+      el.appendChild(idEl);
+      el.appendChild(ipEl);
+      el.appendChild(aliveEl);
+      el.addEventListener("click", () => onSelect(idCell.text));
+      ld.listEl.appendChild(el);
+    }
+  }
+
+  function renderSnapshotDetail(ld, headers, row) {
+    ld.detailBody.innerHTML = "";
+    const wrap = document.createElement("div");
+    wrap.className = "snap-detail-body";
+    for (let i = 0; i < headers.length; i++) {
+      const cell = row.cells[i];
+      if (!cell) continue;
+      const line = document.createElement("div");
+      line.className = "snap-detail-row";
+      const k = document.createElement("span");
+      k.className = "k";
+      k.textContent = headers[i].trim();
+      const v = document.createElement("span");
+      v.className = "v";
+      v.textContent = cell.text;
+      line.appendChild(k);
+      line.appendChild(v);
+      wrap.appendChild(line);
+    }
+    ld.detailBody.appendChild(wrap);
+  }
+
+  function makeSnapshotTab(name) {
+    return function start(container) {
+      const ld = createListDetailView(container);
+      let selectedId = null;
+      let latestSnapshot = null;
+
+      function findRow(snapshot, id) {
+        return snapshot.rows.find((r) => r.cells[0].text === id);
+      }
+
+      function onSelect(id) {
+        selectedId = id;
+        const row = latestSnapshot && findRow(latestSnapshot, id);
+        if (row) renderSnapshotDetail(ld, latestSnapshot.headers, row);
+        ld.showDetail();
+      }
+
+      const es = new EventSource(`/api/panel/${encodeURIComponent(name)}/snapshot-stream`);
+      es.onmessage = (e) => {
+        let snapshot;
+        try {
+          snapshot = JSON.parse(JSON.parse(e.data));
+        } catch (_err) {
+          return;
+        }
+        latestSnapshot = snapshot;
+        renderSnapshotList(ld, snapshot, onSelect);
+        if (selectedId !== null) {
+          const row = findRow(snapshot, selectedId);
+          if (row) renderSnapshotDetail(ld, snapshot.headers, row);
+        }
+      };
+      return function stop() {
+        es.close();
+      };
+    };
+  }
+
+  // weather 分頁：清單（地區）+ 詳細畫面（圖示＋動態背景＋現在氣溫，下面分
+  // 「今天」／「未來預報」兩排），資料來自 `/api/weather/list`，跟桌面版的
+  // 純文字 panel 是兩條獨立的路（見 `weather.rs` `classify()` 的說明）。
+  const WEATHER_POLL_MS = 8000;
+
+  const WEATHER_LABELS = {
+    sunny: "晴天",
+    "partly-cloudy": "多雲時晴",
+    cloudy: "多雲",
+    overcast: "陰天",
+    fog: "有霧",
+    showers: "短暫陣雨",
+    rain: "下雨",
+    snow: "下雪",
+    thunderstorm: "雷雨",
+    "ice-pellets": "凍雨",
+    unknown: "天氣不明",
+  };
+  const WEATHER_GRADIENTS = {
+    sunny: "linear-gradient(160deg, #ffb347 0%, #ff8a3d 55%, #ff6f61 100%)",
+    "partly-cloudy": "linear-gradient(160deg, #7fb7e8 0%, #a9c9e8 45%, #f0c869 100%)",
+    cloudy: "linear-gradient(160deg, #8a97a8 0%, #6b7789 100%)",
+    overcast: "linear-gradient(160deg, #5c6472 0%, #3a4150 100%)",
+    fog: "linear-gradient(160deg, #c3c9d1 0%, #9aa2ac 100%)",
+    showers: "linear-gradient(160deg, #5c7a9e 0%, #34506b 100%)",
+    rain: "linear-gradient(160deg, #44607e 0%, #223245 100%)",
+    snow: "linear-gradient(160deg, #d8e6f2 0%, #a9c1d6 100%)",
+    thunderstorm: "linear-gradient(160deg, #34364a 0%, #14151f 100%)",
+    "ice-pellets": "linear-gradient(160deg, #c3d8e4 0%, #90aabd 100%)",
+    unknown: "linear-gradient(160deg, #6b7280 0%, #4a5160 100%)",
+  };
+  const WEATHER_EFFECTS = {
+    sunny: { sun: true },
+    "partly-cloudy": { sun: true, clouds: 2 },
+    cloudy: { clouds: 3 },
+    overcast: { clouds: 4, dim: true },
+    fog: { fogBands: 3 },
+    showers: { rain: 12 },
+    rain: { rain: 24 },
+    snow: { snow: 20 },
+    thunderstorm: { rain: 20, lightning: true, dim: true },
+    "ice-pellets": { snow: 14, fast: true },
+    unknown: { clouds: 2 },
+  };
+
+  function buildWeatherBackground(category) {
+    const bg = document.createElement("div");
+    bg.className = "weather-bg" + (WEATHER_EFFECTS[category]?.dim ? " weather-bg-dim" : "");
+    bg.style.background = WEATHER_GRADIENTS[category] || WEATHER_GRADIENTS.unknown;
+    const effects = WEATHER_EFFECTS[category] || {};
+
+    if (effects.sun) {
+      const glow = document.createElement("div");
+      glow.className = "weather-sun-glow";
+      bg.appendChild(glow);
+    }
+    if (effects.clouds) {
+      for (let i = 0; i < effects.clouds; i++) {
+        const cloud = document.createElement("div");
+        cloud.className = "weather-cloud";
+        cloud.style.top = `${10 + Math.random() * 55}%`;
+        cloud.style.transform = `scale(${0.6 + Math.random() * 0.8})`;
+        cloud.style.opacity = String(0.3 + Math.random() * 0.35);
+        cloud.style.animationDuration = `${40 + Math.random() * 40}s`;
+        cloud.style.animationDelay = `-${Math.random() * 40}s`;
+        bg.appendChild(cloud);
+      }
+    }
+    if (effects.fogBands) {
+      for (let i = 0; i < effects.fogBands; i++) {
+        const band = document.createElement("div");
+        band.className = "weather-fog-band";
+        band.style.top = `${15 + i * 28}%`;
+        band.style.animationDuration = `${16 + Math.random() * 10}s`;
+        band.style.animationDelay = `-${Math.random() * 20}s`;
+        bg.appendChild(band);
+      }
+    }
+    if (effects.rain) {
+      for (let i = 0; i < effects.rain; i++) {
+        const drop = document.createElement("div");
+        drop.className = "weather-drop";
+        drop.style.left = `${Math.random() * 100}%`;
+        drop.style.animationDuration = `${0.5 + Math.random() * 0.4}s`;
+        drop.style.animationDelay = `-${Math.random() * 2}s`;
+        bg.appendChild(drop);
+      }
+    }
+    if (effects.snow) {
+      for (let i = 0; i < effects.snow; i++) {
+        const flake = document.createElement("div");
+        flake.className = "weather-flake";
+        const dur = effects.fast ? 2 + Math.random() : 4 + Math.random() * 3;
+        flake.style.left = `${Math.random() * 100}%`;
+        flake.style.width = flake.style.height = `${3 + Math.random() * 3}px`;
+        flake.style.animationDuration = `${dur}s`;
+        flake.style.animationDelay = `-${Math.random() * dur}s`;
+        bg.appendChild(flake);
+      }
+    }
+    if (effects.lightning) {
+      const flash = document.createElement("div");
+      flash.className = "weather-flash";
+      bg.appendChild(flash);
+    }
+    return bg;
+  }
+
+  const WEATHER_CLOUD_SHAPE =
+    '<ellipse cx="38" cy="60" rx="24" ry="16"/><circle cx="60" cy="46" r="18"/><circle cx="42" cy="38" r="14"/><rect x="24" y="52" width="52" height="22" rx="11"/>';
+  const WEATHER_STROKE_BASE = 'fill="none" stroke="currentColor" stroke-linecap="round"';
+
+  function weatherIconWrap(inner) {
+    return `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`;
+  }
+  function weatherSunRays(count, innerR, outerR, cx, cy) {
+    let s = "";
+    for (let i = 0; i < count; i++) {
+      s += `<line x1="${cx}" y1="${cy - outerR}" x2="${cx}" y2="${cy - innerR}" transform="rotate(${(360 / count) * i} ${cx} ${cy})"/>`;
+    }
+    return s;
+  }
+  function weatherRainLines(xs, y1, y2) {
+    return xs.map((x) => `<line x1="${x}" y1="${y1}" x2="${x - 6}" y2="${y2}"/>`).join("");
+  }
+  function weatherSnowflakes(xs, cy, r) {
+    let s = "";
+    for (const cx of xs) {
+      for (let i = 0; i < 3; i++) {
+        s += `<line x1="${cx}" y1="${cy - r}" x2="${cx}" y2="${cy + r}" transform="rotate(${i * 60} ${cx} ${cy})"/>`;
+      }
+    }
+    return s;
+  }
+  function weatherPellets(xs, cy, r) {
+    return xs.map((x) => `<circle cx="${x}" cy="${cy}" r="${r}"/>`).join("");
+  }
+
+  function weatherIconSvg(category) {
+    const cloud = `<g fill="currentColor">${WEATHER_CLOUD_SHAPE}</g>`;
+    switch (category) {
+      case "sunny":
+        return weatherIconWrap(
+          `<g class="weather-icon-sun-rays" ${WEATHER_STROKE_BASE} stroke-width="6">${weatherSunRays(8, 26, 38, 50, 50)}</g>` +
+            `<circle cx="50" cy="50" r="22" fill="currentColor"/>`,
+        );
+      case "partly-cloudy":
+        return weatherIconWrap(
+          `<g class="weather-icon-sun-rays" ${WEATHER_STROKE_BASE} stroke-width="5">${weatherSunRays(8, 16, 26, 40, 38)}</g>` +
+            `<circle cx="40" cy="38" r="14" fill="currentColor"/>` +
+            `<g fill="currentColor" transform="translate(8,10)">${WEATHER_CLOUD_SHAPE}</g>`,
+        );
+      case "cloudy":
+        return weatherIconWrap(`<g fill="currentColor" opacity="0.55" transform="translate(-10,-14) scale(0.85)">${WEATHER_CLOUD_SHAPE}</g>${cloud}`);
+      case "overcast":
+        return weatherIconWrap(
+          `<g fill="currentColor" opacity="0.5" transform="translate(-12,-16) scale(0.85)">${WEATHER_CLOUD_SHAPE}</g>` +
+            `<g fill="currentColor" opacity="0.85">${WEATHER_CLOUD_SHAPE}</g>`,
+        );
+      case "fog":
+        return weatherIconWrap(
+          `<g fill="currentColor" opacity="0.7" transform="translate(0,-10) scale(1,0.85)">${WEATHER_CLOUD_SHAPE}</g>` +
+            `<g ${WEATHER_STROKE_BASE} stroke-width="4"><line x1="20" y1="82" x2="80" y2="82"/><line x1="26" y1="90" x2="74" y2="90"/></g>`,
+        );
+      case "showers":
+        return weatherIconWrap(`${cloud}<g ${WEATHER_STROKE_BASE} stroke-width="5">${weatherRainLines([40, 60], 76, 90)}</g>`);
+      case "rain":
+        return weatherIconWrap(`${cloud}<g ${WEATHER_STROKE_BASE} stroke-width="5">${weatherRainLines([32, 50, 68], 76, 92)}</g>`);
+      case "snow":
+        return weatherIconWrap(`${cloud}<g ${WEATHER_STROKE_BASE} stroke-width="4">${weatherSnowflakes([34, 50, 66], 84, 7)}</g>`);
+      case "thunderstorm":
+        return weatherIconWrap(
+          `<g fill="currentColor" opacity="0.85">${WEATHER_CLOUD_SHAPE}</g>` +
+            `<g ${WEATHER_STROKE_BASE} stroke-width="5">${weatherRainLines([30, 68], 76, 90)}</g>` +
+            `<path d="M56 58 L42 82 L52 82 L44 100 L68 72 L54 72 Z" fill="currentColor"/>`,
+        );
+      case "ice-pellets":
+        return weatherIconWrap(`${cloud}<g fill="currentColor">${weatherPellets([34, 50, 66], 84, 4)}</g>`);
+      default:
+        return weatherIconWrap(`${cloud}<text x="50" y="90" font-size="22" text-anchor="middle" fill="currentColor">?</text>`);
+    }
+  }
+
+  // 一排小圖示（今天剩下的時段／未來預報），`kind` 決定溫度怎麼顯示
+  // （單一氣溫 vs 氣溫範圍）跟沒有資料時的提示文字。
+  function renderWeatherForecastRow(rowEl, items, kind) {
+    rowEl.innerHTML = "";
+    if (items.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "weather-forecast-empty";
+      empty.textContent = kind === "hour" ? "(今天沒有更多預報時段)" : "(沒有未來預報資料)";
+      rowEl.appendChild(empty);
+      return;
+    }
+    const track = document.createElement("div");
+    track.className = "weather-forecast-track";
+    for (const item of items) {
+      const el = document.createElement("div");
+      el.className = "weather-forecast-item";
+      const icon = document.createElement("span");
+      icon.className = "weather-forecast-icon";
+      icon.innerHTML = weatherIconSvg(item.category);
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = item.label;
+      const temp = document.createElement("span");
+      temp.className = "temp";
+      temp.textContent = kind === "hour" ? `${item.temp_c}°` : `${item.min_c}~${item.max_c}°`;
+      const rain = document.createElement("span");
+      rain.className = "rain";
+      rain.textContent = `${item.chance_of_rain}%`;
+      el.appendChild(icon);
+      el.appendChild(label);
+      el.appendChild(temp);
+      el.appendChild(rain);
+      track.appendChild(el);
+    }
+    rowEl.appendChild(track);
+  }
+
+  // 建立 weather 分頁：定期打 `/api/weather/list` 拿目前所有地點的結構化天氣
+  // 資料。清單畫面點一個地區就進 detail 顯示完整資訊，`selectedKey` 只在
+  // 使用者點過清單之後才有值——一開始停在清單畫面，不會自動跳去 detail。
+  function startWeatherTab(container) {
+    const ld = createListDetailView(container);
+    let stopped = false;
+    let locations = [];
+    let selectedKey = null;
+
+    function renderList() {
+      ld.listEl.innerHTML = "";
+      for (const loc of locations) {
+        const row = document.createElement("div");
+        row.className = "weather-loc-row";
+        const icon = document.createElement("span");
+        icon.className = "weather-loc-icon";
+        icon.innerHTML = weatherIconSvg(loc.now ? loc.now.category : "unknown");
+        const name = document.createElement("span");
+        name.className = "weather-loc-name";
+        name.textContent = loc.place;
+        const temp = document.createElement("span");
+        temp.className = "weather-loc-temp";
+        temp.textContent = loc.now ? `${loc.now.temp_c}°` : "…";
+        row.appendChild(icon);
+        row.appendChild(name);
+        row.appendChild(temp);
+        row.addEventListener("click", () => {
+          selectedKey = loc.key;
+          renderDetail();
+          ld.showDetail();
+        });
+        ld.listEl.appendChild(row);
+      }
+    }
+
+    function renderDetail() {
+      ld.detailBody.innerHTML = "";
+      const loc = locations.find((l) => l.key === selectedKey);
+      if (!loc) return;
+      const main = document.createElement("div");
+      main.className = "weather-detail-content";
+      const category = loc.now ? loc.now.category : "unknown";
+      main.appendChild(buildWeatherBackground(category));
+
+      const hero = document.createElement("div");
+      hero.className = "weather-hero";
+      const icon = document.createElement("div");
+      icon.className = "weather-hero-icon";
+      icon.innerHTML = weatherIconSvg(category);
+      hero.appendChild(icon);
+
+      if (loc.status) {
+        const desc = document.createElement("div");
+        desc.className = "weather-hero-desc";
+        desc.textContent = loc.status;
+        hero.appendChild(desc);
+        main.appendChild(hero);
+        ld.detailBody.appendChild(main);
+        return;
+      }
+
+      const time = document.createElement("div");
+      time.className = "weather-hero-time";
+      time.textContent = `當地時間 ${loc.now.local_time}`;
+      const temp = document.createElement("div");
+      temp.className = "weather-hero-temp";
+      temp.textContent = `${loc.now.temp_c}°C`;
+      const desc = document.createElement("div");
+      desc.className = "weather-hero-desc";
+      desc.textContent = WEATHER_LABELS[category] || category;
+      const sub = document.createElement("div");
+      sub.className = "weather-hero-sub";
+      sub.textContent = `體感 ${loc.now.feels_like_c}° · 濕度 ${loc.now.humidity}% · 降雨機率 ${loc.now.chance_of_rain}%`;
+      hero.appendChild(time);
+      hero.appendChild(temp);
+      hero.appendChild(desc);
+      hero.appendChild(sub);
+      main.appendChild(hero);
+
+      const todaySection = document.createElement("div");
+      todaySection.className = "weather-forecast-section";
+      const todayLabel = document.createElement("div");
+      todayLabel.className = "weather-forecast-label";
+      todayLabel.textContent = "今天";
+      const todayRow = document.createElement("div");
+      todayRow.className = "weather-forecast-row";
+      todaySection.appendChild(todayLabel);
+      todaySection.appendChild(todayRow);
+      main.appendChild(todaySection);
+      renderWeatherForecastRow(todayRow, loc.today, "hour");
+
+      const daysSection = document.createElement("div");
+      daysSection.className = "weather-forecast-section";
+      const daysLabel = document.createElement("div");
+      daysLabel.className = "weather-forecast-label";
+      daysLabel.textContent = "未來預報";
+      const daysRow = document.createElement("div");
+      daysRow.className = "weather-forecast-row";
+      daysSection.appendChild(daysLabel);
+      daysSection.appendChild(daysRow);
+      main.appendChild(daysSection);
+      renderWeatherForecastRow(daysRow, loc.days, "day");
+
+      ld.detailBody.appendChild(main);
+    }
+
+    async function poll() {
+      if (stopped) return;
+      try {
+        const res = await fetch("/api/weather/list");
+        locations = await res.json();
+      } catch (_err) {
+        return; // 這次沒抓到就算了，下一輪 poll 再試。
+      }
+      renderList();
+      if (selectedKey !== null && locations.some((l) => l.key === selectedKey)) {
+        renderDetail();
+      }
+    }
+
+    poll();
+    const intervalId = setInterval(poll, WEATHER_POLL_MS);
+
+    return function stop() {
+      stopped = true;
+      clearInterval(intervalId);
+    };
+  }
+
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const TOPOLOGY_POLL_MS = 2500;
+
+  // 合併 `/api/device/list`（本地 domain）跟 `/api/global/list`（`domain`
+  // 設定過的話包含本地 domain + 其他 domain 透過 MQTT 收到的）成一份節點
+  // 清單，跟 tablet/桌面版 `fetchTopologyNodes` 同一份邏輯（這裡各自一份，
+  // 見 spec 的取捨說明）。
+  async function fetchTopologyNodes() {
+    let deviceList = [];
+    let globalList = [];
+    try {
+      [deviceList, globalList] = await Promise.all([
+        fetch("/api/device/list").then((r) => r.json()),
+        fetch("/api/global/list").then((r) => r.json()),
+      ]);
+    } catch (_err) {
+      return new Map();
+    }
+    const nodes = new Map();
+    for (const item of globalList) {
+      const key = `${item.domain}/${item.report.id}`;
+      nodes.set(key, { key, domain: item.domain, report: item.report, ageSecs: item.age_secs });
+    }
+    const idsFromGlobal = new Set([...nodes.values()].map((n) => n.report.id));
+    for (const item of deviceList) {
+      if (idsFromGlobal.has(item.report.id)) continue;
+      const key = `local/${item.report.id}`;
+      nodes.set(key, { key, domain: null, report: item.report, ageSecs: item.age_secs });
+    }
+    return nodes;
+  }
+
+  // 邊代表「設定上的關係」，不即時驗證真的連上：每個 `mode === "server"`
+  // 的節點都連去一個共用的 `"broker"` 節點；每個 `report.server_addr` 有值
+  // 的節點，連去 ip 等於那個值的節點（找不到就不畫這條線）。
+  function computeTopologyEdges(nodes) {
+    const byIp = new Map();
+    for (const n of nodes.values()) byIp.set(n.report.ip, n.key);
+    const edges = [];
+    let hasServer = false;
+    for (const n of nodes.values()) {
+      if (n.report.mode === "server") {
+        hasServer = true;
+        edges.push({ from: n.key, to: "broker" });
+      }
+      if (n.report.server_addr) {
+        const targetKey = byIp.get(n.report.server_addr);
+        if (targetKey && targetKey !== n.key) edges.push({ from: n.key, to: targetKey });
+      }
+    }
+    return { edges, hasServer };
+  }
+
+  // 建立 topology 分頁：定期 poll 上面兩個端點合併節點、依角色（broker/
+  // server/client）＋ domain 直接算出固定座標，跟 tablet/桌面版同一套演算法
+  // （各自一份程式碼）。節點資訊改成點一下彈 modal（觸控裝置沒有可靠的
+  // hover），回傳 `stop` 函式，切分頁時呼叫，清掉 interval。
+  function startTopologyTab(container) {
+    const wrap = document.createElement("div");
+    wrap.id = "topology-wrap";
+    const svg = document.createElementNS(SVGNS, "svg");
+    svg.setAttribute("class", "topology-svg");
+    const domainLayer = document.createElementNS(SVGNS, "g");
+    const edgeLayer = document.createElementNS(SVGNS, "g");
+    const nodeLayer = document.createElementNS(SVGNS, "g");
+    svg.appendChild(domainLayer);
+    svg.appendChild(edgeLayer);
+    svg.appendChild(nodeLayer);
+    const overlay = document.createElement("div");
+    overlay.className = "topology-modal-overlay";
+    const modal = document.createElement("div");
+    modal.className = "topology-modal";
+    const modalText = document.createElement("div");
+    const modalCloseBtn = document.createElement("button");
+    modalCloseBtn.textContent = "關閉";
+    modal.appendChild(modalText);
+    modal.appendChild(modalCloseBtn);
+    overlay.appendChild(modal);
+    wrap.appendChild(svg);
+    wrap.appendChild(overlay);
+    container.appendChild(wrap);
+
+    const sim = { nodes: new Map(), edges: [] };
+    const domainEls = new Map();
+    const edgeEls = new Map();
+    const nodeEls = new Map();
+
+    function panelSize() {
+      const rect = svg.getBoundingClientRect();
+      return { width: rect.width || 400, height: rect.height || 300 };
+    }
+
+    // 依角色＋domain 算出每個節點的固定座標：broker 置中最上排；具名 domain
+    // 依名稱排序由左到右各佔一欄，不知道 domain 名稱的節點（`local/${id}`）
+    // 另成一欄排在最後；欄內 server 排在上、client（含 standalone）排在下，
+    // 同排多個節點在欄寬內水平等距展開。回傳 `Map<key, {x, y}>`（`key` 是
+    // 節點 key 或 `"broker"`）。
+    function computeLayout(nodesData, hasServer, width, height) {
+      const domainOrder = [];
+      const domainMembers = new Map();
+      const localMembers = [];
+      for (const n of nodesData.values()) {
+        if (n.domain) {
+          if (!domainMembers.has(n.domain)) {
+            domainMembers.set(n.domain, []);
+            domainOrder.push(n.domain);
+          }
+          domainMembers.get(n.domain).push(n);
+        } else {
+          localMembers.push(n);
+        }
+      }
+      domainOrder.sort();
+      const columns = domainOrder.map((d) => domainMembers.get(d));
+      if (localMembers.length > 0) columns.push(localMembers);
+
+      const positions = new Map();
+      const brokerY = height * 0.2;
+      const serverRowY = height * 0.5;
+      const clientRowY = height * 0.8;
+
+      if (hasServer) positions.set("broker", { x: width / 2, y: brokerY });
+
+      const colWidth = columns.length > 0 ? width / columns.length : width;
+      columns.forEach((members, colIndex) => {
+        const colCenterX = colWidth * (colIndex + 0.5);
+        const servers = members.filter((n) => n.report.mode === "server");
+        const clients = members.filter((n) => n.report.mode !== "server");
+        const spread = (list, y) => {
+          const step = list.length > 1 ? Math.min(70, (colWidth - 44) / (list.length - 1)) : 0;
+          list.forEach((n, i) => {
+            const offset = (i - (list.length - 1) / 2) * step;
+            positions.set(n.key, { x: colCenterX + offset, y });
+          });
+        };
+        spread(servers, serverRowY);
+        spread(clients, clientRowY);
+      });
+
+      return positions;
+    }
+
+    // 把 poll 拿到的節點集合套進 `sim.nodes`：消失的節點移除，新出現的節點
+    // 用 `computeLayout` 算出的座標建立，本來就有的節點座標也用最新算出的
+    // 值覆蓋（固定佈局每次 poll 都是同一套規則重算，不保留舊座標）。
+    function applyPoll(nodesData, hasServer, width, height) {
+      const layout = computeLayout(nodesData, hasServer, width, height);
+      const wanted = new Set(nodesData.keys());
+      if (hasServer) wanted.add("broker");
+      for (const key of [...sim.nodes.keys()]) {
+        if (!wanted.has(key)) sim.nodes.delete(key);
+      }
+      for (const key of wanted) {
+        const pos = layout.get(key) || { x: width / 2, y: height / 2 };
+        let n = sim.nodes.get(key);
+        if (!n) {
+          n = { x: pos.x, y: pos.y, isBroker: key === "broker", data: null };
+          sim.nodes.set(key, n);
+        } else {
+          n.x = pos.x;
+          n.y = pos.y;
+        }
+        if (key !== "broker") n.data = nodesData.get(key);
+      }
+    }
+
+    function isAlive(n) {
+      return !!n.data && n.data.ageSecs * 1000 < ALIVE_TTL_MS;
+    }
+
+    function roleColor(mode) {
+      if (mode === "server") return "#6f9dff";
+      if (mode === "client") return "#4caf7d";
+      return "#5a6272";
+    }
+
+    function showNodeModal(key) {
+      const n = sim.nodes.get(key);
+      if (!n || n.isBroker || !n.data) return;
+      const r = n.data.report;
+      const alive = isAlive(n) ? "是" : "否";
+      modalText.textContent =
+        `id: ${r.id}\nip: ${r.ip}\nos: ${r.os}\nversion: ${r.version}\nmode: ${r.mode}\n` +
+        `device uptime: ${formatUptimeJs(r.device_uptime_secs)}\napp uptime: ${formatUptimeJs(r.app_uptime_secs)}\n` +
+        `disk: ${formatDiskJs(r.disk_free_bytes, r.disk_total_bytes)}\nalive: ${alive}`;
+      overlay.classList.add("open");
+    }
+    function hideNodeModal() {
+      overlay.classList.remove("open");
+    }
+    modalCloseBtn.addEventListener("click", hideNodeModal);
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) hideNodeModal();
+    });
+
+    function buildNodeEl(key, n) {
+      const group = document.createElementNS(SVGNS, "g");
+      group.setAttribute("class", "topology-node");
+      let shape;
+      if (n.isBroker) {
+        shape = document.createElementNS(SVGNS, "polygon");
+        shape.setAttribute("class", "topology-broker");
+        shape.setAttribute("points", "0,-20 17,-10 17,10 0,20 -17,10 -17,-10");
+      } else {
+        shape = document.createElementNS(SVGNS, "circle");
+        shape.setAttribute("r", "18");
+      }
+      group.appendChild(shape);
+      const label = document.createElementNS(SVGNS, "text");
+      label.setAttribute("class", "topology-node-label");
+      label.setAttribute("y", "32");
+      group.appendChild(label);
+      nodeLayer.appendChild(group);
+      group.addEventListener("click", () => showNodeModal(key));
+      return { group, shape, label };
+    }
+
+    function render() {
+      const groups = new Map();
+      for (const [, n] of sim.nodes) {
+        if (n.isBroker || !n.data || !n.data.domain) continue;
+        if (!groups.has(n.data.domain)) groups.set(n.data.domain, []);
+        groups.get(n.data.domain).push(n);
+      }
+      const seenDomains = new Set();
+      for (const [domain, members] of groups) {
+        seenDomains.add(domain);
+        const pad = 30;
+        const xs = members.map((m) => m.x);
+        const ys = members.map((m) => m.y);
+        const x = Math.min(...xs) - pad;
+        const y = Math.min(...ys) - pad;
+        const w = Math.max(...xs) - Math.min(...xs) + pad * 2;
+        const h = Math.max(...ys) - Math.min(...ys) + pad * 2;
+        let box = domainEls.get(domain);
+        if (!box) {
+          box = { rect: document.createElementNS(SVGNS, "rect"), label: document.createElementNS(SVGNS, "text") };
+          box.rect.setAttribute("class", "topology-domain-box");
+          box.label.setAttribute("class", "topology-domain-label");
+          domainLayer.appendChild(box.rect);
+          domainLayer.appendChild(box.label);
+          domainEls.set(domain, box);
+        }
+        box.rect.setAttribute("x", x);
+        box.rect.setAttribute("y", y);
+        box.rect.setAttribute("width", w);
+        box.rect.setAttribute("height", h);
+        box.rect.setAttribute("rx", 12);
+        box.label.setAttribute("x", x + 8);
+        box.label.setAttribute("y", y + 16);
+        box.label.textContent = domain;
+      }
+      for (const [domain, box] of [...domainEls]) {
+        if (!seenDomains.has(domain)) {
+          box.rect.remove();
+          box.label.remove();
+          domainEls.delete(domain);
+        }
+      }
+
+      const seenEdges = new Set();
+      for (const edge of sim.edges) {
+        const a = sim.nodes.get(edge.from);
+        const b = sim.nodes.get(edge.to);
+        if (!a || !b) continue;
+        const ekey = `${edge.from}|${edge.to}`;
+        seenEdges.add(ekey);
+        let line = edgeEls.get(ekey);
+        if (!line) {
+          line = document.createElementNS(SVGNS, "line");
+          line.setAttribute("class", "topology-edge");
+          edgeLayer.appendChild(line);
+          edgeEls.set(ekey, line);
+        }
+        line.setAttribute("x1", a.x);
+        line.setAttribute("y1", a.y);
+        line.setAttribute("x2", b.x);
+        line.setAttribute("y2", b.y);
+      }
+      for (const [ekey, line] of [...edgeEls]) {
+        if (!seenEdges.has(ekey)) {
+          line.remove();
+          edgeEls.delete(ekey);
+        }
+      }
+
+      const seenNodes = new Set();
+      for (const [key, n] of sim.nodes) {
+        seenNodes.add(key);
+        let el = nodeEls.get(key);
+        if (!el) {
+          el = buildNodeEl(key, n);
+          nodeEls.set(key, el);
+        }
+        el.group.setAttribute("transform", `translate(${n.x},${n.y})`);
+        if (n.isBroker) {
+          el.label.textContent = "MQTT broker";
+        } else if (n.data) {
+          const alive = isAlive(n);
+          el.shape.setAttribute("fill", alive ? roleColor(n.data.report.mode) : "#3a4150");
+          el.shape.setAttribute("stroke", alive ? "none" : "#6b7280");
+          el.shape.setAttribute("stroke-width", alive ? "0" : "2");
+          el.shape.setAttribute("stroke-dasharray", alive ? "0" : "3,3");
+          el.label.textContent = n.data.report.id;
+        }
+      }
+      for (const [key, el] of [...nodeEls]) {
+        if (!seenNodes.has(key)) {
+          el.group.remove();
+          nodeEls.delete(key);
+        }
+      }
+    }
+
+    // 上一次 poll 拿到的節點資料，給 `onResize` 在不打網路請求的情況下
+    // 重算佈局用（見下面 `onResize` 的說明）。
+    let lastNodesData = null;
+    let lastHasServer = false;
+
+    async function pollOnce() {
+      const nodesData = await fetchTopologyNodes();
+      const { edges, hasServer } = computeTopologyEdges(nodesData);
+      lastNodesData = nodesData;
+      lastHasServer = hasServer;
+      const { width, height } = panelSize();
+      applyPoll(nodesData, hasServer, width, height);
+      sim.edges = edges;
+      render();
+    }
+
+    // 螢幕轉向/尺寸改變時，固定式佈局是依目前尺寸算出來的，尺寸一變就該
+    // 立刻重新排版，不用等到下一次 poll——用上一次 poll 拿到的節點資料重算
+    // 座標、重繪即可，不需要為了單純的版面調整重新打一次網路請求。
+    function onResize() {
+      if (!lastNodesData) return;
+      const { width, height } = panelSize();
+      applyPoll(lastNodesData, lastHasServer, width, height);
+      render();
+    }
+    const resizeObserver = new ResizeObserver(onResize);
+    resizeObserver.observe(svg);
+
+    pollOnce();
+    const intervalId = setInterval(pollOnce, TOPOLOGY_POLL_MS);
+
+    return function stop() {
+      clearInterval(intervalId);
+      resizeObserver.disconnect();
+    };
+  }
+
+  // system 分頁沿用桌面版既有的純文字 panel 機制
+  // （`/api/panel/<name>/stream`），內容原樣顯示，不需要清單/詳細畫面。
+  function makePlainPanelTab(panelName) {
+    return function start(container) {
+      const pre = document.createElement("pre");
+      pre.className = "plain-panel";
+      pre.textContent = "(等待資料...)";
+      container.appendChild(pre);
+      const es = new EventSource(`/api/panel/${encodeURIComponent(panelName)}/stream`);
+      es.onmessage = (e) => {
+        try {
+          pre.textContent = JSON.parse(e.data);
+        } catch (_err) {
+          pre.textContent = e.data;
+        }
+      };
+      return function stop() {
+        es.close();
+      };
+    };
+  }
+
+  // player 分頁：跟 tablet 版player分頁同一套邏輯（檔案清單＋刪除＋
+  // YouTube 網址下載、封面/歌詞/頻譜/放射狀頻譜循環顯示、播放模式、Media
+  // Session），這裡各自一份。跟終端機共用同一個 Shell，下載按鈕送出去的
+  // 指令（`plugin enter music` -> `download ...` -> `~`）會直接影響後端
+  // 狀態。
+  async function execLine(line) {
+    const res = await fetch("/api/exec", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ line }),
+    });
+    return res.json();
+  }
+
+  // 定期打 `/api/music/files` 拿目前 `music/` 資料夾裡的檔案清單，畫成一列
+  // 一列。跟 tablet 版不一樣的地方：點整列（不是一顆小小的播放圖示）就
+  // 播放＋直接跳去詳細畫面（`ld.showDetail()`），符合手機音樂 app「點歌名
+  // 就播放並看到播放畫面」的直覺，也不用在小螢幕上瞄準一顆小圖示。
+  function startMusicFileBrowser(musicUi, ld) {
+    async function refresh() {
+      try {
+        const res = await fetch("/api/music/files");
+        const names = await res.json();
+        renderMusicFiles(musicUi, names, refresh, ld);
+      } catch (_err) {
+        // 這次沒抓到就算了，下一次 poll 再試，不用跳錯誤訊息干擾畫面。
+      }
+    }
+    refresh();
+    const timer = setInterval(refresh, 3000);
+    musicUi.stopPolling = () => clearInterval(timer);
+  }
+
+  // 秒數轉成「分:秒」，超過一小時才會多帶一段（"1:05:00"）。
+  function formatTime(seconds) {
+    const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    const paddedSecs = String(secs).padStart(2, "0");
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, "0")}:${paddedSecs}`;
+    }
+    return `${minutes}:${paddedSecs}`;
+  }
+
+  function updateTimeLabel(musicUi) {
+    if (!musicUi.timeLabel) return;
+    musicUi.timeLabel.textContent = `${formatTime(musicUi.player.currentTime)}/${formatTime(musicUi.player.duration)}`;
+  }
+
+  // 播放清單靠「目前正在播的檔名」而不是數字索引記位置，清單每 3 秒重新
+  // 抓一次，中間有檔案被加入/刪除也不會對錯歌。
+  function playByName(musicUi, name) {
+    musicUi.currentName = name;
+    musicUi.player.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
+    musicUi.player.play();
+    const activeRow = highlightPlaying(musicUi);
+    if (activeRow) {
+      activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+    if (musicUi.cover) {
+      musicUi.cover.removeAttribute("src");
+      musicUi.cover.src = `/api/music/file/${encodeURIComponent(name)}/cover`;
+    }
+    if (musicUi.trackName) {
+      musicUi.trackName.textContent = name;
+    }
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: name,
+        artwork: [{ src: `/api/music/file/${encodeURIComponent(name)}/cover` }],
+      });
+    }
+    if (musicUi.seekBar) {
+      musicUi.seekBar.max = "0";
+      musicUi.seekBar.value = "0";
+      updateTimeLabel(musicUi);
+    }
+    if (musicUi.lyricsEl) {
+      fetch(`/api/music/file/${encodeURIComponent(name)}/lyrics`)
+        .then((res) => (res.ok ? res.json() : []))
+        .then((lines) => renderLyrics(musicUi, lines))
+        .catch(() => renderLyrics(musicUi, []));
+    }
+    if (musicUi.updateNowPlaying) musicUi.updateNowPlaying();
+  }
+
+  function renderLyrics(musicUi, lines) {
+    musicUi.lyricsLines = lines;
+    musicUi.lyricsActiveIndex = -1;
+    musicUi.lyricsEl.innerHTML = "";
+    if (lines.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "player-lyrics-empty";
+      empty.textContent = "(沒有歌詞)";
+      musicUi.lyricsEl.appendChild(empty);
+      return;
+    }
+    for (const line of lines) {
+      const div = document.createElement("div");
+      div.className = "player-lyric-line";
+      div.textContent = line.text;
+      musicUi.lyricsEl.appendChild(div);
+    }
+  }
+
+  function scrollActiveLyricIntoView(musicUi) {
+    const rows = musicUi.lyricsEl.children;
+    const idx = musicUi.lyricsActiveIndex;
+    if (idx >= 0 && rows[idx]) {
+      rows[idx].scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+
+  function updateLyricsHighlight(musicUi) {
+    const lines = musicUi.lyricsLines;
+    if (!musicUi.lyricsEl || !lines || lines.length === 0) return;
+    const t = musicUi.player.currentTime;
+    let idx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].start <= t) idx = i;
+      else break;
+    }
+    if (idx === musicUi.lyricsActiveIndex) return;
+    musicUi.lyricsActiveIndex = idx;
+    const rows = musicUi.lyricsEl.children;
+    for (let i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle("active", i === idx);
+    }
+    scrollActiveLyricIntoView(musicUi);
+  }
+
+  function offsetTrack(musicUi, delta) {
+    const idx = musicUi.playlist.indexOf(musicUi.currentName);
+    if (idx === -1) return;
+    const next = idx + delta;
+    if (next >= 0 && next < musicUi.playlist.length) {
+      playByName(musicUi, musicUi.playlist[next]);
+    }
+  }
+
+  function playRandomOther(musicUi) {
+    const others = musicUi.playlist.filter((name) => name !== musicUi.currentName);
+    if (others.length > 0) {
+      playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
+    } else if (musicUi.playlist.length > 0) {
+      musicUi.player.currentTime = 0;
+      musicUi.player.play();
+    }
+  }
+
+  function goToNextTrack(musicUi) {
+    if (musicUi.playMode === "shuffle") {
+      playRandomOther(musicUi);
+    } else {
+      offsetTrack(musicUi, 1);
+    }
+  }
+
+  function advanceOnEnded(musicUi) {
+    if (musicUi.playMode === "single") {
+      musicUi.player.currentTime = 0;
+      musicUi.player.play();
+      return;
+    }
+    if (musicUi.playMode === "shuffle") {
+      playRandomOther(musicUi);
+      return;
+    }
+    offsetTrack(musicUi, 1);
+  }
+
+  function highlightPlaying(musicUi) {
+    // player 分頁沒開著的時候 `musicUi.fileList` 是 `null`——播放狀態
+    // （`ended` 自動接歌、Media Session 的上一首/下一首）在分頁沒開著時
+    // 一樣會呼叫到這裡，這時候沒有清單 DOM 可以反白，直接跳過。
+    if (!musicUi.fileList) return null;
+    let activeRow = null;
+    for (const row of musicUi.fileList.children) {
+      const isActive = row.dataset.name === musicUi.currentName;
+      row.classList.toggle("playing", isActive);
+      if (isActive) activeRow = row;
+    }
+    return activeRow;
+  }
+
+  // 跟 tablet 版不一樣：整列可點（播放＋跳詳細畫面），只留一顆刪除按鈕
+  // （`stopPropagation`，不然點刪除也會觸發整列的播放行為）。
+  function renderMusicFiles(musicUi, names, refresh, ld) {
+    musicUi.playlist = names;
+    musicUi.fileList.innerHTML = "";
+    musicUi.fileCount.textContent = `共 ${names.length} 首`;
+    if (names.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "music-empty";
+      empty.textContent = "(還沒有下載任何檔案)";
+      musicUi.fileList.appendChild(empty);
+      return;
+    }
+    for (const name of names) {
+      const row = document.createElement("div");
+      row.className = "music-row";
+      row.dataset.name = name;
+      const label = document.createElement("span");
+      label.className = "music-name";
+      label.textContent = name;
+      label.title = name;
+
+      const delBtn = document.createElement("button");
+      delBtn.textContent = "🗑";
+      delBtn.title = "刪除";
+      delBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (!window.confirm(`刪除「${name}」？`)) return;
+        await fetch(`/api/music/file/${encodeURIComponent(name)}`, { method: "DELETE" });
+        refresh();
+      });
+
+      row.appendChild(label);
+      row.appendChild(delBtn);
+      row.addEventListener("click", () => {
+        playByName(musicUi, name);
+        ld.showDetail();
+      });
+      musicUi.fileList.appendChild(row);
+    }
+    highlightPlaying(musicUi);
+  }
+
+  // player 的核心播放狀態（`<audio>` 元素本身、播放清單、目前播放中的檔名、
+  // 播放模式）建立一次、掛在 `document.body` 底下，不隨分頁切換而重建或
+  // 移除——切到 device/global/… 時 `switchTo` 會把 `#content` 整個清空，
+  // 如果 `<audio>` 元素也在裡面，會被當成從文件移除，播放跟著停掉。只有
+  // 畫面用的部分（檔案清單/封面/歌詞/頻譜/按鈕/Now Playing 米帶……）才隨
+  // 分頁切換（或分頁內部清單/詳細畫面切換）建立/拆掉，`musicUi.player`/
+  // `.playlist`/`.currentName`/`.playMode` 這幾個欄位跨分頁切換持續有效。
+  const PLAYER_SHUFFLE_ICON =
+    '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-0.125em">' +
+    '<path d="M4 7 L9 7 C12 7 12 17 15 17 L17 17"></path>' +
+    '<path d="M17 14 L21 17 L17 20"></path>' +
+    '<path d="M4 17 L9 17 C12 17 12 7 15 7 L17 7"></path>' +
+    '<path d="M17 4 L21 7 L17 10"></path>' +
+    "</svg>";
+  const PLAY_MODES = [
+    { mode: "sequential", icon: "⇉", title: "依序播放" },
+    { mode: "shuffle", icon: PLAYER_SHUFFLE_ICON, title: "隨機播放" },
+    { mode: "single", icon: "↻", title: "播放單首" },
+  ];
+  const PLAYER_TEXT_STYLE = "︎";
+
+  const player = document.createElement("audio");
+  // 沒有 `controls` 屬性的 `<audio>` 正常不會佔版面，但 `body` 是
+  // `display: flex; flex-direction: column`，這裡明講 `display: none`
+  // 保險一點，不要讓它變成一個多出來的 flex item 影響版面。
+  player.style.display = "none";
+  document.body.appendChild(player);
+  const musicUi = {
+    fileList: null,
+    fileCount: null,
+    player,
+    cover: null,
+    trackName: null,
+    seekBar: null,
+    timeLabel: null,
+    lyricsEl: null,
+    lyricsLines: [],
+    lyricsActiveIndex: -1,
+    playlist: [],
+    currentName: null,
+    playMode: PLAY_MODES[0].mode,
+    stopPolling: () => {},
+    updateNowPlaying: null,
+  };
+
+  // 自然播完、Media Session 的上一首/下一首/播放/暫停都是跟播放本身有關
+  // 的邏輯，不管 player 分頁有沒有開著都該生效，只註冊一次。
+  player.addEventListener("ended", () => advanceOnEnded(musicUi));
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.setActionHandler("play", () => player.play());
+    navigator.mediaSession.setActionHandler("pause", () => player.pause());
+    navigator.mediaSession.setActionHandler("previoustrack", () => offsetTrack(musicUi, -1));
+    navigator.mediaSession.setActionHandler("nexttrack", () => goToNextTrack(musicUi));
+    player.addEventListener("play", () => { navigator.mediaSession.playbackState = "playing"; });
+    player.addEventListener("pause", () => { navigator.mediaSession.playbackState = "paused"; });
+  }
+
+  // Web Audio 的 `AudioContext`/`MediaElementAudioSourceNode` 同一個道理要
+  // 跨分頁切換持續存在：`createMediaElementSource` 對同一個 `<audio>` 元素
+  // 只能呼叫一次，而且一旦呼叫過，這個元素的聲音輸出就永久改成透過這個
+  // audio graph 才聽得到——如果切走分頁時把 `audioCtx` 關掉，之後即使
+  // `<audio>` 元素本身還在播放，聲音也會變成啞的。所以這裡只在第一次真的
+  // 要畫頻譜/放射狀頻譜時建立，之後永遠留著、不主動關閉；分頁切換只需要
+  // 停掉畫布動畫的 `requestAnimationFrame` 迴圈，不要動 `playerAudioCtx`。
+  let playerAudioCtx = null;
+  let playerAnalyser = null;
+  let playerFreqData = null;
+  function ensurePlayerAnalyser() {
+    if (playerAudioCtx) return;
+    playerAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: "playback" });
+    const source = playerAudioCtx.createMediaElementSource(player);
+    playerAnalyser = playerAudioCtx.createAnalyser();
+    playerAnalyser.fftSize = 128;
+    const splitter = playerAudioCtx.createChannelSplitter(2);
+    const merger = playerAudioCtx.createChannelMerger(2);
+    source.connect(playerAnalyser);
+    playerAnalyser.connect(splitter);
+    splitter.connect(merger, 0, 0);
+    splitter.connect(merger, 1, 1);
+    merger.connect(playerAudioCtx.destination);
+    playerFreqData = new Uint8Array(playerAnalyser.frequencyBinCount);
+  }
+
+  // 建立 player 分頁：清單畫面（檔案清單＋YouTube 下載列＋底部 Now
+  // Playing 米帶）+ 詳細畫面（封面/歌詞/頻譜/放射狀頻譜循環、進度條、
+  // 播放模式/上一首/播放/下一首）。切走這個分頁（或在清單/詳細畫面之間
+  // 切換）只動畫面元素，不會暫停播放、也不會動模組層級的 `player`/
+  // `playerAudioCtx`——音樂會在切到其他分頁時繼續放，Media Session 的
+  // 鎖屏控制也才有意義。
+  function startPlayerTab(container) {
+    const ld = createListDetailView(container);
+
+    // ---- 清單畫面 ----
+    const listWrap = document.createElement("div");
+    listWrap.className = "player-list-wrap";
+    const fileList = document.createElement("div");
+    fileList.className = "music-files";
+    const downloadRow = document.createElement("div");
+    downloadRow.className = "player-download-row";
+    const fileCount = document.createElement("span");
+    fileCount.className = "player-file-count";
+    const urlInput = document.createElement("input");
+    urlInput.type = "text";
+    urlInput.placeholder = "YouTube 連結...";
+    urlInput.className = "player-url-input";
+    const downloadBtn = document.createElement("button");
+    downloadBtn.textContent = "Download";
+    downloadRow.appendChild(fileCount);
+    downloadRow.appendChild(urlInput);
+    downloadRow.appendChild(downloadBtn);
+    const nowPlaying = document.createElement("div");
+    nowPlaying.className = "player-now-playing";
+    const npName = document.createElement("span");
+    npName.className = "npname";
+    const npBtn = document.createElement("button");
+    nowPlaying.appendChild(npName);
+    nowPlaying.appendChild(npBtn);
+    listWrap.appendChild(fileList);
+    listWrap.appendChild(downloadRow);
+    listWrap.appendChild(nowPlaying);
+    ld.listEl.appendChild(listWrap);
+
+    function updateNowPlaying() {
+      if (musicUi.currentName) {
+        nowPlaying.style.display = "flex";
+        npName.textContent = musicUi.currentName;
+      } else {
+        nowPlaying.style.display = "none";
+      }
+      npBtn.textContent = (player.paused ? "▶" : "⏸") + PLAYER_TEXT_STYLE;
+    }
+    npBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (player.paused) player.play();
+      else player.pause();
+    });
+    nowPlaying.addEventListener("click", () => ld.showDetail());
+
+    // ---- 詳細畫面 ----
+    const right = document.createElement("div");
+    right.className = "player-detail-content";
+    const cover = document.createElement("img");
+    cover.className = "player-cover-slot player-cover";
+    cover.alt = "";
+    cover.title = "點一下切換：封面 → 歌詞 → 頻譜 → 放射狀頻譜";
+    cover.addEventListener("error", () => cover.removeAttribute("src"));
+    const lyricsEl = document.createElement("div");
+    lyricsEl.className = "player-cover-slot player-lyrics";
+    lyricsEl.title = cover.title;
+    const spectrum = document.createElement("canvas");
+    spectrum.className = "player-cover-slot player-spectrum";
+    spectrum.width = 220;
+    spectrum.height = 220;
+    spectrum.title = cover.title;
+    const radial = document.createElement("canvas");
+    radial.className = "player-cover-slot player-radial";
+    radial.width = 220;
+    radial.height = 220;
+    radial.title = cover.title;
+    const seekRow = document.createElement("div");
+    seekRow.className = "player-seek-row";
+    const seekBar = document.createElement("input");
+    seekBar.type = "range";
+    seekBar.className = "player-seek";
+    seekBar.min = "0";
+    seekBar.max = "0";
+    seekBar.value = "0";
+    seekBar.step = "0.1";
+    const timeLabel = document.createElement("span");
+    timeLabel.className = "player-time";
+    timeLabel.textContent = "0:00/0:00";
+    seekRow.appendChild(seekBar);
+    seekRow.appendChild(timeLabel);
+    const trackName = document.createElement("div");
+    trackName.className = "player-track-name";
+    trackName.textContent = "(尚未播放)";
+    const rightControls = document.createElement("div");
+    rightControls.className = "player-controls";
+    const currentMode = PLAY_MODES.find((m) => m.mode === musicUi.playMode) || PLAY_MODES[0];
+    const modeBtn = document.createElement("button");
+    modeBtn.className = "player-mode-btn";
+    modeBtn.innerHTML = currentMode.icon;
+    modeBtn.title = currentMode.title;
+    modeBtn.addEventListener("click", () => {
+      const idx = PLAY_MODES.findIndex((m) => m.mode === musicUi.playMode);
+      const next = PLAY_MODES[(idx + 1) % PLAY_MODES.length];
+      musicUi.playMode = next.mode;
+      modeBtn.innerHTML = next.icon;
+      modeBtn.title = next.title;
+    });
+    const prevBtn = document.createElement("button");
+    prevBtn.textContent = "⏮" + PLAYER_TEXT_STYLE;
+    prevBtn.title = "上一首";
+    const playPauseBtn = document.createElement("button");
+    playPauseBtn.textContent = (player.paused ? "▶" : "⏸") + PLAYER_TEXT_STYLE;
+    playPauseBtn.title = "播放/暫停";
+    const nextBtn = document.createElement("button");
+    nextBtn.textContent = "⏭" + PLAYER_TEXT_STYLE;
+    nextBtn.title = "下一首";
+    const transport = document.createElement("div");
+    transport.className = "player-transport";
+    transport.appendChild(prevBtn);
+    transport.appendChild(playPauseBtn);
+    transport.appendChild(nextBtn);
+    rightControls.appendChild(modeBtn);
+    rightControls.appendChild(transport);
+    right.appendChild(cover);
+    right.appendChild(lyricsEl);
+    right.appendChild(spectrum);
+    right.appendChild(radial);
+    right.appendChild(seekRow);
+    right.appendChild(trackName);
+    right.appendChild(rightControls);
+    ld.detailBody.appendChild(right);
+
+    // 接回模組層級的持久 `musicUi`：播放狀態（playlist/currentName/
+    // playMode）維持原樣，只換上這次畫面用的 DOM 元素。
+    musicUi.fileList = fileList;
+    musicUi.fileCount = fileCount;
+    musicUi.cover = cover;
+    musicUi.trackName = trackName;
+    musicUi.seekBar = seekBar;
+    musicUi.timeLabel = timeLabel;
+    musicUi.lyricsEl = lyricsEl;
+    musicUi.updateNowPlaying = updateNowPlaying;
+
+    // 音樂可能是在其他分頁時就已經開始播放/換歌了，剛打開這個分頁要把畫面
+    // 立刻同步成目前的實際播放狀態，不要空等下一次 `timeupdate`/檔案清單
+    // poll 才更新。
+    if (musicUi.currentName) {
+      trackName.textContent = musicUi.currentName;
+      cover.removeAttribute("src");
+      cover.src = `/api/music/file/${encodeURIComponent(musicUi.currentName)}/cover`;
+      renderLyrics(musicUi, musicUi.lyricsLines);
+    }
+    seekBar.max = String(player.duration || 0);
+    seekBar.value = String(player.currentTime || 0);
+    updateTimeLabel(musicUi);
+    updateNowPlaying();
+
+    let spectrumRafId = null;
+    let radialRafId = null;
+    const spectrumCtx = spectrum.getContext("2d");
+    const radialCtx = radial.getContext("2d");
+
+    const SPECTRUM_CELL_W = 8;
+    const SPECTRUM_CELL_H = 4;
+    const SPECTRUM_GAP = 2;
+    const SPECTRUM_PITCH_X = SPECTRUM_CELL_W + SPECTRUM_GAP;
+    const SPECTRUM_PITCH_Y = SPECTRUM_CELL_H + SPECTRUM_GAP;
+    const spectrumColumns = Math.max(1, Math.floor(spectrum.width / SPECTRUM_PITCH_X));
+    const spectrumRows = Math.max(1, Math.floor(spectrum.height / SPECTRUM_PITCH_Y));
+    const spectrumRowColors = Array.from({ length: spectrumRows }, (_, row) => {
+      const t = spectrumRows === 1 ? 0 : row / (spectrumRows - 1);
+      const r = t < 0.5 ? Math.round(255 * (t / 0.5)) : 255;
+      const g = t < 0.5 ? 255 : Math.round(255 * (1 - (t - 0.5) / 0.5));
+      return {
+        on: `rgb(${r}, ${g}, 0)`,
+        off: `rgba(${r}, ${g}, 0, 0.15)`,
+      };
+    });
+    function drawSpectrum() {
+      spectrumRafId = requestAnimationFrame(drawSpectrum);
+      playerAnalyser.getByteFrequencyData(playerFreqData);
+      const h = spectrum.height;
+      spectrumCtx.clearRect(0, 0, spectrum.width, h);
+      const binsPerColumn = playerFreqData.length / spectrumColumns;
+      for (let col = 0; col < spectrumColumns; col++) {
+        const from = Math.floor(col * binsPerColumn);
+        const to = Math.max(from + 1, Math.floor((col + 1) * binsPerColumn));
+        let sum = 0;
+        for (let i = from; i < to; i++) sum += playerFreqData[i];
+        const value = sum / (to - from) / 255;
+        const lit = Math.round(value * spectrumRows);
+        const x = col * SPECTRUM_PITCH_X;
+        for (let row = 0; row < spectrumRows; row++) {
+          const y = h - (row + 1) * SPECTRUM_PITCH_Y;
+          const colors = spectrumRowColors[row];
+          spectrumCtx.fillStyle = row < lit ? colors.on : colors.off;
+          spectrumCtx.fillRect(x, y, SPECTRUM_CELL_W, SPECTRUM_CELL_H);
+        }
+      }
+    }
+
+    const RADIAL_BAR_COUNT = 48;
+    const RADIAL_INNER_RADIUS = 40;
+    const RADIAL_MAX_LEN = 55;
+    const RADIAL_CX = radial.width / 2;
+    const RADIAL_CY = radial.height / 2;
+    const radialBarGradient = radialCtx.createRadialGradient(
+      RADIAL_CX,
+      RADIAL_CY,
+      RADIAL_INNER_RADIUS,
+      RADIAL_CX,
+      RADIAL_CY,
+      RADIAL_INNER_RADIUS + RADIAL_MAX_LEN,
+    );
+    radialBarGradient.addColorStop(0, "rgb(0, 255, 0)");
+    radialBarGradient.addColorStop(0.5, "rgb(255, 255, 0)");
+    radialBarGradient.addColorStop(1, "rgb(255, 0, 0)");
+    const RADIAL_RING_RADIUS = RADIAL_INNER_RADIUS - 4;
+    function drawRadial() {
+      radialRafId = requestAnimationFrame(drawRadial);
+      playerAnalyser.getByteFrequencyData(playerFreqData);
+      radialCtx.clearRect(0, 0, radial.width, radial.height);
+
+      const binsPerBar = playerFreqData.length / RADIAL_BAR_COUNT;
+      radialCtx.strokeStyle = radialBarGradient;
+      radialCtx.lineWidth = 3;
+      radialCtx.lineCap = "round";
+      for (let i = 0; i < RADIAL_BAR_COUNT; i++) {
+        const from = Math.floor(i * binsPerBar);
+        const to = Math.max(from + 1, Math.floor((i + 1) * binsPerBar));
+        let sum = 0;
+        for (let b = from; b < to; b++) sum += playerFreqData[b];
+        const value = sum / (to - from) / 255;
+        const angle = (i / RADIAL_BAR_COUNT) * Math.PI * 2 - Math.PI / 2;
+        const len = value * RADIAL_MAX_LEN;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+        radialCtx.beginPath();
+        radialCtx.moveTo(RADIAL_CX + cosA * RADIAL_INNER_RADIUS, RADIAL_CY + sinA * RADIAL_INNER_RADIUS);
+        radialCtx.lineTo(
+          RADIAL_CX + cosA * (RADIAL_INNER_RADIUS + len),
+          RADIAL_CY + sinA * (RADIAL_INNER_RADIUS + len),
+        );
+        radialCtx.stroke();
+      }
+
+      radialCtx.beginPath();
+      radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_INNER_RADIUS - 8, 0, Math.PI * 2);
+      radialCtx.fillStyle = "#0d0f13";
+      radialCtx.fill();
+
+      radialCtx.lineWidth = 3;
+      radialCtx.strokeStyle = "#3a4150";
+      radialCtx.beginPath();
+      radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, 0, Math.PI * 2);
+      radialCtx.stroke();
+      const duration = player.duration;
+      const progress =
+        Number.isFinite(duration) && duration > 0 ? Math.min(1, Math.max(0, player.currentTime / duration)) : 0;
+      if (progress > 0) {
+        radialCtx.strokeStyle = "#6f9dff";
+        radialCtx.beginPath();
+        radialCtx.arc(RADIAL_CX, RADIAL_CY, RADIAL_RING_RADIUS, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+        radialCtx.stroke();
+      }
+
+      radialCtx.fillStyle = "#d8dee9";
+      radialCtx.font = "16px sans-serif";
+      radialCtx.textAlign = "center";
+      radialCtx.textBaseline = "middle";
+      radialCtx.fillText(formatTime(player.currentTime), RADIAL_CX, RADIAL_CY);
+    }
+
+    function stopSpectrumAnim() {
+      if (spectrumRafId !== null) {
+        cancelAnimationFrame(spectrumRafId);
+        spectrumRafId = null;
+      }
+    }
+
+    function stopRadialAnim() {
+      if (radialRafId !== null) {
+        cancelAnimationFrame(radialRafId);
+        radialRafId = null;
+      }
+    }
+
+    const coverViews = [
+      { el: cover, onShow: () => {}, onHide: () => {} },
+      { el: lyricsEl, onShow: () => scrollActiveLyricIntoView(musicUi), onHide: () => {} },
+      {
+        el: spectrum,
+        onShow: () => {
+          ensurePlayerAnalyser();
+          playerAudioCtx.resume();
+          drawSpectrum();
+        },
+        onHide: stopSpectrumAnim,
+      },
+      {
+        el: radial,
+        onShow: () => {
+          ensurePlayerAnalyser();
+          playerAudioCtx.resume();
+          drawRadial();
+        },
+        onHide: stopRadialAnim,
+      },
+    ];
+    let coverViewIndex = 0;
+    coverViews.forEach((v, i) => {
+      v.el.style.display = i === 0 ? "" : "none";
+    });
+
+    function cycleCoverView() {
+      coverViews[coverViewIndex].onHide();
+      coverViewIndex = (coverViewIndex + 1) % coverViews.length;
+      coverViews.forEach((v, i) => {
+        v.el.style.display = i === coverViewIndex ? "" : "none";
+      });
+      coverViews[coverViewIndex].onShow();
+    }
+    cover.addEventListener("click", cycleCoverView);
+    lyricsEl.addEventListener("click", cycleCoverView);
+    spectrum.addEventListener("click", cycleCoverView);
+    radial.addEventListener("click", cycleCoverView);
+
+    prevBtn.addEventListener("click", () => offsetTrack(musicUi, -1));
+    nextBtn.addEventListener("click", () => goToNextTrack(musicUi));
+    playPauseBtn.addEventListener("click", () => {
+      if (player.paused) {
+        if (!musicUi.currentName && musicUi.playlist.length > 0) {
+          playByName(musicUi, musicUi.playlist[0]);
+        } else {
+          player.play();
+        }
+      } else {
+        player.pause();
+      }
+    });
+
+    // 這幾個都是「畫面」層級的更新（按鈕圖示、進度條、歌詞反白、Now
+    // Playing 米帶），掛在模組層級的持久 `player` 上，切走分頁時要記得
+    // 解除，不然每次重新打開 player 分頁都會疊加一組新的 listener。
+    let seeking = false;
+    function onPlay() {
+      playPauseBtn.textContent = "⏸" + PLAYER_TEXT_STYLE;
+      updateNowPlaying();
+    }
+    function onPause() {
+      playPauseBtn.textContent = "▶" + PLAYER_TEXT_STYLE;
+      updateNowPlaying();
+    }
+    function onLoadedMetadata() {
+      seekBar.max = String(player.duration || 0);
+      updateTimeLabel(musicUi);
+    }
+    function onTimeUpdate() {
+      if (!seeking) seekBar.value = String(player.currentTime);
+      updateLyricsHighlight(musicUi);
+      updateTimeLabel(musicUi);
+    }
+    player.addEventListener("play", onPlay);
+    player.addEventListener("pause", onPause);
+    player.addEventListener("loadedmetadata", onLoadedMetadata);
+    player.addEventListener("timeupdate", onTimeUpdate);
+    seekBar.addEventListener("input", () => {
+      seeking = true;
+      player.currentTime = Number(seekBar.value);
+      updateTimeLabel(musicUi);
+    });
+    seekBar.addEventListener("change", () => {
+      seeking = false;
+    });
+
+    downloadBtn.addEventListener("click", async () => {
+      const url = urlInput.value.trim();
+      if (!url) return;
+      urlInput.value = "";
+      await execLine("~");
+      await execLine("plugin enter music");
+      const result = await execLine(`download "${url}"`);
+      await execLine("~");
+      if (result.error) {
+        window.alert(`下載失敗: ${result.error}`);
+      }
+    });
+
+    startMusicFileBrowser(musicUi, ld);
+
+    return function stop() {
+      musicUi.stopPolling();
+      stopSpectrumAnim();
+      stopRadialAnim();
+      player.removeEventListener("play", onPlay);
+      player.removeEventListener("pause", onPause);
+      player.removeEventListener("loadedmetadata", onLoadedMetadata);
+      player.removeEventListener("timeupdate", onTimeUpdate);
+      // 注意：不關閉 `playerAudioCtx`、不暫停 `player`——音樂繼續在背景播放
+      // （見模組層級那段的說明）。畫面欄位清成 `null`，讓 `playByName` 等
+      // 函式在分頁沒開著時正確跳過畫面更新。
+      musicUi.fileList = null;
+      musicUi.fileCount = null;
+      musicUi.cover = null;
+      musicUi.trackName = null;
+      musicUi.seekBar = null;
+      musicUi.timeLabel = null;
+      musicUi.lyricsEl = null;
+      musicUi.updateNowPlaying = null;
+    };
+  }
+
+  // storage 分頁點 `notepad/` 資料夾底下的檔名要切去 notepad 分頁並顯示
+  // 那個檔案：跟 tablet 版一樣，用一個模組層級變數記住「下次開 notepad
+  // 分頁要先載入哪個檔案」。
+  let notepadInitialFile = "notepad.md";
+  function openNotepadFile(name) {
+    notepadInitialFile = name;
+    switchTo("notepad");
+  }
+
+  // 建立 storage 分頁：跟桌面版/tablet 版同一套功能（瀏覽資料夾／上傳／
+  // 新資料夾／下載／刪除／重新命名）。資料夾點了直接往下瀏覽（跟改之前
+  // 一樣）；檔案點了進詳細畫面（見 `showFileDetail`），不在列表裡塞小圖示
+  // 按鈕。
+  function startStorageTab(container) {
+    const ld = createListDetailView(container);
+    const wrap = document.createElement("div");
+    wrap.className = "storage-body";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "storage-toolbar";
+    const breadcrumb = document.createElement("span");
+    breadcrumb.className = "storage-breadcrumb";
+    const uploadBtn = document.createElement("button");
+    uploadBtn.textContent = "⬆ 上傳";
+    const uploadInput = document.createElement("input");
+    uploadInput.type = "file";
+    uploadInput.style.display = "none";
+    const mkdirBtn = document.createElement("button");
+    mkdirBtn.textContent = "＋新資料夾";
+    toolbar.appendChild(breadcrumb);
+    toolbar.appendChild(uploadBtn);
+    toolbar.appendChild(uploadInput);
+    toolbar.appendChild(mkdirBtn);
+
+    const table = document.createElement("table");
+    table.className = "storage-table";
+    const tbody = document.createElement("tbody");
+    table.appendChild(tbody);
+    const tableScroll = document.createElement("div");
+    tableScroll.className = "storage-table-scroll";
+    tableScroll.appendChild(table);
+
+    wrap.appendChild(toolbar);
+    wrap.appendChild(tableScroll);
+    ld.listEl.appendChild(wrap);
+
+    const state = { currentPath: "" };
+
+    const joinPath = (base, name2) => (base ? `${base}/${name2}` : name2);
+
+    function formatSize(bytes) {
+      if (bytes === 0) return "—";
+      const units = ["B", "K", "M", "G", "T"];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+      }
+      return unit === 0 ? `${bytes}${units[0]}` : `${value.toFixed(1)}${units[unit]}`;
+    }
+
+    function renderBreadcrumb() {
+      breadcrumb.innerHTML = "";
+      const rootSeg = document.createElement("a");
+      rootSeg.href = "#";
+      rootSeg.textContent = "/";
+      rootSeg.addEventListener("click", (e) => {
+        e.preventDefault();
+        navigate("");
+      });
+      breadcrumb.appendChild(rootSeg);
+      if (!state.currentPath) return;
+      const parts = state.currentPath.split("/");
+      let acc = "";
+      for (const part of parts) {
+        acc = acc ? `${acc}/${part}` : part;
+        const seg = document.createElement("a");
+        seg.href = "#";
+        seg.textContent = ` ${part}`;
+        const target = acc;
+        seg.addEventListener("click", (e) => {
+          e.preventDefault();
+          navigate(target);
+        });
+        breadcrumb.appendChild(seg);
+      }
+    }
+
+    function showFileDetail(entry) {
+      const full = joinPath(state.currentPath, entry.name);
+      const wrap2 = document.createElement("div");
+      wrap2.className = "storage-detail-content";
+      const name = document.createElement("div");
+      name.className = "storage-detail-name";
+      name.textContent = entry.name;
+      const meta = document.createElement("div");
+      meta.className = "storage-detail-meta";
+      meta.textContent = `${formatSize(entry.size)} · ${new Date(entry.modified * 1000).toLocaleString()}`;
+      const actions = document.createElement("div");
+      actions.className = "storage-detail-actions";
+
+      const dlBtn = document.createElement("a");
+      dlBtn.href = `/api/storage/download?path=${encodeURIComponent(full)}`;
+      dlBtn.textContent = "⬇ 下載";
+      actions.appendChild(dlBtn);
+
+      // notepad 分頁的 `/api/notepad/content` 只接單一裸檔名（見 `web.rs`
+      // 的 `safe_notepad_path`，不能帶路徑），只有目前瀏覽到
+      // `storage/notepad/` 這一層時，`entry.name` 才剛好對應 notepad 能開
+      // 的同一個檔案。
+      if (state.currentPath === "notepad") {
+        const openBtn = document.createElement("button");
+        openBtn.textContent = "📝 在 notepad 開啟";
+        openBtn.addEventListener("click", () => openNotepadFile(entry.name));
+        actions.appendChild(openBtn);
+      }
+
+      const renameBtn = document.createElement("button");
+      renameBtn.textContent = "✎ 重新命名";
+      renameBtn.addEventListener("click", async () => {
+        const newName = window.prompt("新名稱", entry.name);
+        if (!newName || newName === entry.name) return;
+        const to = joinPath(state.currentPath, newName);
+        await fetch(`/api/storage/rename?from=${encodeURIComponent(full)}&to=${encodeURIComponent(to)}`, {
+          method: "POST",
+        });
+        ld.showList();
+        refresh();
+      });
+      actions.appendChild(renameBtn);
+
+      const delBtn = document.createElement("button");
+      delBtn.className = "danger";
+      delBtn.textContent = "🗑 刪除";
+      delBtn.addEventListener("click", async () => {
+        if (!window.confirm(`確定要刪除「${entry.name}」嗎？`)) return;
+        await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}`, { method: "POST" });
+        ld.showList();
+        refresh();
+      });
+      actions.appendChild(delBtn);
+
+      wrap2.appendChild(name);
+      wrap2.appendChild(meta);
+      wrap2.appendChild(actions);
+      ld.detailBody.innerHTML = "";
+      ld.detailBody.appendChild(wrap2);
+      ld.showDetail();
+    }
+
+    async function refresh() {
+      const path = state.currentPath;
+      let entries;
+      try {
+        const res = await fetch(`/api/storage/list?path=${encodeURIComponent(path)}`);
+        entries = await res.json();
+      } catch (_err) {
+        return; // 這次沒抓到就算了，使用者可以再手動切換一次路徑重試。
+      }
+      if (path !== state.currentPath) return; // 等待期間使用者又切了路徑，這次回應過期了，不要蓋掉新畫面。
+      renderBreadcrumb();
+      tbody.innerHTML = "";
+      for (const entry of entries) {
+        const row = document.createElement("tr");
+        const nameCell = document.createElement("td");
+        const link = document.createElement("a");
+        link.href = "#";
+        if (entry.is_dir) {
+          link.textContent = `📁 ${entry.name}`;
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            navigate(joinPath(state.currentPath, entry.name));
+          });
+        } else {
+          link.textContent = `📄 ${entry.name}`;
+          link.addEventListener("click", (e) => {
+            e.preventDefault();
+            showFileDetail(entry);
+          });
+        }
+        nameCell.appendChild(link);
+        const sizeCell = document.createElement("td");
+        sizeCell.textContent = entry.is_dir ? "—" : formatSize(entry.size);
+        const actionsCell = document.createElement("td");
+        if (entry.is_dir) {
+          const delBtn = document.createElement("button");
+          delBtn.textContent = "🗑";
+          delBtn.addEventListener("click", async () => {
+            const full = joinPath(state.currentPath, entry.name);
+            let itemCount = 0;
+            try {
+              const res = await fetch(`/api/storage/list?path=${encodeURIComponent(full)}`);
+              const children = await res.json();
+              itemCount = children.length;
+            } catch (_err) {
+              // 查不到子項目數量就當作非空、用比較保守的措辭，不影響後面還是照樣送
+              // recursive=true 的刪除請求。
+            }
+            const message = itemCount > 0
+              ? `確定要刪除「${entry.name}」嗎？裡面還有 ${itemCount} 個項目，會一併刪除`
+              : `確定要刪除「${entry.name}」（空資料夾）嗎？`;
+            if (!window.confirm(message)) return;
+            await fetch(`/api/storage/delete?path=${encodeURIComponent(full)}&recursive=true`, { method: "POST" });
+            refresh();
+          });
+          const renameBtn = document.createElement("button");
+          renameBtn.textContent = "✎";
+          renameBtn.addEventListener("click", async () => {
+            const newName = window.prompt("新名稱", entry.name);
+            if (!newName || newName === entry.name) return;
+            const from = joinPath(state.currentPath, entry.name);
+            const to = joinPath(state.currentPath, newName);
+            await fetch(`/api/storage/rename?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`, {
+              method: "POST",
+            });
+            refresh();
+          });
+          actionsCell.appendChild(delBtn);
+          actionsCell.appendChild(renameBtn);
+        }
+        row.appendChild(nameCell);
+        row.appendChild(sizeCell);
+        row.appendChild(actionsCell);
+        tbody.appendChild(row);
+      }
+    }
+
+    function navigate(path) {
+      state.currentPath = path;
+      refresh();
+    }
+
+    uploadBtn.addEventListener("click", () => uploadInput.click());
+    uploadInput.addEventListener("change", async () => {
+      const file = uploadInput.files[0];
+      if (!file) return;
+      const dest = joinPath(state.currentPath, file.name);
+      await fetch(`/api/storage/upload?path=${encodeURIComponent(dest)}`, { method: "POST", body: file });
+      uploadInput.value = "";
+      refresh();
+    });
+
+    mkdirBtn.addEventListener("click", async () => {
+      const dirName = window.prompt("新資料夾名稱");
+      if (!dirName) return;
+      const dest = joinPath(state.currentPath, dirName);
+      await fetch(`/api/storage/mkdir?path=${encodeURIComponent(dest)}`, { method: "POST" });
+      refresh();
+    });
+
+    refresh();
+
+    return function stop() {};
+  }
+
+  // 建立 todo 分頁：toolbar 一個輸入框＋新增按鈕，下面是可捲動的待辦清單，
+  // 每列勾選框切換完成/未完成、右邊垃圾桶刪除。新增/勾選/刪除都是打完
+  // API 就整份 `refresh()` 重新抓，不用自己維護本地 state 跟伺服器對不對得上。
+  function startTodoTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "todo-body";
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "todo-toolbar";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "新增待辦事項...";
+    const addBtn = document.createElement("button");
+    addBtn.textContent = "＋新增";
+    toolbar.appendChild(input);
+    toolbar.appendChild(addBtn);
+
+    const list = document.createElement("div");
+    list.className = "todo-list";
+
+    wrap.appendChild(toolbar);
+    wrap.appendChild(list);
+    container.appendChild(wrap);
+
+    async function refresh() {
+      let items;
+      try {
+        const res = await fetch("/api/todo/list");
+        items = await res.json();
+      } catch (_err) {
+        return; // 這次沒抓到就算了，使用者下一次操作會再觸發一次 refresh。
+      }
+      list.innerHTML = "";
+      if (items.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "todo-empty";
+        empty.textContent = "（沒有待辦事項）";
+        list.appendChild(empty);
+        return;
+      }
+      for (const item of items) {
+        const row = document.createElement("div");
+        row.className = "todo-row" + (item.done ? " done" : "");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = item.done;
+        checkbox.addEventListener("change", async () => {
+          await fetch(`/api/todo/toggle?id=${item.id}`, { method: "POST" });
+          refresh();
+        });
+        const text = document.createElement("span");
+        text.className = "todo-text";
+        text.textContent = item.text;
+        const delBtn = document.createElement("button");
+        delBtn.textContent = "🗑";
+        delBtn.addEventListener("click", async () => {
+          await fetch(`/api/todo/remove?id=${item.id}`, { method: "POST" });
+          refresh();
+        });
+        row.appendChild(checkbox);
+        row.appendChild(text);
+        row.appendChild(delBtn);
+        list.appendChild(row);
+      }
+    }
+
+    async function addItem() {
+      const text = input.value.trim();
+      if (!text) return;
+      await fetch(`/api/todo/add?text=${encodeURIComponent(text)}`, { method: "POST" });
+      input.value = "";
+      refresh();
+    }
+
+    addBtn.addEventListener("click", addItem);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") addItem();
+    });
+
+    refresh();
+
+    return function stop() {};
+  }
+
+  // notepad 分頁的即時 markdown 預覽用，跟桌面版 frontend.html 的
+  // `renderMarkdown` 是同一套規則（各自一份，理由見 topology 那段的說明）：
+  // 不是完整的 CommonMark 剖析器，只涵蓋標題/引言/清單/table/code fence/
+  // 分隔線/段落跟行內強調語法，足夠「盡量還原排版好的樣子」。文字先跳脫過
+  // HTML 特殊字元，使用者打的原始內容不會被當成標籤解讀。
+  function escapeHtml(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+
+  // code fence 的語法上色規則：關鍵字清單、單行註解開頭符號、區塊註解頭尾
+  // 符號——跟 `gui.rs` 的 `language_spec` 是同一套規則（維持兩邊一致），不是
+  // 完整的詞法分析器，但字串/註解/數字/關鍵字這幾類最常見、最有用的分類
+  // 已經涵蓋。
+  const CODE_LANGUAGES = {
+    rust: {
+      keywords: ["fn","let","mut","pub","struct","enum","impl","trait","use","mod","if","else","match","for","while","loop","return","break","continue","const","static","self","Self","super","crate","as","in","move","ref","where","async","await","dyn","unsafe","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    python: {
+      keywords: ["def","class","if","elif","else","for","while","return","import","from","as","with","try","except","finally","raise","pass","break","continue","lambda","yield","in","is","not","and","or","None","True","False","self","global","nonlocal","async","await"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    javascript: {
+      keywords: ["function","const","let","var","if","else","for","while","return","class","extends","new","this","import","export","from","as","try","catch","finally","throw","break","continue","switch","case","default","typeof","instanceof","in","of","async","await","yield","null","undefined","true","false","super"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    c: {
+      keywords: ["int","char","float","double","void","if","else","for","while","return","struct","typedef","enum","union","static","const","unsigned","signed","long","short","sizeof","switch","case","default","break","continue","class","public","private","protected","namespace","template","new","delete","this","virtual","override","nullptr","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    java: {
+      keywords: ["public","private","protected","class","interface","extends","implements","static","final","void","int","long","float","double","boolean","char","String","if","else","for","while","return","new","this","super","try","catch","finally","throw","throws","import","package","break","continue","switch","case","default","true","false","null"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    go: {
+      keywords: ["func","package","import","var","const","type","struct","interface","if","else","for","range","return","go","chan","select","case","default","switch","break","continue","defer","map","nil","true","false"],
+      lineComment: "//",
+      blockComment: ["/*", "*/"],
+    },
+    bash: {
+      keywords: ["if","then","else","elif","fi","for","while","do","done","case","esac","function","return","exit","export","local","echo","break","continue","in"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    json: { keywords: ["true", "false", "null"], lineComment: null, blockComment: null },
+    sql: {
+      keywords: ["SELECT","FROM","WHERE","INSERT","INTO","VALUES","UPDATE","SET","DELETE","JOIN","LEFT","RIGHT","INNER","OUTER","ON","GROUP","BY","ORDER","HAVING","AS","AND","OR","NOT","NULL","IS","IN","LIKE","LIMIT","CREATE","TABLE","DROP","ALTER","PRIMARY","KEY","FOREIGN","REFERENCES","DEFAULT","DISTINCT"],
+      lineComment: "--",
+      blockComment: ["/*", "*/"],
+    },
+    ruby: {
+      keywords: ["def","end","class","module","if","elsif","else","unless","while","until","for","in","do","return","break","next","yield","begin","rescue","ensure","raise","require","true","false","nil","self"],
+      lineComment: "#",
+      blockComment: null,
+    },
+    yaml: { keywords: ["true", "false", "null"], lineComment: "#", blockComment: null },
+  };
+  const CODE_LANG_ALIASES = {
+    rs: "rust", py: "python",
+    js: "javascript", ts: "javascript", jsx: "javascript", tsx: "javascript", typescript: "javascript",
+    cpp: "c", "c++": "c", h: "c", hpp: "c",
+    golang: "go",
+    sh: "bash", shell: "bash", zsh: "bash",
+    rb: "ruby",
+    yml: "yaml", toml: "yaml",
+  };
+
+  // 依 code fence 開頭標注的語言名稱（例如 ` ```rust ` 的 `rust`）查對應的
+  // 語法上色規則；沒標語言或標了但不認得的語言都回傳 `null`，呼叫端在這種
+  // 情況下維持原本單一顏色的樣子，不強行套用錯誤的規則。
+  function getLanguageSpec(lang) {
+    const key = (lang || "").toLowerCase();
+    return CODE_LANGUAGES[CODE_LANG_ALIASES[key] || key] || null;
+  }
+
+  // 把一行程式碼掃成字串/註解/數字/關鍵字/其餘（plain）幾類，各自包一層
+  // `<span class="tok-...">`；不是完整的詞法分析器（不處理跳脫字元、原始
+  // 字串、巢狀區塊註解），跟 `gui.rs` 的 `highlight_code_line` 是同一套簡化
+  // 規則。`state.inBlockComment` 是跨行狀態（區塊註解可能橫跨好幾行），
+  // 呼叫端每個 code block 開頭要重設成 `{ inBlockComment: false }`，同一個
+  // code block 內逐行往下傳同一個物件（靠物件參考模擬「傳址」，JS 沒有
+  // 像 Rust `&mut bool` 那樣的東西）。
+  function highlightCodeLine(line, spec, state) {
+    let html = "";
+    let plainStart = 0;
+    let i = 0;
+    const flushPlain = (end) => {
+      if (plainStart < end) html += escapeHtml(line.slice(plainStart, end));
+    };
+
+    if (state.inBlockComment && spec.blockComment) {
+      const idx = line.indexOf(spec.blockComment[1]);
+      if (idx === -1) {
+        return line ? `<span class="tok-comment">${escapeHtml(line)}</span>` : "";
+      }
+      const end = idx + spec.blockComment[1].length;
+      html += `<span class="tok-comment">${escapeHtml(line.slice(0, end))}</span>`;
+      i = end;
+      plainStart = end;
+      state.inBlockComment = false;
+    }
+
+    while (i < line.length) {
+      if (spec.blockComment && line.startsWith(spec.blockComment[0], i)) {
+        flushPlain(i);
+        const idx = line.indexOf(spec.blockComment[1], i + spec.blockComment[0].length);
+        if (idx === -1) {
+          html += `<span class="tok-comment">${escapeHtml(line.slice(i))}</span>`;
+          state.inBlockComment = true;
+          i = line.length;
+        } else {
+          const end = idx + spec.blockComment[1].length;
+          html += `<span class="tok-comment">${escapeHtml(line.slice(i, end))}</span>`;
+          i = end;
+        }
+        plainStart = i;
+        continue;
+      }
+      if (spec.lineComment && line.startsWith(spec.lineComment, i)) {
+        flushPlain(i);
+        html += `<span class="tok-comment">${escapeHtml(line.slice(i))}</span>`;
+        plainStart = line.length;
+        break;
+      }
+      const ch = line[i];
+      if (ch === '"' || ch === "'") {
+        const end = line.indexOf(ch, i + 1);
+        if (end !== -1) {
+          flushPlain(i);
+          html += `<span class="tok-string">${escapeHtml(line.slice(i, end + 1))}</span>`;
+          i = end + 1;
+          plainStart = i;
+          continue;
+        }
+      }
+      if (/[A-Za-z_]/.test(ch)) {
+        const word = line.slice(i).match(/^[A-Za-z0-9_]+/)[0];
+        if (spec.keywords.includes(word)) {
+          flushPlain(i);
+          html += `<span class="tok-keyword">${escapeHtml(word)}</span>`;
+          i += word.length;
+          plainStart = i;
+          continue;
+        }
+        i += word.length;
+        continue;
+      }
+      if (/[0-9]/.test(ch)) {
+        const num = line.slice(i).match(/^[0-9.]+/)[0];
+        flushPlain(i);
+        html += `<span class="tok-number">${escapeHtml(num)}</span>`;
+        i += num.length;
+        plainStart = i;
+        continue;
+      }
+      i++;
+    }
+    flushPlain(line.length);
+    return html;
+  }
+
+  function renderInlineMarkdown(text) {
+    let s = escapeHtml(text);
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+    // `***文字***`（粗體兼斜體）要在 `**` 規則之前處理，不然會被 `**` 先
+    // 吃掉、多出來的一個 `*` 變成殘留字元。
+    s = s.replace(/\*\*\*([^*]+)\*\*\*/g, "<strong><em>$1</em></strong>");
+    s = s.replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, (_, a, b) => `<strong>${a ?? b}</strong>`);
+    s = s.replace(/~~([^~]+)~~/g, "<s>$1</s>");
+    s = s.replace(/\+\+([^+]+)\+\+/g, '<span class="notepad-underline">$1</span>');
+    s = s.replace(/==([^=]+)==/g, '<span class="notepad-highlight">$1</span>');
+    s = s.replace(/\*([^*]+)\*|_([^_]+)_/g, (_, a, b) => `<em>${a ?? b}</em>`);
+    // 圖片語法 `![替代文字](網址)`：不是每個 panel 都需要真的顯示圖片，這裡
+    // 只當成連結對待——有些論壇（例如 Discourse）的替代文字會夾帶
+    // `|690x460, 50%` 這種縮放/尺寸提示，只取 `|` 前面那段當作顯示文字。
+    // 要先處理過圖片語法，才不會被底下的一般連結規則吃到剩一個孤立的 `!`。
+    s = s.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+      const label = alt.split("|")[0].trim();
+      return `<a href="${url}" target="_blank" rel="noopener">${label}</a>`;
+    });
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, url) => `<a href="${url}" target="_blank" rel="noopener">${label}</a>`);
+    // `<br>` 換行標記：原始文字先被 `escapeHtml` 跳脫成 `&lt;br&gt;`，這裡
+    // 換回真正的 `<br>` 標籤才會讓瀏覽器實際換行，而不是顯示成字面文字。
+    s = s.replace(/&lt;br&gt;/g, "<br>");
+    return s;
+  }
+
+  function isTableRow(line) {
+    return line.includes("|") && line.trim() !== "";
+  }
+
+  // table 的分隔列（header 底下那一行，例如 `| --- | :---: | ---: |`）：只由
+  // `-`、`:`、`|`、空白組成，且至少要有一個 `-`。
+  function isTableSeparator(line) {
+    const t = line.trim();
+    return t.includes("-") && /^[-:|\s]+$/.test(t);
+  }
+
+  // 把一行 table 資料列拆成每一欄內容（已 trim 過前後空白）；行首/行尾的
+  // `|` 是可有可無的分隔符號，不當作多一欄空白內容。
+  function splitTableRow(line) {
+    let t = line.trim();
+    if (t.startsWith("|")) t = t.slice(1);
+    if (t.endsWith("|")) t = t.slice(0, -1);
+    return t.split("|").map((cell) => cell.trim());
+  }
+
+  // 逐行處理區塊層級語法（標題/引言/清單/table/code fence/分隔線/段落），
+  // 行內語法交給 `renderInlineMarkdown`。清單/code fence 需要跨行的「目前在
+  // 哪個區塊裡」狀態，用 `listType`/`inCodeBlock` 這兩個區域變數追蹤；table
+  // 則需要往下看一行才能判斷是不是 table（含 `|` 的下一行是不是分隔列），
+  // 所以這裡用索引迴圈而不是 `for...of`，才能在判斷完 table 之後直接把
+  // 迴圈游標跳到 table 結束的下一行。
+  function renderMarkdown(source) {
+    const lines = source.split("\n");
+    let html = "";
+    let inCodeBlock = false;
+    let codeSpec = null;
+    let codeState = null;
+    let codeShowLineNumbers = false;
+    let codeLineCounter = 0;
+    let listType = null; // "ul" | "ol" | null
+    const closeList = () => {
+      if (listType) {
+        html += `</${listType}>`;
+        listType = null;
+      }
+    };
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith("```")) {
+        if (!inCodeBlock) {
+          closeList();
+          // 開頭 fence 標注的語言（例如 ` ```rust ` 的 `rust`）決定語法上色
+          // 規則；語言名稱後面接一個 `=`（例如 ` ```rust= `）表示要加行號，
+          // 兩者是各自獨立的標注，`=` 拿掉之後剩下的部分才是真正的語言
+          // 名稱。`codeState` 是這個 code block 專屬的跨行狀態，每個 code
+          // block 都要重新從 `false` 開始，不能沿用上一個 code block 剩下
+          // 的狀態。
+          const rawLang = line.trim().slice(3).trim();
+          codeShowLineNumbers = rawLang.endsWith("=");
+          codeSpec = getLanguageSpec(codeShowLineNumbers ? rawLang.slice(0, -1) : rawLang);
+          codeState = { inBlockComment: false };
+          codeLineCounter = 0;
+          html += `<pre data-line="${i}"><code>`;
+          inCodeBlock = true;
+        } else {
+          html += "</code></pre>";
+          inCodeBlock = false;
+          codeSpec = null;
+        }
+        continue;
+      }
+      if (inCodeBlock) {
+        if (codeShowLineNumbers) {
+          codeLineCounter++;
+          html += `<span class="line-no">${codeLineCounter}</span>`;
+        }
+        html += codeSpec ? highlightCodeLine(line, codeSpec, codeState) : escapeHtml(line);
+        html += "\n";
+        continue;
+      }
+
+      // table：一行含 `|` 的資料列，緊接著一行分隔列，就當作 table 的開頭；
+      // 後面連續含 `|` 的行都算資料列，直到遇到不符合的行或內容結尾為止。
+      if (isTableRow(line) && !isTableSeparator(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        closeList();
+        const headerCells = splitTableRow(line);
+        let j = i + 2;
+        const dataRows = [];
+        while (j < lines.length && isTableRow(lines[j])) {
+          dataRows.push(splitTableRow(lines[j]));
+          j++;
+        }
+        html += `<table data-line="${i}"><thead><tr>`;
+        for (const cell of headerCells) html += `<th>${renderInlineMarkdown(cell)}</th>`;
+        html += "</tr></thead><tbody>";
+        for (const [rowOffset, row] of dataRows.entries()) {
+          // 每一列各自帶自己的來源行號（`i + 2` 是資料列的起點，跳過 header
+          // 跟分隔列），捲動同步時才能精準對到你正在編輯的那一列，不是整個
+          // table 一起跳。
+          html += `<tr data-line="${i + 2 + rowOffset}">`;
+          for (const cell of row) html += `<td>${renderInlineMarkdown(cell)}</td>`;
+          html += "</tr>";
+        }
+        html += "</tbody></table>";
+        i = j - 1; // for 迴圈本身還會再 +1
+        continue;
+      }
+
+      const heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        closeList();
+        const level = heading[1].length;
+        html += `<h${level} data-line="${i}">${renderInlineMarkdown(heading[2])}</h${level}>`;
+        continue;
+      }
+      if (/^\s*>\s?/.test(line)) {
+        closeList();
+        html += `<blockquote data-line="${i}">${renderInlineMarkdown(line.replace(/^\s*>\s?/, ""))}</blockquote>`;
+        continue;
+      }
+      const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+      if (ul) {
+        if (listType !== "ul") {
+          closeList();
+          html += "<ul>";
+          listType = "ul";
+        }
+        // GFM 風格的 checklist 項目（`- [ ] 內容`／`- [x] 內容`）：畫成一個
+        // 唯讀的 checkbox，`disabled` 是因為這裡只是把目前的 markdown 內容
+        // 呈現出來，不是要讓使用者直接點擊改變原始檔案。
+        const checkbox = ul[1].match(/^\[( |x|X)\]\s+(.*)$/);
+        if (checkbox) {
+          const checked = checkbox[1].toLowerCase() === "x";
+          html += `<li class="notepad-task" data-line="${i}"><input type="checkbox" disabled${checked ? " checked" : ""}> ${renderInlineMarkdown(checkbox[2])}</li>`;
+        } else {
+          html += `<li data-line="${i}">${renderInlineMarkdown(ul[1])}</li>`;
+        }
+        continue;
+      }
+      const ol = line.match(/^\s*\d+\.\s+(.*)$/);
+      if (ol) {
+        if (listType !== "ol") {
+          closeList();
+          html += "<ol>";
+          listType = "ol";
+        }
+        html += `<li data-line="${i}">${renderInlineMarkdown(ol[1])}</li>`;
+        continue;
+      }
+      if (/^\s*(---|\*\*\*)\s*$/.test(line)) {
+        closeList();
+        html += `<hr data-line="${i}">`;
+        continue;
+      }
+      closeList();
+      if (line.trim() !== "") {
+        html += `<p data-line="${i}">${renderInlineMarkdown(line)}</p>`;
+      }
+    }
+    closeList();
+    if (inCodeBlock) html += "</code></pre>";
+    return html;
+  }
+
+  // 建立 notepad 分頁：跟桌面版同一套檢視/編輯/切換檔案功能，Ctrl-E/Ctrl-F/
+  // Ctrl-S/Ctrl-X 全部改成按鈕。切換檔案的輸入框保留 Enter/Esc（純文字輸入
+  // 框用 Enter/Esc 很自然，跟「組合鍵」不是同一個問題），但另外補上「確認」/
+  // 「取消」兩顆按鈕，觸控操作更直覺。
+  function startNotepadTab(container) {
+    const wrap = document.createElement("div");
+    wrap.className = "notepad-body";
+
+    const viewEl = document.createElement("div");
+    viewEl.className = "notepad-view";
+
+    const editEl = document.createElement("div");
+    editEl.className = "notepad-edit";
+    editEl.style.display = "none";
+    const textarea = document.createElement("textarea");
+    textarea.className = "notepad-textarea";
+    textarea.spellcheck = false;
+    const previewEl = document.createElement("div");
+    previewEl.className = "notepad-preview";
+    editEl.appendChild(textarea);
+    editEl.appendChild(previewEl);
+
+    const hint = document.createElement("div");
+    hint.className = "notepad-hint";
+    const hintActions = document.createElement("div");
+    hintActions.className = "notepad-hint-actions";
+    const editBtn = document.createElement("button");
+    editBtn.textContent = "編輯";
+    const switchBtn = document.createElement("button");
+    switchBtn.textContent = "切換檔案";
+    const saveBtn = document.createElement("button");
+    saveBtn.textContent = "儲存";
+    const cancelBtn = document.createElement("button");
+    cancelBtn.textContent = "取消";
+    hintActions.appendChild(editBtn);
+    hintActions.appendChild(switchBtn);
+    hintActions.appendChild(saveBtn);
+    hintActions.appendChild(cancelBtn);
+    const hintName = document.createElement("span");
+    hintName.className = "notepad-hint-name";
+    hint.appendChild(hintActions);
+    hint.appendChild(hintName);
+
+    const filenameRow = document.createElement("div");
+    filenameRow.className = "notepad-filename-row";
+    filenameRow.style.display = "none";
+    const filenameInput = document.createElement("input");
+    filenameInput.type = "text";
+    filenameInput.className = "notepad-filename-input";
+    filenameInput.spellcheck = false;
+    const filenameConfirmBtn = document.createElement("button");
+    filenameConfirmBtn.textContent = "確認";
+    const filenameCancelBtn = document.createElement("button");
+    filenameCancelBtn.textContent = "取消";
+    filenameRow.appendChild(filenameInput);
+    filenameRow.appendChild(filenameConfirmBtn);
+    filenameRow.appendChild(filenameCancelBtn);
+
+    wrap.appendChild(viewEl);
+    wrap.appendChild(editEl);
+    wrap.appendChild(hint);
+    wrap.appendChild(filenameRow);
+    container.appendChild(wrap);
+
+    const state = { savedContent: "", editing: false, promptingFile: false, name: notepadInitialFile };
+
+    function updateHint() {
+      hintName.textContent = state.name;
+      editBtn.style.display = state.editing ? "none" : "";
+      switchBtn.style.display = state.editing ? "none" : "";
+      saveBtn.style.display = state.editing ? "" : "none";
+      cancelBtn.style.display = state.editing ? "" : "none";
+    }
+
+    function renderView() {
+      viewEl.innerHTML = state.savedContent.trim()
+        ? renderMarkdown(state.savedContent)
+        : '<span class="notepad-empty">(空白，按「編輯」開始輸入)</span>';
+      updateHint();
+    }
+
+    function enterEdit() {
+      state.editing = true;
+      textarea.value = state.savedContent;
+      previewEl.innerHTML = renderMarkdown(state.savedContent);
+      viewEl.style.display = "none";
+      editEl.style.display = "flex";
+      updateHint();
+      textarea.focus();
+    }
+
+    function exitEdit() {
+      state.editing = false;
+      viewEl.style.display = "";
+      editEl.style.display = "none";
+      renderView();
+    }
+
+    async function save() {
+      await fetch("/api/notepad/content", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: state.name, content: textarea.value }),
+      });
+      state.savedContent = textarea.value;
+      exitEdit();
+    }
+
+    async function loadFile(fileName) {
+      const res = await fetch(`/api/notepad/content?name=${encodeURIComponent(fileName)}`);
+      const d = await res.json();
+      state.name = d.name;
+      state.savedContent = d.content;
+      notepadInitialFile = d.name;
+      renderView();
+    }
+
+    function startFilePrompt() {
+      state.promptingFile = true;
+      filenameInput.value = state.name;
+      hint.style.display = "none";
+      filenameRow.style.display = "flex";
+      filenameInput.focus();
+      filenameInput.select();
+    }
+
+    function endFilePrompt() {
+      state.promptingFile = false;
+      filenameRow.style.display = "none";
+      hint.style.display = "";
+    }
+
+    function confirmFilePrompt() {
+      const fileName = filenameInput.value.trim();
+      endFilePrompt();
+      if (fileName) loadFile(fileName);
+    }
+
+    filenameInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        confirmFilePrompt();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        endFilePrompt();
+      }
+    });
+    filenameConfirmBtn.addEventListener("click", confirmFilePrompt);
+    filenameCancelBtn.addEventListener("click", endFilePrompt);
+
+    function scrollPreviewToCursor() {
+      const currentLine = textarea.value.slice(0, textarea.selectionStart).split("\n").length - 1;
+      const marks = previewEl.querySelectorAll("[data-line]");
+      let target = null;
+      for (const el of marks) {
+        if (Number(el.dataset.line) <= currentLine) {
+          target = el;
+        } else {
+          break;
+        }
+      }
+      if (target) {
+        target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
+    }
+
+    textarea.addEventListener("input", () => {
+      previewEl.innerHTML = renderMarkdown(textarea.value);
+      scrollPreviewToCursor();
+    });
+    textarea.addEventListener("keyup", scrollPreviewToCursor);
+    textarea.addEventListener("click", scrollPreviewToCursor);
+
+    editBtn.addEventListener("click", enterEdit);
+    switchBtn.addEventListener("click", startFilePrompt);
+    saveBtn.addEventListener("click", save);
+    cancelBtn.addEventListener("click", exitEdit);
+
+    loadFile(state.name);
+
+    return function stop() {};
+  }
+
+  const TABS = [
+    { name: "device", icon: "📟", label: "device" },
+    { name: "global", icon: "🌍", label: "global" },
+    { name: "topology", icon: "🌐", label: "topology" },
+    { name: "weather", icon: "🌤️", label: "weather" },
+    { name: "system", icon: "⚙️", label: "system" },
+    { name: "player", icon: "🎵", label: "player" },
+    { name: "storage", icon: "🗂️", label: "storage" },
+    { name: "notepad", icon: "📝", label: "notepad" },
+    { name: "todo", icon: "✅", label: "todo" },
+  ];
+
+  // `TAB_MODULES` 把每個分頁名稱對應到一個模組：`start(container)` 掛上
+  // 內容並回傳 `stopFn`，切分頁時呼叫該 `stopFn` 清掉 interval／EventSource
+  // ／animation frame，不留背景在跑。
+  const TAB_MODULES = {
+    device: { start: makeSnapshotTab("device") },
+    global: { start: makeSnapshotTab("global") },
+    topology: { start: startTopologyTab },
+    weather: { start: startWeatherTab },
+    system: { start: makePlainPanelTab("system") },
+    player: { start: startPlayerTab },
+    storage: { start: startStorageTab },
+    notepad: { start: startNotepadTab },
+    todo: { start: startTodoTab },
+  };
+
+  const content = document.getElementById("content");
+  const tabbar = document.getElementById("tabbar");
+  let activeName = null;
+  let activeStop = null;
+
+  function switchTo(name) {
+    if (activeName === name) return;
+    if (activeStop) {
+      activeStop();
+      activeStop = null;
+    }
+    content.innerHTML = "";
+    activeStop = TAB_MODULES[name].start(content);
+    activeName = name;
+    for (const btn of tabbar.querySelectorAll("button")) {
+      btn.classList.toggle("active", btn.dataset.name === name);
+    }
+  }
+
+  for (const t of TABS) {
+    const btn = document.createElement("button");
+    btn.dataset.name = t.name;
+    const icon = document.createElement("div");
+    icon.className = "tab-icon";
+    icon.textContent = t.icon;
+    const label = document.createElement("div");
+    label.className = "tab-label";
+    label.textContent = t.label;
+    btn.appendChild(icon);
+    btn.appendChild(label);
+    btn.addEventListener("click", () => switchTo(t.name));
+    tabbar.appendChild(btn);
+  }
+
+  switchTo("device");
+})();
+</script>
+</body>
+</html>

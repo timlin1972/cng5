@@ -37,6 +37,36 @@ const OUTPUT_TAIL_LINES: usize = 500;
 
 const FRONTEND_HTML: &str = include_str!("web/frontend.html");
 const TABLET_HTML: &str = include_str!("web/tablet.html");
+const IPHONE_HTML: &str = include_str!("web/iphone.html");
+
+/// PWA manifest：`display: standalone` 讓「加入主畫面」開起來是全螢幕、
+/// 沒有 Safari 網址列的獨立 app 外觀；`start_url` 固定指到 `/iphone`（不是
+/// `/`），不然從主畫面點開會跑去桌面版版面。深色 `background_color`/
+/// `theme_color` 跟 `iphone.html` 的 `#111318` 主題一致，避免啟動畫面/
+/// 狀態列出現一閃而過的白色背景。
+const IPHONE_MANIFEST_JSON: &str = r##"{
+  "name": "cng5",
+  "short_name": "cng5",
+  "start_url": "/iphone",
+  "display": "standalone",
+  "background_color": "#111318",
+  "theme_color": "#111318",
+  "icons": [
+    { "src": "/iphone-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/iphone-icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
+"##;
+
+/// 三張 app icon（180/192/512px）：這台機器沒有 Pillow/ImageMagick 之類的
+/// 圖像工具，用一支一次性的 Python 腳本手工組 PNG（IHDR + zlib 壓縮
+/// IDAT + IEND），深色圓角方塊背景配一組跟 topology 節點同色系
+/// （`#6f9dff`）的圓點，不是真正設計過的 logo，純粹讓「加入主畫面」有個
+/// 一致的圖示可用，不用退回 iOS 預設的頁面截圖。180px 給
+/// `apple-touch-icon`，192/512px 給 PWA manifest 的 `icons` 陣列。
+const IPHONE_ICON_180: &[u8] = include_bytes!("web/assets/iphone-icon-180.png");
+const IPHONE_ICON_192: &[u8] = include_bytes!("web/assets/iphone-icon-192.png");
+const IPHONE_ICON_512: &[u8] = include_bytes!("web/assets/iphone-icon-512.png");
 
 /// 每個 plugin 名稱（含 `output`）各自一條 broadcast channel 供 SSE 訂閱，加上
 /// 一份「目前最新內容」的快取——新連進來的分頁不用等下一次內容真的改變，
@@ -106,6 +136,11 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .app_data(web::Data::new(ctx.clone()))
             .route("/", web::get().to(index))
             .route("/tablet", web::get().to(tablet_index))
+            .route("/iphone", web::get().to(iphone_index))
+            .route("/iphone-manifest.json", web::get().to(iphone_manifest))
+            .route("/iphone-icon-180.png", web::get().to(iphone_icon_180))
+            .route("/iphone-icon-192.png", web::get().to(iphone_icon_192))
+            .route("/iphone-icon-512.png", web::get().to(iphone_icon_512))
             .route("/api/plugins", web::get().to(api_plugins))
             .route("/api/version", web::get().to(api_version))
             .route("/api/panel/{name}/stream", web::get().to(panel_stream))
@@ -599,6 +634,30 @@ async fn index() -> impl Responder {
 /// 打同一組既有 API，這個 handler 本身不需要 `ctx`/`hub` 之類的依賴。
 async fn tablet_index() -> impl Responder {
     HttpResponse::Ok().content_type("text/html; charset=utf-8").body(TABLET_HTML)
+}
+
+/// `GET /iphone`：跟桌面版 `/`／`/tablet` 完全獨立的 iPhone PWA 頁面
+/// （`src/web/iphone.html`），打同一組既有 API，這個 handler 本身不需要
+/// `ctx`/`hub` 之類的依賴。
+async fn iphone_index() -> impl Responder {
+    HttpResponse::Ok().content_type("text/html; charset=utf-8").body(IPHONE_HTML)
+}
+
+/// `GET /iphone-manifest.json`：PWA manifest，見 `IPHONE_MANIFEST_JSON` 的說明。
+async fn iphone_manifest() -> impl Responder {
+    HttpResponse::Ok().content_type("application/manifest+json").body(IPHONE_MANIFEST_JSON)
+}
+
+async fn iphone_icon_180() -> impl Responder {
+    HttpResponse::Ok().content_type("image/png").body(IPHONE_ICON_180)
+}
+
+async fn iphone_icon_192() -> impl Responder {
+    HttpResponse::Ok().content_type("image/png").body(IPHONE_ICON_192)
+}
+
+async fn iphone_icon_512() -> impl Responder {
+    HttpResponse::Ok().content_type("image/png").body(IPHONE_ICON_512)
 }
 
 async fn api_plugins(hub: web::Data<Hub>) -> impl Responder {
