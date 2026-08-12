@@ -118,6 +118,13 @@
     cursor: pointer;
     transition: background-color 0.12s ease;
   }
+  /* 前景中（目前 focus）的 panel，對應的 icon 常駐一個方框，顏色跟單純
+     滑過去（下面 `:hover`，白色系）不一樣，用跟 `.panel.active` 邊框同一個
+     藍色調（`#6f9dff`），一眼就能分開「這個 panel 正在前景」跟「滑鼠正
+     滑過去」兩種狀態。故意寫在 `:hover`/`:active` 前面：CSS specificity
+     打平時看規則先後順序，這樣滑過去/按下的回饋才會蓋過常駐的前景方框，
+     不會被蓋住看不出滑鼠有沒有真的滑上去。 */
+  .dock-item.active .dock-icon { background: rgba(111, 157, 255, 0.22); }
   .dock-icon:hover { background: rgba(255, 255, 255, 0.12); }
   .dock-icon:active { background: rgba(255, 255, 255, 0.2); }
   #cmdbar {
@@ -1181,10 +1188,22 @@
   let zTop = 1;
   let cascade = 0;
 
+  // 前景 panel 對應的 dock icon 也要標成「目前前景」（見 `.dock-item.active`
+  // 的 CSS 說明），這裡用反查（`open` 這個 Map 找哪個 name 的 `entry.el`
+  // 就是這個 panel）而不是改成傳 `name` 進來——`bringToFront` 被拖曳/
+  // resize/點擊等好幾處呼叫，反查一次比每個呼叫端都要多帶一個參數簡單。
   function bringToFront(panel) {
     for (const p of desk.children) p.classList.remove("active");
     panel.style.zIndex = String(++zTop);
     panel.classList.add("active");
+    for (const item of dockItems.values()) item.classList.remove("active");
+    for (const [name, entry] of open) {
+      if (entry.el === panel) {
+        const item = dockItems.get(name);
+        if (item) item.classList.add("active");
+        break;
+      }
+    }
   }
 
   function startDrag(panel, evt) {
@@ -3653,7 +3672,16 @@
       }
       layoutState = layoutState === next ? "normal" : next;
       applyLayoutState();
-      if (layoutState !== "minimized") bringToFront(panel);
+      if (layoutState === "minimized") {
+        // 最小化之後這個 panel 不算在前景了，把它 dock icon 上的前景方框
+        // 拿掉——不呼叫 `bringToFront`（那是給「正在顯示的 panel」用的，
+        // 這裡整個隱藏起來了，見 `applyLayoutState`），小點（`open`）還是
+        // 留著，只是不再是「前景」。
+        const item = dockItems.get(name);
+        if (item) item.classList.remove("active");
+      } else {
+        bringToFront(panel);
+      }
     }
 
     minimizeBtn.addEventListener("click", (e) => {
@@ -3735,6 +3763,10 @@
       toggleMinimize: () => toggleLayoutState("minimized"),
     });
     setDockOpen(name, true);
+    // 剛剛第一次 `bringToFront(panel)`（開頭那次）發生在 `open.set` 之前，
+    // 這個 name 那時候還查不到，`bringToFront` 裡的前景方框反查會找不到
+    // 對應的 entry——這裡 `open` 已經有這筆了，再呼叫一次補上前景方框。
+    bringToFront(panel);
   }
 
   fetch("/api/version")
@@ -3754,7 +3786,11 @@
   // 開啟／切換最小化，不會讓小點消失。
   function setDockOpen(name, isOpen) {
     const item = dockItems.get(name);
-    if (item) item.classList.toggle("open", isOpen);
+    if (!item) return;
+    item.classList.toggle("open", isOpen);
+    // 真的關掉了（不是最小化）就不可能還是前景，順手把前景方框也拿掉，
+    // 不用等下一次別的 panel bringToFront 才間接清掉。
+    if (!isOpen) item.classList.remove("active");
   }
 
   // dock icon 點下去：panel 還沒開就開一個（`openPanel` 自己會把小點點亮，
