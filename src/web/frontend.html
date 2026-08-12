@@ -45,20 +45,6 @@
     background: #1b1e26;
     border-bottom: 1px solid #333a46;
   }
-  #toolbar button {
-    background: #262a33;
-    color: #d8dee9;
-    border: 1px solid #3a4150;
-    border-radius: 4px;
-    padding: 4px 8px;
-    font: inherit;
-  }
-  #toolbar button:hover { background: #323844; cursor: pointer; }
-  #menu-btn {
-    font-size: 16px;
-    line-height: 1;
-    padding: 4px 10px;
-  }
   #hostname-label {
     color: #d8dee9;
     white-space: nowrap;
@@ -70,51 +56,70 @@
     white-space: nowrap;
     font-size: 12px;
   }
-  /* 選單預設收起來（`display: none`），`#menu-btn` 點一下加上 `.open` 才展開；
-     絕對定位貼著 toolbar 下緣，蓋在 `#desk` 上面所有 panel 之上（見 `.panel`
-     的 z-index 都是從 1 開始疊加，這裡給一個穩穩高過去的值）。 */
-  #menu-dropdown {
-    display: none;
-    position: absolute;
-    top: 100%;
-    left: 12px;
-    margin-top: 4px;
-    min-width: 200px;
-    max-height: 70vh;
-    overflow-y: auto;
-    background: #1b1e26;
-    border: 1px solid #3a4150;
-    border-radius: 6px;
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-    z-index: 9999;
-    padding: 4px;
-  }
-  #menu-dropdown.open { display: block; }
-  .menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    border-radius: 4px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .menu-item:hover { background: #323844; }
-  .menu-item-icon {
-    width: 1.2em;
-    text-align: center;
-  }
-  .menu-divider {
-    height: 1px;
-    margin: 4px 6px;
-    background: #3a4150;
-  }
   #desk {
     position: relative;
     width: 100%;
     flex: 1;
     overflow: hidden;
   }
+  /* mac OS Dock 風格的啟動列：每個 plugin/panel 各一顆固定的 icon，取代原本
+     左上角的下拉選單——所有功能永遠列在這裡，不用先點開選單才看得到有哪些
+     可以開。位置在 `#desk` 跟 `#cmdbar` 之間（畫面最下面，指令輸入列上面）。 */
+  #dockbar {
+    flex: none;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    gap: 0;
+    padding: 4px 10px;
+    background: #1b1e26;
+    border-top: 1px solid #333a46;
+    overflow-x: auto;
+  }
+  .dock-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+  }
+  /* 小點代表「這個 panel 目前存在」（開著或被最小化都算，見
+     `setDockOpen`），跟是否正顯示在畫面上是兩件事——用 `visibility` 不是
+     `display`，這樣點出現/消失時 icon 不會跟著上下跳動。 */
+  .dock-dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: #6f9dff;
+    visibility: hidden;
+  }
+  .dock-item.open .dock-dot { visibility: visible; }
+  /* 平時純 icon，不畫外框/底色；滑過去才浮出一個圓角方框（半透明淺色疊
+     一層，不是純色底），參考 Windows 11 taskbar 那種「hover 才出現一個
+     圓角高亮」的效果，比原本只是 icon 變淡（`opacity`）明顯很多。按下去
+     再疊深一點顏色，跟滑過去的高亮明顯有層次差。 */
+  .dock-icon {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    color: #d8dee9;
+    border: none;
+    border-radius: 8px;
+    /* `font: inherit` 先蓋掉 `<button>` 內建的字型設定（家族/粗細等），
+       `font-size`/`line-height` 一定要寫在它後面才會生效——寫在前面會被
+       這個 shorthand 一起重置回繼承值，字級調再大都不會有效果，這正是
+       前幾次調大都「看起來沒變」的原因。 */
+    font: inherit;
+    font-size: 26px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+  }
+  .dock-icon:hover { background: rgba(255, 255, 255, 0.12); }
+  .dock-icon:active { background: rgba(255, 255, 255, 0.2); }
   #cmdbar {
     display: flex;
     align-items: center;
@@ -151,7 +156,6 @@
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   }
   .panel.active { border-color: #6f9dff; }
-  .panel.minimized { min-height: 0; min-width: 0; }
   .panel-title {
     display: flex;
     justify-content: space-between;
@@ -188,15 +192,21 @@
     white-space: pre-wrap;
     font-size: 13px;
   }
-  .resize-handle {
-    position: absolute;
-    right: 0;
-    bottom: 0;
-    width: 14px;
-    height: 14px;
-    cursor: nwse-resize;
-  }
-  .resize-handle::after {
+  /* 原本只有右下角一顆能拉，其他 7 個方向（4 邊 + 另外 3 角）補齊，讓整個
+     panel 四周都能調整大小，跟一般桌面視窗系統一致。邊是細長條、角是小
+     方塊，彼此不重疊；只有右下角維持原本那個可見的斜線抓手圖示，其餘 7 個
+     純粹靠滑鼠移過去游標變成對應方向的樣子（跟大多數桌面視窗系統一樣，
+     邊/角本身不畫出來，不然畫面會很雜）。 */
+  .resize-handle { position: absolute; z-index: 5; }
+  .resize-n { top: -4px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+  .resize-s { bottom: -4px; left: 10px; right: 10px; height: 8px; cursor: ns-resize; }
+  .resize-e { top: 10px; bottom: 10px; right: -4px; width: 8px; cursor: ew-resize; }
+  .resize-w { top: 10px; bottom: 10px; left: -4px; width: 8px; cursor: ew-resize; }
+  .resize-ne { top: -4px; right: -4px; width: 14px; height: 14px; cursor: nesw-resize; }
+  .resize-nw { top: -4px; left: -4px; width: 14px; height: 14px; cursor: nwse-resize; }
+  .resize-sw { bottom: -4px; left: -4px; width: 14px; height: 14px; cursor: nesw-resize; }
+  .resize-se { bottom: -4px; right: -4px; width: 14px; height: 14px; cursor: nwse-resize; }
+  .resize-se::after {
     content: "";
     position: absolute;
     right: 3px;
@@ -1133,12 +1143,11 @@
 </head>
 <body>
 <div id="toolbar">
-  <button id="menu-btn" title="選單">☰</button>
   <span id="hostname-label"></span>
   <span id="version-label"></span>
-  <div id="menu-dropdown"></div>
 </div>
 <div id="desk"></div>
+<div id="dockbar"></div>
 <div id="cmdbar">
   <span id="cmd-prompt">cng5&gt; </span>
   <input id="cmd-input" type="text" autocomplete="off" spellcheck="false" autofocus>
@@ -1163,8 +1172,7 @@
   const desk = document.getElementById("desk");
   const hostnameLabel = document.getElementById("hostname-label");
   const versionLabel = document.getElementById("version-label");
-  const menuBtn = document.getElementById("menu-btn");
-  const menuDropdown = document.getElementById("menu-dropdown");
+  const dockbar = document.getElementById("dockbar");
 
   // 每個 tab 自己的 panel 版面（位置/大小/疊放順序/開了哪些），只存在這個
   // JS 變數裡，重新整理就消失，也完全不會送回後端——跟後端 `rect`/`show`/
@@ -1172,32 +1180,6 @@
   const open = new Map(); // name -> { el, es }
   let zTop = 1;
   let cascade = 0;
-
-  // 最小化的 panel 停靠在 #desk 左下角（輸入列上方），每個固定佔 10% 寬、
-  // 依最小化的先後順序由左往右排，一排最多 10 個，超過就疊到上面一排——
-  // 所有 minimized panel 共用這一份順序清單，不是各自 panel 自己的狀態。
-  const MIN_DOCK_COLS = 10;
-  const minimizedPanels = [];
-
-  function updateDockMembership(panel, shouldDock) {
-    const idx = minimizedPanels.indexOf(panel);
-    if (shouldDock && idx === -1) {
-      minimizedPanels.push(panel);
-    } else if (!shouldDock && idx !== -1) {
-      minimizedPanels.splice(idx, 1);
-    }
-  }
-
-  function layoutMinimizedDock() {
-    minimizedPanels.forEach((p, i) => {
-      const col = i % MIN_DOCK_COLS;
-      const row = Math.floor(i / MIN_DOCK_COLS);
-      const rowHeight = p.querySelector(".panel-title").offsetHeight;
-      p.style.left = `${col * 10}%`;
-      p.style.width = "10%";
-      p.style.bottom = `${row * rowHeight}px`;
-    });
-  }
 
   function bringToFront(panel) {
     for (const p of desk.children) p.classList.remove("active");
@@ -1224,7 +1206,13 @@
     document.addEventListener("mouseup", onUp);
   }
 
-  function startResize(panel, evt) {
+  // `dir` 是 "n"/"s"/"e"/"w" 其中 1~2 個字元組成的方向字串（例如 "se"、
+  // "n"）：東/南邊只要單純加減滑鼠移動量；西/北邊除了改 width/height，還要
+  // 同步把 left/top 往反方向挪，不然畫面上看起來會是「對面那條邊也跟著
+  // 動」，不是「拖的這條邊在動」。width/height 先夾到最小值之後才回頭算
+  // left/top 該挪多少（用「實際變化量」而不是滑鼠原始位移量），這樣拖到
+  // 最小尺寸之後繼續拖，panel 不會整個跟著滑鼠飄走。
+  function startResize(panel, evt, dir) {
     evt.preventDefault();
     evt.stopPropagation();
     bringToFront(panel);
@@ -1232,9 +1220,25 @@
     const startY = evt.clientY;
     const startWidth = panel.offsetWidth;
     const startHeight = panel.offsetHeight;
+    const startLeft = panel.offsetLeft;
+    const startTop = panel.offsetTop;
     function onMove(e) {
-      panel.style.width = `${Math.max(160, startWidth + e.clientX - startX)}px`;
-      panel.style.height = `${Math.max(80, startHeight + e.clientY - startY)}px`;
+      const dx = e.clientX - startX;
+      const dy = e.clientY - startY;
+      if (dir.includes("e")) {
+        panel.style.width = `${Math.max(160, startWidth + dx)}px`;
+      } else if (dir.includes("w")) {
+        const newWidth = Math.max(160, startWidth - dx);
+        panel.style.width = `${newWidth}px`;
+        panel.style.left = `${startLeft - (newWidth - startWidth)}px`;
+      }
+      if (dir.includes("s")) {
+        panel.style.height = `${Math.max(80, startHeight + dy)}px`;
+      } else if (dir.includes("n")) {
+        const newHeight = Math.max(80, startHeight - dy);
+        panel.style.height = `${newHeight}px`;
+        panel.style.top = `${startTop - (newHeight - startHeight)}px`;
+      }
     }
     function onUp() {
       document.removeEventListener("mousemove", onMove);
@@ -1264,8 +1268,7 @@
     }
     entry.el.remove();
     open.delete(name);
-    updateDockMembership(entry.el, false);
-    layoutMinimizedDock();
+    setDockOpen(name, false);
   }
 
   // 跟終端機共用同一個 Shell，這裡送出去的指令（包含 `mode`/`plugin enter`
@@ -3570,9 +3573,13 @@
       body.textContent = "(等待資料...)";
     }
 
-    const handle = document.createElement("div");
-    handle.className = "resize-handle";
-    handle.addEventListener("mousedown", (e) => startResize(panel, e));
+    // 四邊 + 四角，8 個方向都能拉：見 `startResize` 對 `dir` 的說明。
+    const resizeHandles = ["n", "s", "e", "w", "ne", "nw", "se", "sw"].map((dir) => {
+      const h = document.createElement("div");
+      h.className = `resize-handle resize-${dir}`;
+      h.addEventListener("mousedown", (e) => startResize(panel, e, dir));
+      return h;
+    });
 
     panel.appendChild(title);
     panel.appendChild(
@@ -3594,7 +3601,7 @@
         ? todoUi.container
         : body
     );
-    panel.appendChild(handle);
+    resizeHandles.forEach((h) => panel.appendChild(h));
     panel.addEventListener("mousedown", () => bringToFront(panel));
     desk.appendChild(panel);
     bringToFront(panel);
@@ -3605,12 +3612,14 @@
     let layoutState = "normal";
     let savedRect = null;
 
+    // 最小化不再像以前那樣在 #desk 左下角留一個只剩 title bar 高度的小
+    // 視窗——直接整個 panel 隱藏（`display: none`），dock 那顆 icon 上的
+    // 小點就是唯一的「這個 panel 還在」的提示，見 `setDockOpen` 的說明。
     function applyLayoutState() {
-      panel.classList.toggle("minimized", layoutState === "minimized");
       // `player` panel 沒有獨立的 `body`（不訂閱 SSE，見下面），用 `?.` 讓這幾行
       // 對它來說直接跳過，不會因為 `body` 是 `undefined` 而整個 throw 出去。
       if (layoutState === "normal") {
-        panel.style.bottom = "";
+        panel.style.display = "";
         if (savedRect) {
           panel.style.left = savedRect.left;
           panel.style.top = savedRect.top;
@@ -3618,17 +3627,13 @@
           panel.style.height = savedRect.height;
         }
         if (body) body.style.display = "";
-        handle.style.display = "";
+        resizeHandles.forEach((h) => { h.style.display = ""; });
       } else if (layoutState === "minimized") {
-        if (body) body.style.display = "none";
-        handle.style.display = "none";
-        panel.style.top = ""; // 停靠位置用 bottom 定位，見 layoutMinimizedDock()
-        panel.style.height = `${title.offsetHeight}px`;
-        // left/width/bottom 交給 layoutMinimizedDock() 依停靠順序統一排版。
+        panel.style.display = "none";
       } else if (layoutState === "maximized") {
-        panel.style.bottom = "";
+        panel.style.display = "";
         if (body) body.style.display = "";
-        handle.style.display = "none";
+        resizeHandles.forEach((h) => { h.style.display = "none"; });
         panel.style.left = "0px";
         panel.style.top = "0px";
         panel.style.width = "100%";
@@ -3647,10 +3652,8 @@
         };
       }
       layoutState = layoutState === next ? "normal" : next;
-      updateDockMembership(panel, layoutState === "minimized");
       applyLayoutState();
-      layoutMinimizedDock();
-      bringToFront(panel);
+      if (layoutState !== "minimized") bringToFront(panel);
     }
 
     minimizeBtn.addEventListener("click", (e) => {
@@ -3715,7 +3718,23 @@
     if (musicUi) {
       startMusicFileBrowser(musicUi);
     }
-    open.set(name, { el: panel, es, musicUi, shellUi, notepadUi, storageUi, topologyUi, weatherUi, todoUi });
+    open.set(name, {
+      el: panel,
+      es,
+      musicUi,
+      shellUi,
+      notepadUi,
+      storageUi,
+      topologyUi,
+      weatherUi,
+      todoUi,
+      // dock icon 點下去要能「切換最小化」，重複用跟 title bar 上那顆 `_`
+      // 按鈕完全同一套邏輯（見上面 `toggleLayoutState`）——不是關閉，關閉
+      // 是 title bar 上的 `×`（`closePanel`），兩者對 dock 小點的影響不同，
+      // 見 `setDockOpen` 的說明。
+      toggleMinimize: () => toggleLayoutState("minimized"),
+    });
+    setDockOpen(name, true);
   }
 
   fetch("/api/version")
@@ -3725,59 +3744,123 @@
       versionLabel.textContent = d.version;
     });
 
-  // 選單裡每一項的統一外形：圖示 + 名字，點下去開對應的 panel（跟以前下拉
-  // 選單+「開啟 panel」按鈕、或 player/shell 專屬按鈕，最後都是呼叫同一個
-  // `openPanel(name)`，這裡收斂成同一份小函式，不用三處各自組 DOM）。選完
-  // 就把選單收起來，跟一般選單的操作習慣一致。
-  function addMenuItem(name, icon) {
-    const item = document.createElement("div");
-    item.className = "menu-item";
-    const iconEl = document.createElement("span");
-    iconEl.className = "menu-item-icon";
-    iconEl.textContent = icon;
-    const label = document.createElement("span");
-    label.textContent = name;
-    item.appendChild(iconEl);
-    item.appendChild(label);
-    item.addEventListener("click", () => {
-      openPanel(name);
-      menuDropdown.classList.remove("open");
-    });
-    menuDropdown.appendChild(item);
+  // name -> dock item 的 DOM 元素，`setDockOpen` 用來找到對應的 icon 補上/
+  // 拿掉小點。
+  const dockItems = new Map();
+
+  // 小點代表「這個 panel 目前存在」（`open` 這個 Map 裡有它），不管它現在是
+  // 顯示中還是被最小化——跟 title bar 的 `×`（`closePanel`，真的整個關掉、
+  // 小點才會消失）是兩件事：dock icon 本身點下去（`toggleFromDock`）只是
+  // 開啟／切換最小化，不會讓小點消失。
+  function setDockOpen(name, isOpen) {
+    const item = dockItems.get(name);
+    if (item) item.classList.toggle("open", isOpen);
   }
 
-  // player/shell 立刻加進選單，不用等 `/api/plugins` 回來——跟以前那兩顆
-  // 固定按鈕一樣，一開始就能點，不會因為 plugin 清單還沒抓回來就暫時消失。
-  addMenuItem("player", "🎵");
-  addMenuItem("shell", "🖥️");
-  addMenuItem("topology", "🌐");
-  const menuDivider = document.createElement("div");
-  menuDivider.className = "menu-divider";
-  menuDropdown.appendChild(menuDivider);
+  // dock icon 點下去：panel 還沒開就開一個（`openPanel` 自己會把小點點亮，
+  // 見該函式最後的 `setDockOpen`）；已經開著就切換最小化/還原（跟 title
+  // bar 上那顆 `_` 按鈕完全同一套邏輯，見 `entry.toggleMinimize` 的說明）。
+  function toggleFromDock(name) {
+    const entry = open.get(name);
+    if (!entry) {
+      openPanel(name);
+      return;
+    }
+    entry.toggleMinimize();
+  }
+
+  function addDockItem(name, icon) {
+    const item = document.createElement("div");
+    item.className = "dock-item";
+    const dot = document.createElement("span");
+    dot.className = "dock-dot";
+    const btn = document.createElement("button");
+    btn.className = "dock-icon";
+    // `icon` 大部分是純文字（emoji），但 gitrepo 那顆是手繪 SVG 字串（見
+    // `GITBRANCH_ICON`），用 `innerHTML` 才能吃兩種——這裡的值全部是自己
+    // 寫的常數，不是使用者輸入，用 `innerHTML` 不會有 XSS 風險。
+    btn.innerHTML = icon;
+    btn.title = name;
+    btn.addEventListener("click", () => toggleFromDock(name));
+    item.appendChild(dot);
+    item.appendChild(btn);
+    dockbar.appendChild(item);
+    dockItems.set(name, item);
+  }
+
+  // player/shell/topology 立刻加進 dock，不用等 `/api/plugins` 回來——跟以前
+  // 那兩顆固定按鈕一樣，一開始就能點，不會因為 plugin 清單還沒抓回來就暫時
+  // 消失。
+  addDockItem("player", "🎵");
+  addDockItem("shell", "❯_");
+  addDockItem("topology", "🌐");
+
+  // 每個 plugin 依功能給一個對應的圖示（跟 tablet/iphone 分頁列共用的
+  // icon 盡量一致，例如 device/global/storage/notepad/system/todo/weather）
+  // ——`/api/plugins` 本身只回傳名字字串，沒有圖示可用，這份對照表寫在
+  // 前端這裡。清單裡沒列到的名字（以後新增的 plugin）退回一個代表「這會
+  // 開一個 panel」的通用圖示，不會整個掛掉。
+  // gitrepo/qr 兩個沒有現成的 emoji 長得像，手繪成跟 player 的 shuffle 圖示
+  // 同一套風格的內嵌 SVG（`stroke="currentColor"`/`fill="currentColor"`，
+  // 顏色自動跟著按鈕文字色走）：gitrepo 是常見的「git branch」圖示（三個
+  // 節點、一條分支線），不是 git-scm.com 官方 logo 本身（那是別人的商標，
+  // 也需要另外拉一份外部圖片資源進來，跟這個專案「所有前端資源都自足、
+  // 不連外」的慣例不合）；qr 是簡化版的 QR code 圖案（三個角的定位框 + 一
+  // 些隨意排列的資料格子，不是真的能掃的 QR code，純粹視覺上像）。
+  const GITBRANCH_ICON =
+    '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="none" stroke="currentColor" ' +
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<circle cx="6" cy="6" r="2.5"></circle>' +
+    '<circle cx="6" cy="18" r="2.5"></circle>' +
+    '<circle cx="18" cy="6" r="2.5"></circle>' +
+    '<path d="M6 8.5 L6 15.5"></path>' +
+    '<path d="M18 8.5 C18 13, 8.5 13, 8.5 13"></path>' +
+    "</svg>";
+  const QR_ICON =
+    '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor">' +
+    '<rect x="2" y="2" width="7" height="7" fill="none" stroke="currentColor" stroke-width="2"></rect>' +
+    '<rect x="4.5" y="4.5" width="2" height="2"></rect>' +
+    '<rect x="15" y="2" width="7" height="7" fill="none" stroke="currentColor" stroke-width="2"></rect>' +
+    '<rect x="17.5" y="4.5" width="2" height="2"></rect>' +
+    '<rect x="2" y="15" width="7" height="7" fill="none" stroke="currentColor" stroke-width="2"></rect>' +
+    '<rect x="4.5" y="17.5" width="2" height="2"></rect>' +
+    '<rect x="12" y="2" width="2" height="2"></rect>' +
+    '<rect x="12" y="6" width="2" height="2"></rect>' +
+    '<rect x="10" y="10" width="2" height="2"></rect>' +
+    '<rect x="14" y="10" width="2" height="2"></rect>' +
+    '<rect x="18" y="12" width="2" height="2"></rect>' +
+    '<rect x="10" y="14" width="2" height="2"></rect>' +
+    '<rect x="14" y="16" width="2" height="2"></rect>' +
+    '<rect x="18" y="18" width="2" height="2"></rect>' +
+    '<rect x="14" y="20" width="2" height="2"></rect>' +
+    "</svg>";
+  const PLUGIN_ICONS = {
+    wol: "⏻",
+    activities: "📶",
+    clock: "🕐",
+    device: "📟",
+    gitrepo: GITBRANCH_ICON,
+    global: "🌍",
+    music: "🎶",
+    notepad: "📝",
+    output: "🧾",
+    remote: "📡",
+    "remote-output": "🛰️",
+    storage: "🗂️",
+    sync: "🔄",
+    system: "ℹ️",
+    todo: "✅",
+    weather: "🌤️",
+    qr: QR_ICON,
+  };
 
   fetch("/api/plugins")
     .then((r) => r.json())
     .then((names) => {
-      // 每個 plugin 都用同一種圖示（🪟）——不像 player/shell 各自有代表內容
-      // 的圖示，plugin 清單本來就沒有各自的圖示可用，統一用一個代表「這會
-      // 開一個 panel」的圖示就好，不需要也不該每個 plugin 猜一個不同圖示。
       for (const name of names) {
-        addMenuItem(name, "🪟");
+        addDockItem(name, PLUGIN_ICONS[name] || "🪟");
       }
     });
-
-  menuBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    menuDropdown.classList.toggle("open");
-  });
-
-  // 點選單以外的地方收起來；`stopPropagation`（見上面 `menuBtn` 的 click）
-  // 讓按鈕自己那次點擊不會被這裡立刻收掉，兩個 listener 才不會互相打架。
-  document.addEventListener("click", (e) => {
-    if (!menuDropdown.contains(e.target)) {
-      menuDropdown.classList.remove("open");
-    }
-  });
 
   // 指令輸入列：跟終端機共用同一個 Shell，所以這裡打的指令（包含
   // `mode`/`plugin enter` 之類會換 mode 的）會直接影響後端狀態，Enter 送出、
