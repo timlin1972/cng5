@@ -22,6 +22,15 @@ add Tokyo
 add Eindhoven
 ~
 
+# worldclock
+plugin enter worldclock
+add 台北市
+add Eindhoven
+add Tokyo
+add 西雅圖
+add Chiang Mai
+~
+
 # device
 plugin enter device
 panel

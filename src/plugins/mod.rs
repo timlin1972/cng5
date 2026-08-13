@@ -17,6 +17,7 @@ mod table_diff;
 mod todo;
 mod weather;
 mod wol;
+mod worldclock;
 
 pub use activities::ActivitiesPlugin;
 pub use clock::ClockPlugin;
@@ -44,3 +45,4 @@ pub(crate) use table_diff::{RowDiffTracker, TableSnapshot};
 pub use todo::TodoPlugin;
 pub use weather::WeatherPlugin;
 pub use wol::WolPlugin;
+pub use worldclock::WorldClockPlugin;

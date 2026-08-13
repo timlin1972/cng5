@@ -29,7 +29,7 @@ use plugin::{ContextInner, Plugin};
 use plugins::{
     ActivitiesPlugin, ClockPlugin, DevicePlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin,
     NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, StoragePlugin, SyncPlugin,
-    SystemPlugin, TodoPlugin, WeatherPlugin, WolPlugin,
+    SystemPlugin, TodoPlugin, WeatherPlugin, WolPlugin, WorldClockPlugin,
 };
 use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
@@ -113,6 +113,10 @@ fn main() -> Result<()> {
             Box::new(|ctx| Box::new(WeatherPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
         ("qr", Box::new(|ctx| Box::new(QrPlugin::new(ctx)) as Box<dyn Plugin>)),
+        (
+            "worldclock",
+            Box::new(|ctx| Box::new(WorldClockPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
     ];
     let shell = Arc::new(Mutex::new(Shell::new(ctx.clone(), factories, output.clone())));
     // 跟目前終端機是 CLI 還是 GUI mode 無關，整個程式活著期間都在背景監聽
