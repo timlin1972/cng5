@@ -36,10 +36,26 @@ Open-Meteo 的中文資料庫查不到（例如「清邁」，其資料庫裡存
 
 #[derive(Clone)]
 struct CityOffset {
+    /// 地理編碼查到的座標，`text()`/CLI 不需要，`snapshot()` 給 webui 的世界
+    /// 地圖畫城市座標點用（見 `WorldClockCityJson`）。
+    lat: f64,
+    lon: f64,
     /// IANA 時區名稱（例如 `Asia/Tokyo`），純粹顯示用。
     timezone: String,
     /// 該地點目前跟 UTC 差多少秒，已經含 DST——`fetch` 直接讀 Open-Meteo
     /// forecast API 回應裡的 `utc_offset_seconds`，不用自己維護時區規則表。
+    offset_secs: i64,
+}
+
+/// `GET /api/worldclock/list` 的一筆回應（見 `WorldClockPlugin::snapshot`）：
+/// 只給世界地圖畫點用的座標跟 `offset_secs`，前端自己每秒用 `offset_secs`
+/// 算當地時間、持續跳動，不需要每秒重打這條 API；不帶 `timezone` 名稱——
+/// 地圖上只標城市名稱跟當地時間，不用像 `text()` 那樣額外顯示時區資訊。
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct WorldClockCityJson {
+    city: String,
+    lat: f64,
+    lon: f64,
     offset_secs: i64,
 }
 
@@ -107,10 +123,10 @@ impl WorldClockPlugin {
         self.cities.iter().map(|city| format!("{city}: {}", self.display(city))).collect::<Vec<_>>().join("\n")
     }
 
-    /// 只讀快取，不做任何網路呼叫：有資料就依 `offset_secs` 算出現在的
-    /// `HH:MM:SS` 回傳，同時判斷是否過期該重抓；真正的抓取一律丟給
-    /// `spawn_refresh`。
-    fn display(&self, city: &str) -> String {
+    /// 只讀快取，不做任何網路呼叫：回傳目前的抓取結果（成功/失敗/還沒抓過），
+    /// 同時判斷是否過期該重抓；真正的抓取一律丟給 `spawn_refresh`。`display`/
+    /// `snapshot` 共用這個，各自決定要把結果轉成什麼形式（純文字 vs JSON）。
+    fn lookup(&self, city: &str) -> Option<Result<CityOffset, String>> {
         let cached = self.cache.lock().unwrap().get(city).map(|entry| (entry.fetched_at.elapsed(), entry.result.clone()));
         let stale = match &cached {
             None => true,
@@ -119,13 +135,35 @@ impl WorldClockPlugin {
         if stale {
             self.spawn_refresh(city);
         }
-        match cached {
-            Some((_, Ok(offset))) => {
+        cached.map(|(_, result)| result)
+    }
+
+    /// `text()` 用的一行內容：有資料就依 `offset_secs` 算出現在的 `HH:MM:SS`，
+    /// 帶上時區名稱／UTC 偏移；抓失敗顯示錯誤訊息；還沒抓過顯示「抓取中」。
+    fn display(&self, city: &str) -> String {
+        match self.lookup(city) {
+            Some(Ok(offset)) => {
                 format!("{} {}", local_hms(offset.offset_secs), format_utc_offset(&offset.timezone, offset.offset_secs))
             }
-            Some((_, Err(message))) => message,
+            Some(Err(message)) => message,
             None => "抓取中...".to_string(),
         }
+    }
+
+    /// 給 webui 的世界地圖用的結構化清單（`web.rs` 的 `/api/worldclock/list`
+    /// 呼叫這個轉成 JSON）：跳過還在抓取中／抓失敗的城市——地圖上本來就沒有
+    /// 座標可以畫點，跟 `text()` 用一句狀態訊息占著那一行不一樣，這裡直接
+    /// 略過，等下一輪 poll 抓到座標後自然會出現。
+    pub(crate) fn snapshot(&self) -> Vec<WorldClockCityJson> {
+        self.cities
+            .iter()
+            .filter_map(|city| match self.lookup(city) {
+                Some(Ok(offset)) => {
+                    Some(WorldClockCityJson { city: city.clone(), lat: offset.lat, lon: offset.lon, offset_secs: offset.offset_secs })
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// 開一個背景執行緒去查 `city` 目前的 UTC 偏移，抓完寫回 `cache`；如果這個
@@ -195,7 +233,7 @@ impl WorldClockPlugin {
         let forecast = Self::curl_json(&forecast_url)?;
         let offset_secs = forecast.get("utc_offset_seconds")?.as_i64()?;
         let timezone = forecast.get("timezone")?.as_str()?.to_string();
-        Some(CityOffset { timezone, offset_secs })
+        Some(CityOffset { lat, lon, timezone, offset_secs })
     }
 }
 

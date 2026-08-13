@@ -21,8 +21,8 @@ use crate::plugin::{
 };
 use crate::plugins::{
     list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
-    DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR,
-    STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR,
+    NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -159,6 +159,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/device/list", web::get().to(device_list))
             .route("/api/global/list", web::get().to(global_list))
             .route("/api/weather/list", web::get().to(weather_list))
+            .route("/api/worldclock/list", web::get().to(worldclock_list))
             .route("/api/todo/list", web::get().to(todo_list))
             .route("/api/todo/add", web::post().to(todo_add))
             .route("/api/todo/toggle", web::post().to(todo_toggle))
@@ -224,6 +225,20 @@ async fn weather_list(shell: web::Data<SharedShell>) -> impl Responder {
     let items = lock_shell(&shell)
         .plugin_mut("weather")
         .and_then(|p| p.as_any_mut().downcast_mut::<WeatherPlugin>())
+        .map(|w| w.snapshot())
+        .unwrap_or_default();
+    HttpResponse::Ok().json(items)
+}
+
+/// `GET /api/worldclock/list`：webui 的世界地圖用，回傳每個 `add` 過的城市
+/// 目前的座標＋UTC 偏移（見 `WorldClockPlugin::snapshot` 的說明），跟
+/// `weather_list` 同一個「向下轉型拿具體型別」的做法。前端自己用
+/// `offset_secs` 每秒算一次當地時間讓畫面上的時鐘持續跳動，不需要靠這條
+/// API 的 poll 頻率決定顯示更新的頻率。
+async fn worldclock_list(shell: web::Data<SharedShell>) -> impl Responder {
+    let items = lock_shell(&shell)
+        .plugin_mut("worldclock")
+        .and_then(|p| p.as_any_mut().downcast_mut::<WorldClockPlugin>())
         .map(|w| w.snapshot())
         .unwrap_or_default();
     HttpResponse::Ok().json(items)
