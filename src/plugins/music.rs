@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,51 @@ pub(crate) fn safe_music_copy_path(name: &str) -> Option<PathBuf> {
         return None;
     }
     Some(Path::new(MUSIC_DIR).join(name))
+}
+
+/// 收藏標記存放位置：跟 `todo`/`notepad` 一樣放在 `storage/` 底下自己的子
+/// 資料夾（`todo.rs` 的 `TODO_DIR`/`TODO_FILE` 同一套慣例），跟 `music/`
+/// 資料夾本身分開——使用者直接在 `music/` 底下手動加/刪 mp3 檔案時，不會
+/// 意外動到這份索引（也不會讓收藏清單被誤判成一個可以播放的 `.mp3` 檔案）。
+const MUSIC_FAVORITES_DIR: &str = "storage/music";
+const MUSIC_FAVORITES_FILE: &str = "storage/music/favorites.json";
+
+/// 讀目前收藏的檔名集合。檔案不存在（還沒收藏過任何一首）或格式壞掉都當成
+/// 「還沒有任何收藏」，跟 `todo::load()` 同一套「缺資料就當空」的容錯邏輯，
+/// 不用另外處理「第一次啟動、還沒有這個檔案」這種情況，也不 panic。
+pub(crate) fn load_favorites() -> HashSet<String> {
+    fs::read_to_string(MUSIC_FAVORITES_FILE).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+}
+
+fn save_favorites(favorites: &HashSet<String>) -> Result<()> {
+    fs::create_dir_all(MUSIC_FAVORITES_DIR)?;
+    fs::write(MUSIC_FAVORITES_FILE, serde_json::to_string_pretty(favorites)?)?;
+    Ok(())
+}
+
+/// 切換一首歌是不是收藏，回傳切換後的狀態（`true` = 現在是收藏）。`web.rs`
+/// 的 `POST /api/music/file/{name}/favorite` 呼叫這個，`name` 呼叫端已經先
+/// 過 `safe_music_path` 驗證過、也確認過檔案真的存在，這裡不用再檢查一次。
+pub(crate) fn toggle_favorite(name: &str) -> Result<bool> {
+    let mut favorites = load_favorites();
+    let now_favorite = if favorites.remove(name) {
+        false
+    } else {
+        favorites.insert(name.to_string());
+        true
+    };
+    save_favorites(&favorites)?;
+    Ok(now_favorite)
+}
+
+/// 刪除一首歌（`web.rs` 的 `music_file_delete`）之後順手把收藏索引裡對應的
+/// 項目一起清掉，不留著指向已經不存在的檔案——failure 不影響刪除本身是否
+/// 成功（刪除檔案這件事已經完成了），所以呼叫端不需要處理這裡的錯誤。
+pub(crate) fn remove_favorite(name: &str) {
+    let mut favorites = load_favorites();
+    if favorites.remove(name) {
+        let _ = save_favorites(&favorites);
+    }
 }
 
 /// 把檔名塞進 `/api/music/copy/{name}` 這個 URL 之前先 percent-encode——

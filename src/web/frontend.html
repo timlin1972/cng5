@@ -533,6 +533,30 @@
     line-height: 1.6;
     padding: 4px 0;
   }
+  /* 目前播放這首歌名旁邊的收藏按鈕：跟歌名同一排、置中，`.player-track-name`
+     放進這個 flex row 之後要能縮小（`min-width: 0`）才吃得到 ellipsis，不然
+     flex item 預設不會縮小，長歌名會把按鈕擠出畫面。 */
+  .player-track-name-row {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    max-width: 100%;
+  }
+  .player-track-name-row .player-track-name { min-width: 0; }
+  .player-now-playing-fav-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: #d8dee9;
+    font-size: 15px;
+    line-height: 1;
+    padding: 2px;
+    cursor: pointer;
+  }
+  .player-now-playing-fav-btn:hover { opacity: 0.75; }
+  .player-now-playing-fav-btn:disabled { opacity: 0.3; cursor: default; }
   /* 歌詞來自 `download` 順便抓的 YouTube 字幕（真人上傳的才抓，見
      `MusicPlugin::download` 的說明），不是每首歌都有。放在播放模式按鈕
      下面的迷你小視窗，固定只留幾行高度，`scrollActiveLyricIntoView` 會
@@ -1320,8 +1344,8 @@
     async function refresh() {
       try {
         const res = await fetch("/api/music/files");
-        const names = await res.json();
-        renderMusicFiles(musicUi, names, refresh);
+        const items = await res.json();
+        renderMusicFiles(musicUi, items, refresh);
       } catch (_err) {
         // 這次沒抓到就算了，下一次 poll 再試，不用跳錯誤訊息干擾畫面。
       }
@@ -1385,6 +1409,7 @@
     musicUi.currentName = name;
     musicUi.player.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
     musicUi.player.play();
+    updateNowPlayingFavButton(musicUi);
     // 隨機播放模式下，接下來要播的那首在清單裡可能離目前捲動位置很遠；換歌時
     // 把目前播放中的那一列捲進可視範圍——`block: "nearest"` 只有真的被捲出
     // 範圍外時才會動，本來就看得到的話不會多此一舉亂捲動。
@@ -1478,11 +1503,51 @@
     scrollActiveLyricIntoView(musicUi);
   }
 
+  // 換到「下一首」時（不管是照順序還是隨機），只要候選歌曲不是收藏
+  // （`musicUi.favorites`，見 `renderMusicFiles`），就有這個機率直接跳過、
+  // 繼續找下一個候選——不影響「上一首」，使用者按上一首是明確要聽前一首，
+  // 不該被跳過。
+  const SKIP_NON_FAVORITE_PROBABILITY = 0.3;
+
+  function isFavoriteTrack(musicUi, name) {
+    return musicUi.favorites.has(name);
+  }
+
+  function shouldSkipNonFavorite(musicUi, name) {
+    return !isFavoriteTrack(musicUi, name) && Math.random() < SKIP_NON_FAVORITE_PROBABILITY;
+  }
+
+  // 目前播放這首歌旁邊那顆收藏按鈕（`musicUi.nowPlayingFavBtn`，`music`
+  // panel 沒有這個欄位，跟 `cover`/`trackName`/`seekBar` 同一套「只有 `player`
+  // panel 才有」的判斷）換歌（`playByName`）、清單重新整理（`renderMusicFiles`
+  // 重建 `musicUi.favorites`）、使用者自己按這顆按鈕之後都要呼叫這個更新一次
+  // 圖示，三個地方共用才不會各寫一份「有沒有收藏」的判斷邏輯。
+  function updateNowPlayingFavButton(musicUi) {
+    if (!musicUi.nowPlayingFavBtn) return;
+    const isFav = musicUi.currentName ? isFavoriteTrack(musicUi, musicUi.currentName) : false;
+    musicUi.nowPlayingFavBtn.disabled = !musicUi.currentName;
+    musicUi.nowPlayingFavBtn.textContent = isFav ? "★" : "☆";
+    musicUi.nowPlayingFavBtn.title = isFav ? "取消收藏" : "加入收藏（收藏的歌曲換下一首時不會被機率跳過）";
+  }
+
   // `delta` 是 +1（下一首）或 -1（上一首）；找不到目前這首（例如已經被刪除）
-  // 或已經到清單頭尾就不做事。
+  // 就不做事。往「下一首」（`delta > 0`）方向走時，遇到不是收藏的候選歌曲就
+  // 依 `shouldSkipNonFavorite` 機率跳過、往後找下一個真的要播的，一路找到
+  // 清單尾端都沒有可播的就跟原本一樣不做事；「上一首」維持原本行為，不套用
+  // 跳過邏輯。
   function offsetTrack(musicUi, delta) {
     const idx = musicUi.playlist.indexOf(musicUi.currentName);
     if (idx === -1) return;
+    if (delta > 0) {
+      for (let next = idx + delta; next < musicUi.playlist.length; next++) {
+        const name = musicUi.playlist[next];
+        if (!shouldSkipNonFavorite(musicUi, name)) {
+          playByName(musicUi, name);
+          return;
+        }
+      }
+      return;
+    }
     const next = idx + delta;
     if (next >= 0 && next < musicUi.playlist.length) {
       playByName(musicUi, musicUi.playlist[next]);
@@ -1493,15 +1558,30 @@
   // （排除目前這首，不然感覺像沒換），只剩這一首（或清單是空的）就原地重播/
   // 不做事——「隨機播放模式下按下一首」（見 `nextBtn` 的點擊事件）跟「隨機
   // 播放模式下一首歌自然播完」（見 `advanceOnEnded`）都是同一種「换一首」，
-  // 共用這個函式才不會兩邊各寫一份邏輯、之後改一邊忘了改另一邊。
+  // 共用這個函式才不會兩邊各寫一份邏輯、之後改一邊忘了改另一邊。抽到的候選
+  // 一樣要過 `shouldSkipNonFavorite` 這一關，跳過就從候選池裡把它剔除再重抽
+  // （候選池每輪至少少一個，最多重抽 `others.length` 次一定會結束，不會卡在
+  // 原地空轉）；萬一全部候選都被跳過（候選數愈少愈可能發生），退回不看跳過
+  // 機率直接隨機挑一首播——保證一定會換到別首歌。
   function playRandomOther(musicUi) {
     const others = musicUi.playlist.filter((name) => name !== musicUi.currentName);
-    if (others.length > 0) {
-      playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
-    } else if (musicUi.playlist.length > 0) {
-      musicUi.player.currentTime = 0;
-      musicUi.player.play();
+    if (others.length === 0) {
+      if (musicUi.playlist.length > 0) {
+        musicUi.player.currentTime = 0;
+        musicUi.player.play();
+      }
+      return;
     }
+    let pool = others;
+    while (pool.length > 0) {
+      const pick = pool[Math.floor(Math.random() * pool.length)];
+      if (!shouldSkipNonFavorite(musicUi, pick)) {
+        playByName(musicUi, pick);
+        return;
+      }
+      pool = pool.filter((name) => name !== pick);
+    }
+    playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
   }
 
   // 「下一首」按鈕跟 Media Session 的 `nexttrack` 動作（見
@@ -1547,18 +1627,26 @@
     return activeRow;
   }
 
-  function renderMusicFiles(musicUi, names, refresh) {
-    musicUi.playlist = names;
+  // `items` 是 `/api/music/files` 回的 `{name, favorite}[]`（見
+  // `src/web.rs` 的 `music_files`）。`musicUi.playlist` 仍然維持單純的檔名
+  // 陣列（`offsetTrack`/`playRandomOther`/`playByName` 一路以來都是這樣用），
+  // 收藏狀態另外放進 `musicUi.favorites`（檔名的 `Set`），兩者都在這裡一起
+  // 更新，維持同步。
+  function renderMusicFiles(musicUi, items, refresh) {
+    musicUi.playlist = items.map((item) => item.name);
+    musicUi.favorites = new Set(items.filter((item) => item.favorite).map((item) => item.name));
+    updateNowPlayingFavButton(musicUi);
     musicUi.fileList.innerHTML = "";
-    musicUi.fileCount.textContent = `共 ${names.length} 首`;
-    if (names.length === 0) {
+    musicUi.fileCount.textContent = `共 ${items.length} 首`;
+    if (items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "music-empty";
       empty.textContent = "(還沒有下載任何檔案)";
       musicUi.fileList.appendChild(empty);
       return;
     }
-    for (const name of names) {
+    for (const item of items) {
+      const name = item.name;
       const row = document.createElement("div");
       row.className = "music-row";
       row.dataset.name = name;
@@ -1572,6 +1660,19 @@
       playBtn.title = "播放";
       playBtn.addEventListener("click", () => playByName(musicUi, name));
 
+      // 收藏標記：換到下一首時（見 `offsetTrack`/`playRandomOther`），沒
+      // 收藏的歌曲有機率被跳過，這個按鈕就是使用者標記「這首不要被跳過」
+      // 的地方。點下去直接切換、重抓一次清單刷新星星圖示跟 `musicUi.favorites`
+      // ——跟 `delBtn` 同一個「送出請求後 `refresh()`」的作法，不用自己在
+      // 前端另外維護一份切換後的暫時狀態。
+      const favBtn = document.createElement("button");
+      favBtn.textContent = item.favorite ? "★" : "☆";
+      favBtn.title = item.favorite ? "取消收藏" : "加入收藏（收藏的歌曲換下一首時不會被機率跳過）";
+      favBtn.addEventListener("click", async () => {
+        await fetch(`/api/music/file/${encodeURIComponent(name)}/favorite`, { method: "POST" });
+        refresh();
+      });
+
       const delBtn = document.createElement("button");
       delBtn.textContent = "🗑";
       delBtn.title = "刪除";
@@ -1582,6 +1683,7 @@
       });
 
       row.appendChild(label);
+      row.appendChild(favBtn);
       row.appendChild(playBtn);
       row.appendChild(delBtn);
       musicUi.fileList.appendChild(row);
@@ -3099,6 +3201,29 @@
       const trackName = document.createElement("div");
       trackName.className = "player-track-name";
       trackName.textContent = "(尚未播放)";
+      // 目前播放這首歌旁邊也放一顆收藏按鈕（跟檔案清單那顆是同一個開關，
+      // 見 `updateNowPlayingFavButton`），不用特地捲到清單裡找到那一列才能
+      // 標記——聽到喜歡的歌、當下就能標記。還沒開始播放（`musicUi.currentName`
+      // 是 `null`）時沒有目標可以標記，直接停用。
+      const trackNameRow = document.createElement("div");
+      trackNameRow.className = "player-track-name-row";
+      const nowPlayingFavBtn = document.createElement("button");
+      nowPlayingFavBtn.className = "player-now-playing-fav-btn";
+      nowPlayingFavBtn.disabled = true;
+      nowPlayingFavBtn.textContent = "☆";
+      nowPlayingFavBtn.addEventListener("click", async () => {
+        if (!musicUi.currentName) return;
+        const res = await fetch(`/api/music/file/${encodeURIComponent(musicUi.currentName)}/favorite`, { method: "POST" });
+        const body = await res.json();
+        if (body.favorite) {
+          musicUi.favorites.add(musicUi.currentName);
+        } else {
+          musicUi.favorites.delete(musicUi.currentName);
+        }
+        updateNowPlayingFavButton(musicUi);
+      });
+      trackNameRow.appendChild(nowPlayingFavBtn);
+      trackNameRow.appendChild(trackName);
       const rightControls = document.createElement("div");
       rightControls.className = "player-controls";
       // 播放模式按鈕：依序播放 -> 隨機播放 -> 播放單首，循環切換，只影響
@@ -3177,7 +3302,7 @@
       lyricsMini.className = "player-lyrics-mini";
       right.appendChild(cover);
       right.appendChild(seekRow);
-      right.appendChild(trackName);
+      right.appendChild(trackNameRow);
       right.appendChild(rightControls);
       right.appendChild(lyricsMini);
 
@@ -3194,12 +3319,14 @@
         player,
         cover,
         trackName,
+        nowPlayingFavBtn,
         seekBar,
         timeLabel,
         lyricsEl: lyricsMini,
         lyricsLines: [],
         lyricsActiveIndex: -1,
         playlist: [],
+        favorites: new Set(),
         currentName: null,
         playMode: PLAY_MODES[0].mode,
         stopPolling: () => {},

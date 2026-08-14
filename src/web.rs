@@ -153,6 +153,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/music/file/{name}/cover", web::get().to(music_file_cover))
             .route("/api/music/file/{name}/lyrics", web::get().to(music_file_lyrics))
             .route("/api/music/file/{name}", web::delete().to(music_file_delete))
+            .route("/api/music/file/{name}/favorite", web::post().to(music_file_favorite))
             .route("/api/notepad/content", web::get().to(notepad_get_content))
             .route("/api/notepad/content", web::post().to(notepad_save_content))
             .route("/api/device/register", web::post().to(device_register))
@@ -979,25 +980,37 @@ fn safe_music_path(name: &str) -> Option<PathBuf> {
     Some(Path::new(MUSIC_DIR).join(name))
 }
 
+/// `/api/music/files` 一筆回應：`favorite` 是 webui/tablet/iphone 三邊播放器
+/// 共用的「非收藏歌曲輪到下一首時機率性跳過」功能要用的旗標（見
+/// `crate::plugins::load_favorites`），播放清單本身仍然照檔名排序，跳不跳過
+/// 完全是前端播放邏輯的事，這裡只負責把目前的收藏狀態一起帶出去。
+#[derive(Serialize)]
+struct MusicFileJson {
+    name: String,
+    favorite: bool,
+}
+
 /// `GET /api/music/files`：`music/` 資料夾裡目前有的檔案名稱（依字母排序），
 /// 資料夾還不存在就當作空清單，不報錯——跟 `MusicPlugin::list_text()` 判斷
 /// 資料夾不存在時的容錯邏輯一致。只列 `.mp3`，`download` 順便存的 `.srt`
 /// 歌詞字幕檔是附屬品，不該被當成清單裡可以播放/刪除的一個項目（見
 /// `MusicPlugin::list_text()` 的同一個理由）。
 async fn music_files() -> impl Responder {
-    let names: Vec<String> = std::fs::read_dir(MUSIC_DIR)
+    let favorites = crate::plugins::load_favorites();
+    let items: Vec<MusicFileJson> = std::fs::read_dir(MUSIC_DIR)
         .map(|entries| {
-            let mut names: Vec<String> = entries
+            let mut items: Vec<MusicFileJson> = entries
                 .filter_map(|entry| entry.ok())
                 .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()))
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
                 .filter(|name| name.to_ascii_lowercase().ends_with(".mp3"))
+                .map(|name| MusicFileJson { favorite: favorites.contains(&name), name })
                 .collect();
-            names.sort();
-            names
+            items.sort_by(|a, b| a.name.cmp(&b.name));
+            items
         })
         .unwrap_or_default();
-    HttpResponse::Ok().json(names)
+    HttpResponse::Ok().json(items)
 }
 
 /// `GET /api/music/file/{name}/audio`：把檔案內容當音訊串流回去，用
@@ -1014,15 +1027,39 @@ async fn music_file_audio(path: web::Path<String>, req: HttpRequest) -> HttpResp
     }
 }
 
-/// `DELETE /api/music/file/{name}`：從 `music/` 資料夾刪掉這個檔案。
+/// `DELETE /api/music/file/{name}`：從 `music/` 資料夾刪掉這個檔案。順手把
+/// 收藏索引裡對應的項目也清掉（見 `crate::plugins::remove_favorite`），不留
+/// 著指向已經不存在的檔案。
 async fn music_file_delete(path: web::Path<String>) -> impl Responder {
     let name = path.into_inner();
     let Some(file_path) = safe_music_path(&name) else {
         return HttpResponse::BadRequest().finish();
     };
     match std::fs::remove_file(&file_path) {
-        Ok(()) => HttpResponse::Ok().finish(),
+        Ok(()) => {
+            crate::plugins::remove_favorite(&name);
+            HttpResponse::Ok().finish()
+        }
         Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `POST /api/music/file/{name}/favorite`：切換一首歌是不是收藏，回傳切換後
+/// 的狀態 `{"favorite": bool}`（前端不用再另外 `GET /api/music/files` 才知道
+/// 切換成功與否）。跟 `music_file_delete`/`music_file_cover` 一樣先用
+/// `safe_music_path` 驗證檔名，並且要求檔案真的存在——收藏一個不存在的檔名
+/// 沒有意義，也會讓索引裡累積垃圾。
+async fn music_file_favorite(path: web::Path<String>) -> HttpResponse {
+    let name = path.into_inner();
+    let Some(file_path) = safe_music_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    if !file_path.is_file() {
+        return HttpResponse::NotFound().finish();
+    }
+    match crate::plugins::toggle_favorite(&name) {
+        Ok(favorite) => HttpResponse::Ok().json(serde_json::json!({ "favorite": favorite })),
+        Err(_) => HttpResponse::InternalServerError().finish(),
     }
 }
 

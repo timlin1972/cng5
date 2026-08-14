@@ -453,6 +453,20 @@
     line-height: 1.6;
     padding: 4px 0;
   }
+  .player-track-name-row { display: flex; align-items: center; justify-content: center; gap: 6px; width: 100%; max-width: 100%; }
+  .player-track-name-row .player-track-name { min-width: 0; }
+  .player-now-playing-fav-btn {
+    flex-shrink: 0;
+    background: none;
+    border: none;
+    color: #d8dee9;
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px;
+    cursor: pointer;
+  }
+  .player-now-playing-fav-btn:hover { opacity: 0.75; }
+  .player-now-playing-fav-btn:disabled { opacity: 0.3; cursor: default; }
   /* 迷你歌詞：放在播放模式按鈕下面，固定只留 2~3 行的高度（不是像封面
      那樣佔滿整個方框），`scrollActiveLyricIntoView` 會捲動這個小視窗讓
      目前唱到的那一行保持在可視範圍內。 */
@@ -1737,8 +1751,8 @@
     async function refresh() {
       try {
         const res = await fetch("/api/music/files");
-        const names = await res.json();
-        renderMusicFiles(musicUi, names, refresh, ld);
+        const items = await res.json();
+        renderMusicFiles(musicUi, items, refresh, ld);
       } catch (_err) {
         // 這次沒抓到就算了，下一次 poll 再試，不用跳錯誤訊息干擾畫面。
       }
@@ -1772,6 +1786,7 @@
     musicUi.currentName = name;
     musicUi.player.src = `/api/music/file/${encodeURIComponent(name)}/audio`;
     musicUi.player.play();
+    updateNowPlayingFavButton(musicUi);
     const activeRow = highlightPlaying(musicUi);
     if (activeRow) {
       activeRow.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -1849,9 +1864,47 @@
     scrollActiveLyricIntoView(musicUi);
   }
 
+  // 換到「下一首」時（不管是照順序還是隨機），只要候選歌曲不是收藏
+  // （`musicUi.favorites`，見 `renderMusicFiles`），就有這個機率直接跳過、
+  // 繼續找下一個候選——不影響「上一首」。跟 frontend.html/tablet.html 的
+  // `SKIP_NON_FAVORITE_PROBABILITY`/`isFavoriteTrack`/`shouldSkipNonFavorite`/
+  // `offsetTrack`/`playRandomOther` 是同一套邏輯，各自一份程式碼，必須維持
+  // 三邊行為一致，改一邊要記得改另外兩邊。
+  const SKIP_NON_FAVORITE_PROBABILITY = 0.3;
+
+  function isFavoriteTrack(musicUi, name) {
+    return musicUi.favorites.has(name);
+  }
+
+  function shouldSkipNonFavorite(musicUi, name) {
+    return !isFavoriteTrack(musicUi, name) && Math.random() < SKIP_NON_FAVORITE_PROBABILITY;
+  }
+
+  // 目前播放這首歌旁邊那顆收藏按鈕（`musicUi.nowPlayingFavBtn`——player 分頁
+  // 沒開著時是 `undefined`）換歌、清單重新整理、使用者自己按這顆按鈕之後都
+  // 要呼叫這個更新一次圖示，三個地方共用才不會各寫一份「有沒有收藏」的
+  // 判斷邏輯。
+  function updateNowPlayingFavButton(musicUi) {
+    if (!musicUi.nowPlayingFavBtn) return;
+    const isFav = musicUi.currentName ? isFavoriteTrack(musicUi, musicUi.currentName) : false;
+    musicUi.nowPlayingFavBtn.disabled = !musicUi.currentName;
+    musicUi.nowPlayingFavBtn.textContent = isFav ? "★" : "☆";
+    musicUi.nowPlayingFavBtn.title = isFav ? "取消收藏" : "加入收藏（收藏的歌曲換下一首時不會被機率跳過）";
+  }
+
   function offsetTrack(musicUi, delta) {
     const idx = musicUi.playlist.indexOf(musicUi.currentName);
     if (idx === -1) return;
+    if (delta > 0) {
+      for (let next = idx + delta; next < musicUi.playlist.length; next++) {
+        const name = musicUi.playlist[next];
+        if (!shouldSkipNonFavorite(musicUi, name)) {
+          playByName(musicUi, name);
+          return;
+        }
+      }
+      return;
+    }
     const next = idx + delta;
     if (next >= 0 && next < musicUi.playlist.length) {
       playByName(musicUi, musicUi.playlist[next]);
@@ -1860,12 +1913,23 @@
 
   function playRandomOther(musicUi) {
     const others = musicUi.playlist.filter((name) => name !== musicUi.currentName);
-    if (others.length > 0) {
-      playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
-    } else if (musicUi.playlist.length > 0) {
-      musicUi.player.currentTime = 0;
-      musicUi.player.play();
+    if (others.length === 0) {
+      if (musicUi.playlist.length > 0) {
+        musicUi.player.currentTime = 0;
+        musicUi.player.play();
+      }
+      return;
     }
+    let pool = others;
+    while (pool.length > 0) {
+      const pick = pool[Math.floor(Math.random() * pool.length)];
+      if (!shouldSkipNonFavorite(musicUi, pick)) {
+        playByName(musicUi, pick);
+        return;
+      }
+      pool = pool.filter((name) => name !== pick);
+    }
+    playByName(musicUi, others[Math.floor(Math.random() * others.length)]);
   }
 
   function goToNextTrack(musicUi) {
@@ -1905,18 +1969,24 @@
 
   // 跟 tablet 版不一樣：整列可點（播放＋跳詳細畫面），只留一顆刪除按鈕
   // （`stopPropagation`，不然點刪除也會觸發整列的播放行為）。
-  function renderMusicFiles(musicUi, names, refresh, ld) {
-    musicUi.playlist = names;
+  // `items` 是 `/api/music/files` 回的 `{name, favorite}[]`。`musicUi.playlist`
+  // 仍然維持單純的檔名陣列（`offsetTrack`/`playRandomOther`/`playByName` 一路
+  // 以來都是這樣用），收藏狀態另外放進 `musicUi.favorites`（檔名的 `Set`）。
+  function renderMusicFiles(musicUi, items, refresh, ld) {
+    musicUi.playlist = items.map((item) => item.name);
+    musicUi.favorites = new Set(items.filter((item) => item.favorite).map((item) => item.name));
+    updateNowPlayingFavButton(musicUi);
     musicUi.fileList.innerHTML = "";
-    musicUi.fileCount.textContent = `共 ${names.length} 首`;
-    if (names.length === 0) {
+    musicUi.fileCount.textContent = `共 ${items.length} 首`;
+    if (items.length === 0) {
       const empty = document.createElement("div");
       empty.className = "music-empty";
       empty.textContent = "(還沒有下載任何檔案)";
       musicUi.fileList.appendChild(empty);
       return;
     }
-    for (const name of names) {
+    for (const item of items) {
+      const name = item.name;
       const row = document.createElement("div");
       row.className = "music-row";
       row.dataset.name = name;
@@ -1924,6 +1994,19 @@
       label.className = "music-name";
       label.textContent = name;
       label.title = name;
+
+      // 收藏標記：換到下一首時（見 `offsetTrack`/`playRandomOther`），沒
+      // 收藏的歌曲有機率被跳過，這個按鈕就是使用者標記「這首不要被跳過」
+      // 的地方。跟 `delBtn` 一樣要 `stopPropagation`，不然點收藏也會觸發
+      // 整列的播放＋跳詳細畫面行為。
+      const favBtn = document.createElement("button");
+      favBtn.textContent = item.favorite ? "★" : "☆";
+      favBtn.title = item.favorite ? "取消收藏" : "加入收藏（收藏的歌曲換下一首時不會被機率跳過）";
+      favBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        await fetch(`/api/music/file/${encodeURIComponent(name)}/favorite`, { method: "POST" });
+        refresh();
+      });
 
       const delBtn = document.createElement("button");
       delBtn.textContent = "🗑";
@@ -1936,6 +2019,7 @@
       });
 
       row.appendChild(label);
+      row.appendChild(favBtn);
       row.appendChild(delBtn);
       row.addEventListener("click", () => {
         playByName(musicUi, name);
@@ -1986,6 +2070,7 @@
     lyricsLines: [],
     lyricsActiveIndex: -1,
     playlist: [],
+    favorites: new Set(),
     currentName: null,
     playMode: PLAY_MODES[0].mode,
     stopPolling: () => {},
@@ -2110,6 +2195,28 @@
     const trackName = document.createElement("div");
     trackName.className = "player-track-name";
     trackName.textContent = "(尚未播放)";
+    // 目前播放這首歌旁邊也放一顆收藏按鈕，跟檔案清單那顆是同一個開關（見
+    // `updateNowPlayingFavButton`）。
+    const trackNameRow = document.createElement("div");
+    trackNameRow.className = "player-track-name-row";
+    const nowPlayingFavBtn = document.createElement("button");
+    nowPlayingFavBtn.className = "player-now-playing-fav-btn";
+    nowPlayingFavBtn.disabled = true;
+    nowPlayingFavBtn.textContent = "☆";
+    nowPlayingFavBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!musicUi.currentName) return;
+      const res = await fetch(`/api/music/file/${encodeURIComponent(musicUi.currentName)}/favorite`, { method: "POST" });
+      const body = await res.json();
+      if (body.favorite) {
+        musicUi.favorites.add(musicUi.currentName);
+      } else {
+        musicUi.favorites.delete(musicUi.currentName);
+      }
+      updateNowPlayingFavButton(musicUi);
+    });
+    trackNameRow.appendChild(nowPlayingFavBtn);
+    trackNameRow.appendChild(trackName);
     const rightControls = document.createElement("div");
     rightControls.className = "player-controls";
     const currentMode = PLAY_MODES.find((m) => m.mode === musicUi.playMode) || PLAY_MODES[0];
@@ -2156,7 +2263,7 @@
     lyricsMini.className = "player-lyrics-mini";
     right.appendChild(cover);
     right.appendChild(seekRow);
-    right.appendChild(trackName);
+    right.appendChild(trackNameRow);
     right.appendChild(rightControls);
     right.appendChild(lyricsMini);
     ld.detailBody.appendChild(right);
@@ -2167,6 +2274,7 @@
     musicUi.fileCount = fileCount;
     musicUi.cover = cover;
     musicUi.trackName = trackName;
+    musicUi.nowPlayingFavBtn = nowPlayingFavBtn;
     musicUi.seekBar = seekBar;
     musicUi.timeLabel = timeLabel;
     musicUi.lyricsEl = lyricsMini;
@@ -2181,6 +2289,7 @@
       cover.src = `/api/music/file/${encodeURIComponent(musicUi.currentName)}/cover`;
       renderLyrics(musicUi, musicUi.lyricsLines);
     }
+    updateNowPlayingFavButton(musicUi);
     seekBar.max = String(player.duration || 0);
     seekBar.value = String(player.currentTime || 0);
     updateTimeLabel(musicUi);
@@ -2262,6 +2371,7 @@
       musicUi.fileCount = null;
       musicUi.cover = null;
       musicUi.trackName = null;
+      musicUi.nowPlayingFavBtn = null;
       musicUi.seekBar = null;
       musicUi.timeLabel = null;
       musicUi.lyricsEl = null;

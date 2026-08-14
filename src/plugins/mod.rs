@@ -29,7 +29,10 @@ pub(crate) use storage::{
 pub(crate) use storage::SyncEntry;
 pub use gitrepo::GitRepoPlugin;
 pub use global::GlobalPlugin;
-pub(crate) use music::{safe_music_copy_path, url_encode_filename, MUSIC_DIR, SUBTITLE_LANG_PRIORITY};
+pub(crate) use music::{
+    load_favorites, remove_favorite, safe_music_copy_path, toggle_favorite, url_encode_filename, MUSIC_DIR,
+    SUBTITLE_LANG_PRIORITY,
+};
 pub use music::MusicPlugin;
 pub(crate) use notepad::{DEFAULT_NOTEPAD_FILE, NOTEPAD_DIR};
 pub use notepad::NotepadPlugin;
