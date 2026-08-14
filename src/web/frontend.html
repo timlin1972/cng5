@@ -2544,14 +2544,39 @@
       return a.x - pad < b.right && a.right + pad > b.x && a.y - pad < b.bottom && a.bottom + pad > b.y;
     }
 
+    function worldclockWithinMap(box) {
+      return box.x >= 0 && box.right <= WORLDCLOCK_MAP_W && box.y >= 0 && box.bottom <= WORLDCLOCK_MAP_H;
+    }
+
+    function worldclockApplyPlacement(nameEl, timeEl, anchor, textX, nameY, timeY) {
+      nameEl.setAttribute("text-anchor", anchor);
+      timeEl.setAttribute("text-anchor", anchor);
+      nameEl.setAttribute("x", textX);
+      timeEl.setAttribute("x", textX);
+      nameEl.setAttribute("y", nameY);
+      timeEl.setAttribute("y", timeY);
+    }
+
+    // 依優先順序試的四個候選位置：右邊、上面、左邊、下面（都以點為基準，
+    // `gap` 是點跟文字之間留的間距）。右/左是貼著點的高度左右延伸；上/下是
+    // 兩行文字（名稱＋時間）疊在點的正上方/正下方、置中對齊，`lineH` 是
+    // 兩行之間的間距。
+    function worldclockPlacements(x, y) {
+      const gap = 6;
+      const lineH = 13;
+      return [
+        { anchor: "start", textX: x + gap, nameY: y - 4, timeY: y + 9 },
+        { anchor: "middle", textX: x, nameY: y - gap - lineH, timeY: y - gap },
+        { anchor: "end", textX: x - gap, nameY: y - 4, timeY: y + 9 },
+        { anchor: "middle", textX: x, nameY: y + gap + 9, timeY: y + gap + 9 + lineH },
+      ];
+    }
+
     function renderMarkers(cities) {
       cityLayer.innerHTML = "";
       markers = [];
       // 已經放定位的標籤外框，後面每個城市的標籤都要跟這些比對——地理位置
-      // 相近的城市（例如台北市跟清邁）預設都貼著自己的點，文字會疊在一起，
-      // 撞到就把目前這個標籤往下挪一段再量一次，直到不撞任何一個已放好的
-      // 標籤為止（`step` 大約一行的高度）；真的擠不下（試了 20 次還在撞）就
-      // 放在最後試到的位置，至少看得到，不會無限往下掉出地圖範圍。
+      // 相近的城市（例如台北市跟清邁）預設都貼著自己的點，文字會疊在一起。
       const placedBoxes = [];
       for (const c of cities) {
         const [x, y] = worldclockProject(c.lon, c.lat);
@@ -2574,30 +2599,35 @@
         cityLayer.appendChild(nameEl);
         cityLayer.appendChild(timeEl);
 
-        // 標籤預設貼在點的右邊；量出實際寬度後真的會超出地圖右邊界才改貼
-        // 左邊——用量出來的寬度判斷，不是先猜一個經度門檻：城市名稱長短不
-        // 一，固定門檻會誤判（例如東京、台北的名稱根本伸不到地圖邊界，卻
-        // 因為經度落在門檻右側被誤判成要貼左邊，見這次要修的問題）。
-        const setLabelX = (anchor, labelX) => {
-          nameEl.setAttribute("text-anchor", anchor);
-          timeEl.setAttribute("text-anchor", anchor);
-          nameEl.setAttribute("x", labelX);
-          timeEl.setAttribute("x", labelX);
-        };
-        setLabelX("start", x + 6);
-        if (worldclockLabelBox(nameEl, timeEl).right > WORLDCLOCK_MAP_W) {
-          setLabelX("end", x - 6);
-        }
-
-        const step = 13;
-        let offsetY = 0;
-        let box;
-        for (let attempt = 0; attempt < 20; attempt++) {
-          nameEl.setAttribute("y", y - 4 + offsetY);
-          timeEl.setAttribute("y", y + 9 + offsetY);
+        // 依序試右／上／左／下，第一個「沒有跟其他城市的標籤重疊、也沒有
+        // 超出地圖範圍」的位置就用；四個都不行的話，退回原本的作法：預設
+        // 貼右邊（超出地圖右邊界才改貼左邊），再往下一段一段挪，直到不撞
+        // 任何已放好的標籤為止——這個 fallback 不要求完全不超出地圖範圍，
+        // 保證一定會有個地方可以放，不會因為四個候選位置都不合就沒畫出來。
+        let box = null;
+        let placed = false;
+        for (const p of worldclockPlacements(x, y)) {
+          worldclockApplyPlacement(nameEl, timeEl, p.anchor, p.textX, p.nameY, p.timeY);
           box = worldclockLabelBox(nameEl, timeEl);
-          if (!placedBoxes.some((placed) => worldclockBoxesOverlap(placed, box, 2))) break;
-          offsetY += step;
+          if (worldclockWithinMap(box) && !placedBoxes.some((placedBox) => worldclockBoxesOverlap(placedBox, box, 2))) {
+            placed = true;
+            break;
+          }
+        }
+        if (!placed) {
+          worldclockApplyPlacement(nameEl, timeEl, "start", x + 6, y - 4, y + 9);
+          box = worldclockLabelBox(nameEl, timeEl);
+          if (box.right > WORLDCLOCK_MAP_W) {
+            worldclockApplyPlacement(nameEl, timeEl, "end", x - 6, y - 4, y + 9);
+          }
+          let offsetY = 0;
+          for (let attempt = 0; attempt < 20; attempt++) {
+            nameEl.setAttribute("y", y - 4 + offsetY);
+            timeEl.setAttribute("y", y + 9 + offsetY);
+            box = worldclockLabelBox(nameEl, timeEl);
+            if (!placedBoxes.some((placedBox) => worldclockBoxesOverlap(placedBox, box, 2))) break;
+            offsetY += 13;
+          }
         }
         placedBoxes.push(box);
         markers.push({ offsetSecs: c.offset_secs, timeEl });
