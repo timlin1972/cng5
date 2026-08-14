@@ -2572,19 +2572,35 @@
       ];
     }
 
+    // 標籤除了不能跟別的城市的標籤重疊，也不能蓋到別的城市的點——不然那個
+    // 點就等於消失了，看不出地圖上那個位置也有一個城市。點本身很小，用
+    // `dotR` 當半徑直接算一個正方形外框，跟標籤外框用同一套
+    // `worldclockBoxesOverlap` 比對。
+    function worldclockCollides(box, placedBoxes, dotBoxes, pad) {
+      return placedBoxes.some((pb) => worldclockBoxesOverlap(pb, box, pad)) || dotBoxes.some((db) => worldclockBoxesOverlap(db, box, pad));
+    }
+
     function renderMarkers(cities) {
       cityLayer.innerHTML = "";
       markers = [];
+      const dotR = 3;
+      const points = cities.map((c) => worldclockProject(c.lon, c.lat));
+      const dotBoxes = points.map(([px, py]) => ({ x: px - dotR, y: py - dotR, right: px + dotR, bottom: py + dotR }));
+
       // 已經放定位的標籤外框，後面每個城市的標籤都要跟這些比對——地理位置
       // 相近的城市（例如台北市跟清邁）預設都貼著自己的點，文字會疊在一起。
       const placedBoxes = [];
-      for (const c of cities) {
-        const [x, y] = worldclockProject(c.lon, c.lat);
+      for (let i = 0; i < cities.length; i++) {
+        const c = cities[i];
+        const [x, y] = points[i];
+        // 自己的點本來就緊貼著自己的標籤（`worldclockPlacements` 留的
+        // `gap` 就是量給自己這個點的），只擋「別的城市」的點。
+        const otherDotBoxes = dotBoxes.filter((_, j) => j !== i);
 
         const dot = document.createElementNS(SVGNS, "circle");
         dot.setAttribute("cx", x);
         dot.setAttribute("cy", y);
-        dot.setAttribute("r", 3);
+        dot.setAttribute("r", dotR);
         dot.setAttribute("class", "worldclock-city-dot");
 
         const nameEl = document.createElementNS(SVGNS, "text");
@@ -2599,17 +2615,18 @@
         cityLayer.appendChild(nameEl);
         cityLayer.appendChild(timeEl);
 
-        // 依序試右／上／左／下，第一個「沒有跟其他城市的標籤重疊、也沒有
-        // 超出地圖範圍」的位置就用；四個都不行的話，退回原本的作法：預設
-        // 貼右邊（超出地圖右邊界才改貼左邊），再往下一段一段挪，直到不撞
-        // 任何已放好的標籤為止——這個 fallback 不要求完全不超出地圖範圍，
-        // 保證一定會有個地方可以放，不會因為四個候選位置都不合就沒畫出來。
+        // 依序試右／上／左／下，第一個「沒有跟其他城市的標籤或點重疊、也
+        // 沒有超出地圖範圍」的位置就用；四個都不行的話，退回原本的作法：
+        // 預設貼右邊（超出地圖右邊界才改貼左邊），再往下一段一段挪，直到
+        // 不撞任何已放好的標籤／點為止——這個 fallback 不要求完全不超出
+        // 地圖範圍，保證一定會有個地方可以放，不會因為四個候選位置都不合
+        // 就沒畫出來。
         let box = null;
         let placed = false;
         for (const p of worldclockPlacements(x, y)) {
           worldclockApplyPlacement(nameEl, timeEl, p.anchor, p.textX, p.nameY, p.timeY);
           box = worldclockLabelBox(nameEl, timeEl);
-          if (worldclockWithinMap(box) && !placedBoxes.some((placedBox) => worldclockBoxesOverlap(placedBox, box, 2))) {
+          if (worldclockWithinMap(box) && !worldclockCollides(box, placedBoxes, otherDotBoxes, 2)) {
             placed = true;
             break;
           }
@@ -2625,7 +2642,7 @@
             nameEl.setAttribute("y", y - 4 + offsetY);
             timeEl.setAttribute("y", y + 9 + offsetY);
             box = worldclockLabelBox(nameEl, timeEl);
-            if (!placedBoxes.some((placedBox) => worldclockBoxesOverlap(placedBox, box, 2))) break;
+            if (!worldclockCollides(box, placedBoxes, otherDotBoxes, 2)) break;
             offsetY += 13;
           }
         }
