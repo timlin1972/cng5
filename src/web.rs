@@ -20,9 +20,10 @@ use crate::plugin::{
     APP_VERSION,
 };
 use crate::plugins::{
-    list_dir, make_dir, remove, rename_path, safe_music_copy_path, safe_storage_path, walk_with_hashes,
-    DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR,
-    NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    book_cover, book_meta, book_resource, chapter_is_vertical, inject_pagination_style, list_books, list_dir, make_dir,
+    normalize_vertical_css, remove, rename_path, safe_ebook_path, safe_music_copy_path, safe_storage_path,
+    save_chapter_progress, walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, WorldClockPlugin,
+    DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -154,6 +155,11 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/music/file/{name}/lyrics", web::get().to(music_file_lyrics))
             .route("/api/music/file/{name}", web::delete().to(music_file_delete))
             .route("/api/music/file/{name}/favorite", web::post().to(music_file_favorite))
+            .route("/api/ereader/books", web::get().to(ereader_books))
+            .route("/api/ereader/book/{name}/meta", web::get().to(ereader_book_meta))
+            .route("/api/ereader/book/{name}/cover", web::get().to(ereader_book_cover))
+            .route("/api/ereader/book/{name}/progress", web::post().to(ereader_book_progress))
+            .route("/api/ereader/book/{name}/resource/{path:.*}", web::get().to(ereader_book_resource))
             .route("/api/notepad/content", web::get().to(notepad_get_content))
             .route("/api/notepad/content", web::post().to(notepad_save_content))
             .route("/api/device/register", web::post().to(device_register))
@@ -1061,6 +1067,90 @@ async fn music_file_favorite(path: web::Path<String>) -> HttpResponse {
         Ok(favorite) => HttpResponse::Ok().json(serde_json::json!({ "favorite": favorite })),
         Err(_) => HttpResponse::InternalServerError().finish(),
     }
+}
+
+/// `GET /api/ereader/books`：`storage/ebooks/` 資料夾裡目前有的 `.epub`
+/// 檔案，各自帶標題/作者/目前讀到多少%（見 `crate::plugins::list_books`）。
+async fn ereader_books() -> impl Responder {
+    HttpResponse::Ok().json(list_books())
+}
+
+/// `GET /api/ereader/book/{name}/meta`：這本書的標題/作者/翻頁方向
+/// （`"ltr"`/`"rtl"`）/章節清單/目前進度（見 `crate::plugins::book_meta`）。
+/// 檔名不合法或這本書打不開都回 404——跟其他 `music_file_*` 端點一樣，不用
+/// 特別區分「檔名不合法」跟「檔案不存在/解析失敗」，對呼叫端來說結果一樣
+/// 是「這個端點目前沒東西可以給」。
+async fn ereader_book_meta(path: web::Path<String>) -> HttpResponse {
+    let name = path.into_inner();
+    match book_meta(&name) {
+        Ok(meta) => HttpResponse::Ok().json(meta),
+        Err(_) => HttpResponse::NotFound().finish(),
+    }
+}
+
+/// `GET /api/ereader/book/{name}/cover`：封面圖，`epub` crate 的
+/// `get_cover()`。沒有封面（或書打不開）都回 404，跟 `music_file_cover`
+/// 同一套「沒有封面是正常情況，不是錯誤」的處理方式。
+async fn ereader_book_cover(path: web::Path<String>) -> HttpResponse {
+    let name = path.into_inner();
+    match book_cover(&name) {
+        Some((bytes, mime)) => HttpResponse::Ok().content_type(mime).body(bytes),
+        None => HttpResponse::NotFound().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct EreaderProgressBody {
+    chapter: usize,
+}
+
+/// `POST /api/ereader/book/{name}/progress`：存目前讀到第幾章（spine
+/// index，從 0 開始）。跟 `todo_toggle` 一樣只回成功/失敗、不夾帶資料，前端
+/// 收到 200 之後自己決定要不要重新 `GET .../meta` 拿最新進度%。
+async fn ereader_book_progress(path: web::Path<String>, body: web::Json<EreaderProgressBody>) -> HttpResponse {
+    let name = path.into_inner();
+    if safe_ebook_path(&name).is_none() {
+        return HttpResponse::BadRequest().finish();
+    }
+    match save_chapter_progress(&name, body.chapter) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+/// `GET /api/ereader/book/{name}/resource/{path:.*}`：epub 內部任意檔案
+/// （章節 XHTML、圖片、CSS、字型），原封不動吐出去，`Content-Type` 用 epub
+/// manifest 記錄的 mime type。這個端點的 URL 路徑刻意跟 epub 內部路徑一樣
+/// （見 `crate::plugins::book_resource` 的說明），章節 XHTML 裡原有的相對
+/// 路徑（圖片/CSS/字型）瀏覽器會自動解析到對應的 `/resource/...` URL，不
+/// 需要重寫任何 HTML 內容，直式書的 `writing-mode: vertical-rl` 也因此完全
+/// 不用特別處理，瀏覽器原生渲染就會生效。`text/css` 資源額外做
+/// `normalize_vertical_css`：舊格式直式書用 Apple 的 `-epub-writing-mode`
+/// vendor prefix，現代瀏覽器不認得，這裡補一份標準寫法的 `writing-mode`，
+/// 這種舊格式的直式排版才會生效（見該函式的說明）。章節 XHTML/HTML 資源
+/// 額外做 `inject_pagination_style`：依 `chapter_is_vertical` 判斷這一章是
+/// 不是直式，插入對應的分頁 CSS，讓瀏覽器自動把整章內容依視窗大小切成一頁
+/// 一頁，前端靠左右捲動來翻頁（橫式/直式套用的 CSS 完全不同，見該函式的
+/// 說明）。
+async fn ereader_book_resource(path: web::Path<(String, String)>) -> HttpResponse {
+    let (name, resource_path) = path.into_inner();
+    let Some((bytes, mime)) = book_resource(&name, &resource_path) else {
+        return HttpResponse::NotFound().finish();
+    };
+    if mime == "text/css" {
+        let Ok(css) = String::from_utf8(bytes) else {
+            return HttpResponse::NotFound().finish();
+        };
+        return HttpResponse::Ok().content_type(mime).body(normalize_vertical_css(&css));
+    }
+    if mime == "application/xhtml+xml" || mime == "text/html" {
+        let Ok(html) = String::from_utf8(bytes) else {
+            return HttpResponse::NotFound().finish();
+        };
+        let vertical = chapter_is_vertical(&name, &resource_path, &html);
+        return HttpResponse::Ok().content_type(mime).body(inject_pagination_style(&html, vertical));
+    }
+    HttpResponse::Ok().content_type(mime).body(bytes)
 }
 
 /// `GET /api/music/file/{name}/cover`：讀 mp3 的 ID3 標籤，把 `download` 指令

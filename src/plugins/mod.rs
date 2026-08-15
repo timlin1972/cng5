@@ -1,6 +1,7 @@
 mod activities;
 mod clock;
 mod device;
+mod ereader;
 mod gitrepo;
 mod global;
 mod music;
@@ -22,6 +23,11 @@ mod worldclock;
 pub use activities::ActivitiesPlugin;
 pub use clock::ClockPlugin;
 pub use device::DevicePlugin;
+pub(crate) use ereader::{
+    book_cover, book_meta, book_resource, chapter_is_vertical, inject_pagination_style, list_books,
+    normalize_vertical_css, safe_ebook_path, save_chapter_progress,
+};
+pub use ereader::EReaderPlugin;
 pub(crate) use storage::{
     list_dir, make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_storage_path,
     walk_with_hashes, write_chunk, STORAGE_DIR,

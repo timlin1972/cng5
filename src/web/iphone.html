@@ -467,6 +467,35 @@
   }
   .player-now-playing-fav-btn:hover { opacity: 0.75; }
   .player-now-playing-fav-btn:disabled { opacity: 0.3; cursor: default; }
+  /* 書架（`ld.listEl`）跟閱讀畫面（`ld.detailBody` 裡面）共用的樣式，跟
+     `.ld-wrap`/`.ld-list`/`.ld-detail-body` 同一套 list-detail 版面（見
+     `createListDetailView`），返回按鈕直接用 `ld` 內建的那顆，不用自己
+     另外做一顆。 */
+  .ereader-empty { padding: 16px; text-align: center; color: #6a7383; }
+  .ereader-book-row { display: flex; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #262a33; align-items: center; }
+  .ereader-book-row:active { background: #1e2530; }
+  .ereader-book-cover { width: 44px; height: 62px; object-fit: cover; background: #262a33; border-radius: 2px; flex-shrink: 0; }
+  .ereader-book-info { flex: 1; overflow: hidden; }
+  .ereader-book-title { color: #d8dee9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ereader-book-author { color: #9aa4b8; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ereader-book-progress { color: #6f9dff; font-size: 12px; }
+  .ereader-reader { display: flex; flex-direction: column; height: 100%; }
+  .ereader-toolbar { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #262a33; flex: none; }
+  .ereader-toolbar button {
+    background: #262a33;
+    border: 1px solid #3a4150;
+    color: #d8dee9;
+    border-radius: 3px;
+    padding: 4px 10px;
+    cursor: pointer;
+    font: inherit;
+  }
+  .ereader-toolbar-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #d8dee9; font-size: 13px; }
+  .ereader-frame-wrap { flex: 1; position: relative; overflow: hidden; }
+  .ereader-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: none; background: #fff; }
+  .ereader-tap-zone { position: absolute; top: 0; bottom: 0; width: 20%; cursor: pointer; }
+  .ereader-tap-left { left: 0; }
+  .ereader-tap-right { right: 0; }
   /* 迷你歌詞：放在播放模式按鈕下面，固定只留 2~3 行的高度（不是像封面
      那樣佔滿整個方框），`scrollActiveLyricIntoView` 會捲動這個小視窗讓
      目前唱到的那一行保持在可視範圍內。 */
@@ -2379,6 +2408,776 @@
     };
   }
 
+  // 建立 ereader 分頁：跟 `player` 分頁一樣借用 `createListDetailView`
+  // （書架用 `ld.listEl`，閱讀畫面用 `ld.detailBody`，返回按鈕直接用 `ld`
+  // 內建那顆，不用自己另外做）。閱讀畫面是 `<iframe>` 直接指向 `GET
+  // /api/ereader/book/{name}/resource/{章節內部路徑}`——這個端點的 URL
+  // 路徑刻意跟 epub 內部路徑一樣（見 `src/plugins/ereader.rs` 的說明），
+  // 章節 XHTML 裡原有的相對路徑（圖片/CSS/字型）瀏覽器會自動解析到對應的
+  // `/resource/...` URL，完全不需要改寫 HTML 內容，直式書的
+  // `writing-mode: vertical-rl` 因此也天然就會生效。跟桌面版/tablet 版的
+  // `startEreader`/`startEreaderTab` 是同一套邏輯（各自一份程式碼，不共用
+  // 模組）。
+  function startEreaderTab(container) {
+    const ld = createListDetailView(container);
+    let stopped = false;
+    let current = null; // { name, meta }
+
+    function renderShelf(books) {
+      ld.listEl.innerHTML = "";
+      if (books.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "ereader-empty";
+        empty.textContent = "(storage/ebooks/ 底下還沒有任何 .epub 檔案，先用 storage 分頁上傳)";
+        ld.listEl.appendChild(empty);
+        return;
+      }
+      for (const b of books) {
+        const row = document.createElement("div");
+        row.className = "ereader-book-row";
+        const cover = document.createElement("img");
+        cover.className = "ereader-book-cover";
+        cover.src = `/api/ereader/book/${encodeURIComponent(b.name)}/cover`;
+        cover.addEventListener("error", () => {
+          cover.style.visibility = "hidden";
+        });
+        const info = document.createElement("div");
+        info.className = "ereader-book-info";
+        const title = document.createElement("div");
+        title.className = "ereader-book-title";
+        title.textContent = b.title;
+        const author = document.createElement("div");
+        author.className = "ereader-book-author";
+        author.textContent = b.author || "";
+        const progress = document.createElement("div");
+        progress.className = "ereader-book-progress";
+        progress.textContent = `${b.progress_percent}%`;
+        info.appendChild(title);
+        info.appendChild(author);
+        info.appendChild(progress);
+        row.appendChild(cover);
+        row.appendChild(info);
+        row.addEventListener("click", () => openBook(b.name));
+        ld.listEl.appendChild(row);
+      }
+    }
+
+    async function refreshShelf() {
+      if (stopped) return;
+      try {
+        const res = await fetch("/api/ereader/books");
+        renderShelf(await res.json());
+      } catch (_err) {
+        // 這次沒抓到就算了，下一輪 poll 再試。
+      }
+    }
+
+    function resourceUrl(name, href) {
+      const encodedPath = href.split("/").map(encodeURIComponent).join("/");
+      return `/api/ereader/book/${encodeURIComponent(name)}/resource/${encodedPath}`;
+    }
+
+    async function openBook(name) {
+      try {
+        const res = await fetch(`/api/ereader/book/${encodeURIComponent(name)}/meta`);
+        if (!res.ok) return;
+        current = { name, meta: await res.json() };
+        renderReader();
+        ld.showDetail();
+      } catch (_err) {
+        // 打不開就留在書架，不用特別報錯干擾畫面。
+      }
+    }
+
+    // 章節內的分頁狀態：後端的章節內容已經被 `inject_pagination_style`
+    // （見 `src/plugins/ereader.rs`）插入多欄排版 CSS，瀏覽器會自動把整章
+    // 內容依視窗大小切成一頁一頁；這裡只負責「捲到第幾頁」跟「量出這一章
+    // 總共幾頁」，不用自己計算怎麼分頁。跟桌面版/tablet 版的
+    // `startEreader`/`startEreaderTab` 是同一套邏輯（各自一份程式碼，不
+    // 共用模組）。
+    let pageIndex = 0;
+    let pageCount = 1;
+    let pageStep = 1;
+    let chapterVertical = false;
+    let pageMarkers = null;
+    let verticalPageTarget = null;
+    let measurementToken = 0;
+    let chapterLoadInFlight = false;
+    let frameEl = null;
+    let titleEl = null;
+    let resizeObserver = null;
+    let touchStartX = null;
+    let suppressNextClick = false;
+
+    function pageWidth() {
+      return (frameEl && frameEl.contentWindow && frameEl.contentWindow.innerWidth) || frameEl.clientWidth || 1;
+    }
+
+    function updateToolbarText() {
+      if (!titleEl || !current) return;
+      const { meta } = current;
+      titleEl.textContent =
+        `${meta.title} · 第 ${meta.current_chapter + 1}/${meta.spine.length} 章 · ` +
+        `第 ${pageIndex + 1}/${pageCount} 頁 · ${meta.progress_percent}%`;
+    }
+
+    // 依 `writing-mode` 判斷這一章是橫式還是直式，套用完全不同的量測方式
+    // （見 `measureHorizontalChapter`/`measureVerticalChapter` 各自的說明，
+    // 兩者不能共用同一套邏輯——`inject_pagination_style` 對兩種書套用的
+    // CSS 完全不同）。回傳 `{ pageStep, pageCount }`：`pageStep` 是捲一頁要
+    // 移動多少像素，`pageCount` 是這一章總共幾頁。
+    function measureChapter(doc) {
+      const cs = doc.defaultView.getComputedStyle(doc.body);
+      const writingMode = cs.writingMode || "";
+      const vertical = writingMode.indexOf("vertical") === 0;
+      const result = vertical ? measureVerticalChapter(doc) : measureHorizontalChapter(doc, cs);
+      // 暫時的除錯輸出，排查直式分頁問題用，之後穩定了就拿掉：把量測到的
+      // 關鍵數字印到 console，方便使用者直接複製貼回來，不用自己再讀程式碼
+      // 猜哪個數字算錯。
+      console.log(
+        "[ereader-debug] " +
+          JSON.stringify({
+            writingMode,
+            frameClientWidth: frameEl.clientWidth,
+            frameClientHeight: frameEl.clientHeight,
+            bodyScrollWidth: doc.body.scrollWidth,
+            bodyScrollHeight: doc.body.scrollHeight,
+            result,
+          })
+      );
+      return Object.assign({ vertical }, result);
+    }
+
+    // 換頁/換章節/resize 之後捲到指定頁的共用邏輯：直式書不能用
+    // `window.scrollTo()`/`scrollIntoView`——這兩個都是在操作
+    // `document.scrollingElement`（通常是 `<html>`），但直式書真正溢位的
+    // 元素是 `body`（`body` 自己被設成 `overflow:hidden`，它自己的內容比
+    // 自己的版面寬，這個溢位是 `body` 自己局部的捲動範圍，不是傳到最外層
+    // 視窗），橫式書能用 `window.scrollTo()` 是因為那是多欄排版
+    // （`column-width`）的溢位，多欄排版的欄位溢位規則本來就會傳到最外層
+    // 視窗，跟這裡的一般區塊排版溢位是不同機制——這是實測畫面截圖才抓到
+    // 的：console 印出來的 `scrollX`／算出來的頁碼都對，畫面卻還是停在
+    // 第一頁沒有動，代表 `window.scrollTo()` 根本沒捲到真正在溢位、真正
+    // 決定畫面顯示什麼的那個元素。改成直接設 `body.scrollLeft`（順便也設
+    // `documentElement.scrollLeft`，兩個都設，不用猜到底哪一個才是真正
+    // 生效的那個）。量出標記目前實際顯示在畫面的哪個位置
+    // （`getBoundingClientRect()`，這一定準，不受任何捲動座標系正負號慣例
+    // 影響），量出「應該對齊到視窗右邊」（這是量出來的——整章一開始完全
+    // 沒捲動過的預設狀態，內容右邊界本來就跟視窗右邊界切齊，見
+    // `measureVerticalChapter` 的討論）的距離，套用那個差值；如果套用後
+    // 方向反了（不同瀏覽器對 `scrollLeft` 正負號的慣例本來就不統一），再
+    // 往反方向修正一次——全部基於量出來的相對距離，不假設任何特定瀏覽器的
+    // 正負號慣例。橫式書維持原本用 `window.scrollTo()`（CSS 多欄排版本身
+    // 保證欄界對齊整行，見 `measureHorizontalChapter` 的說明，而且已經
+    // 確認橫式書這樣做是正確的）。
+    function scrollToPage(doc, index) {
+      if (chapterVertical) {
+        const marker = pageMarkers && pageMarkers[index];
+        if (marker) {
+          const html = doc.documentElement;
+          const body = doc.body;
+          const setScroll = (value) => {
+            html.scrollLeft = value;
+            body.scrollLeft = value;
+          };
+          // 最後一頁不能比照其他頁「把標記對齊到 target」：實測過，這一頁
+          // 剩下的內容常常不到一整頁寬，硬要把標記對齊到跟其他頁一樣的
+          // 位置，會逼近（甚至超過）瀏覽器真正可以捲動的最大範圍，捲動
+          // 幅度卡在半路就不再前進，導致這一章最後一小段內容整個露在畫面
+          // 外看不到（不是分頁算錯，是捲動幅度不夠遠）。改成直接把
+          // `body` 自己的左邊界（也就是整章真正結尾的位置）貼齊畫面左邊
+          // （目標 0），這樣最後一頁永遠看得到整章結尾，代價最多是跟前一
+          // 頁多疊一點點內容——寧可多看幾行重複，也不要漏掉結尾。
+          const isLastPage = index === pageCount - 1;
+          const target = isLastPage ? 0 : verticalPageTarget !== null ? verticalPageTarget : pageWidth();
+          const readPos = () => (isLastPage ? body.getBoundingClientRect().left : marker.getBoundingClientRect().right);
+          // 一次量測、套用就結束不夠準——實測連續兩頁之間會殘留幾行重複
+          // 內容，代表捲動落點跟量出來的目標差了一點點（可能是瀏覽器剛
+          // 套用捲動位置那一刻，geometry 還沒完全跟捲動同步）。改成反覆
+          // 量測、修正最多幾次，每次都重新讀當下實際位置，直到誤差小到
+          // 可以接受、或是已經修正到位置不再變化為止。
+          for (let i = 0; i < 6; i++) {
+            const before = readPos();
+            const diff = before - target;
+            if (Math.abs(diff) < 1) break;
+            const startX = html.scrollLeft || body.scrollLeft || 0;
+            setScroll(startX + diff);
+            const after = readPos();
+            if (Math.abs(after - before) < 0.5) {
+              // 完全沒反應：這個正負號被夾住了（不同瀏覽器對 scrollLeft
+              // 正負號慣例不一致），換相反方向再試一次。
+              setScroll(startX - diff);
+            }
+          }
+          // 暫時的除錯輸出：捲完之後實際落在哪個 scrollLeft，跟畫面實際
+          // 看到的文字範圍，之後穩定了就拿掉。
+          const bodyRect = body.getBoundingClientRect();
+          console.log(
+            "[ereader-debug-scroll] " +
+              JSON.stringify({
+                index,
+                pageCount,
+                htmlScrollLeft: html.scrollLeft,
+                bodyScrollLeft: body.scrollLeft,
+                clientWidth: frameEl.clientWidth,
+                markerRight: Math.round(marker.getBoundingClientRect().right),
+                bodyRight: Math.round(bodyRect.right),
+                bodyLeft: Math.round(bodyRect.left),
+                text: ((marker.nextSibling && marker.nextSibling.textContent) || "").slice(0, 16),
+              })
+          );
+        }
+        return;
+      }
+      doc.defaultView.scrollTo({ left: index * pageStep, top: 0 });
+      // 防禦性補強：`window.scrollTo()` 操作的是 `document.scrollingElement`
+      // （通常是 `<html>`），但實測抓到有些書的 `<html>` 自己完全沒有可
+      // 捲動範圍（`scrollWidth` 等於 `clientWidth`），真正因為多欄排版而
+      // 溢位、需要捲動的其實是 `body` 自己（`body` 自己就有
+      // `overflow:hidden`，形成獨立、局部的捲動範圍，不會往外傳給
+      // `<html>`）——這種情況下 `window.scrollTo()` 完全捲不動（陷面碼
+      // 照樣往前算，畫面卻停在原地不動，翻到下一章才會變）。直接設
+      // `body.scrollLeft`（同時也設 `html.scrollLeft`，以防某些書是後者
+      // 才有效）。這裡驗證要讀 `body.scrollLeft` 本身，不能像量直式書那樣
+      // 讀某個子元素的 `getBoundingClientRect()`——`body` 自己的
+      // `getBoundingClientRect()` 反映的是它在外層（`<html>`）裡的位置，
+      // 捲動 `body` 自己內部的內容並不會改變這個位置，之前這裡量錯元素，
+      // 才會誤判成「怎麼設都沒反應」。
+      const html = doc.documentElement;
+      const body = doc.body;
+      const target = index * pageStep;
+      if (Math.abs(body.scrollLeft - target) > 0.5) {
+        body.scrollLeft = target;
+      }
+      if (Math.abs(html.scrollLeft - target) > 0.5) {
+        html.scrollLeft = target;
+      }
+      // 暫時的除錯輸出，排查橫式書分頁問題用，之後穩定了就拿掉。
+      const bodyRect = body.getBoundingClientRect();
+      const htmlRect = html.getBoundingClientRect();
+      console.log(
+        "[ereader-debug-hscroll] " +
+          JSON.stringify({
+            index,
+            pageCount,
+            pageStep,
+            windowScrollX: doc.defaultView.scrollX,
+            htmlScrollLeft: html.scrollLeft,
+            bodyScrollLeft: body.scrollLeft,
+            clientWidth: frameEl.clientWidth,
+            bodyScrollWidth: body.scrollWidth,
+            bodyClientWidth: body.clientWidth,
+            htmlScrollWidth: html.scrollWidth,
+            htmlClientWidth: html.clientWidth,
+            bodyRectLeft: Math.round(bodyRect.left),
+            bodyRectRight: Math.round(bodyRect.right),
+            htmlRectLeft: Math.round(htmlRect.left),
+            htmlRectRight: Math.round(htmlRect.right),
+          })
+      );
+    }
+
+    // 橫式書：`inject_pagination_style` 插入的多欄排版 CSS 讓每一欄本來就
+    // 剛好是一個畫面寬（`column-width: 100vw`），欄與欄的邊界一定落在整行
+    // 文字的邊界上（多欄排版的換行機制保證），捲一頁固定是整個畫面寬
+    // （`pageWidth()`），不需要額外取整。但「一欄裡塞了幾行」不保證剛好
+    // 用滿整個畫面高，這裡要另外算出往下取整到整數倍行高的 `pageHeight`，
+    // 設回 `<html>`/`<body>`（inline style 加 `!important`，蓋過
+    // `inject_pagination_style` 插入的 `height: 100vh !important`，同源
+    // `!important` inline style 的優先度比外部/內嵌樣式表高），不然版面
+    // 最下面會卡進一行只露出上半截的文字。
+    //
+    // 算總共幾頁不能直接量已經分欄後的 `body.scrollWidth`：多欄排版遇到
+    // 內容比一個畫面高時要「長」出額外欄位才能繼續往下排，這件事依賴
+    // body 自己的寬度不能被釘死（見 `inject_pagination_style` 的說明），
+    // 一旦欄位長不出來，`scrollWidth` 量到的永遠是「只有一頁」。改成暫時
+    // 關掉多欄排版，量攤平單欄版面的 `scrollHeight`——這是最基本的區塊
+    // 排版，不牽涉任何多欄溢位的實作細節，各瀏覽器算出來的數字完全一致，
+    // 可靠得多；量完立刻把多欄排版接回來（`removeProperty` 讓
+    // `inject_pagination_style` 插入的 stylesheet 規則重新生效），中間
+    // 量測那一瞬間畫面會閃過一次單欄版面，但只有一個畫面更新週期，肉眼
+    // 看不出來。
+    // `line-height` 沒被書本身的 CSS 明確設成數字時（很多 epub 根本沒設這
+    // 個屬性），`getComputedStyle` 回傳的是字面上的 `"normal"` 字串，不是
+    // 解析過的像素數字，`parseFloat("normal")` 會得到 `NaN`，導致量測整個
+    // 失敗、退回「當作只有一頁」——這正是直式書明明 `scrollWidth` 量得到
+    // 一大堆內容、卻還是判斷成只有一頁的真正原因。用一個隱藏的探測元素撐
+    // 出「一行文字」實際佔用的像素間接量出來：`writing-mode` 是會繼承的
+    // 屬性，探測元素接在 `body` 底下自然套用同一份樣式，量橫式書要看它的
+    // 高度、量直式書要看它的寬度（直式書的行進方向是垂直，一行文字佔用的
+    // 是水平方向的寬度）。
+    function resolveLineHeightPx(doc, cs, vertical) {
+      const raw = parseFloat(cs.lineHeight);
+      if (!Number.isNaN(raw) && raw > 0) {
+        return raw;
+      }
+      const probe = doc.createElement("span");
+      probe.textContent = "永";
+      probe.style.cssText = "position:absolute;visibility:hidden;white-space:nowrap;margin:0;padding:0;border:0;";
+      doc.body.appendChild(probe);
+      const rect = probe.getBoundingClientRect();
+      probe.remove();
+      return vertical ? rect.width : rect.height;
+    }
+
+    function measureHorizontalChapter(doc, cs) {
+      const body = doc.body;
+      const lineHeight = resolveLineHeightPx(doc, cs, false);
+      const paddingTop = parseFloat(cs.paddingTop) || 0;
+      const paddingBottom = parseFloat(cs.paddingBottom) || 0;
+      const paddingLeft = parseFloat(cs.paddingLeft) || 0;
+      const paddingRight = parseFloat(cs.paddingRight) || 0;
+      const columnGap = parseFloat(cs.columnGap) || 0;
+      const totalHeight = frameEl.clientHeight || 1;
+      const usable = totalHeight - paddingTop - paddingBottom;
+      // `column-width` 是 `box-sizing: border-box` 底下算的，`body` 自己
+      // 又有左右 padding，實際能塞欄位內容的寬度比整個視窗窄（padding
+      // 兩側的量）。`column-width` 設的是「理想」欄寬，比實際可用寬度還寬
+      // 時，瀏覽器只能生出一欄剛好填滿實際可用寬度——也就是說每一欄真正
+      // 的寬度其實是「視窗寬 - 左右 padding」，不是整個視窗寬。`padding`
+      // 只加在整段欄位排版的最前/最後，不會每一欄之間重複出現，所以下一欄
+      // 緊接著這一欄開始，若 `column-gap` 沒補上這段間距，下一欄的內容會
+      // 提早露出來、疊在畫面右邊，造成「跑字」現象（CSS 端已把 `column-gap`
+      // 設成跟 padding 一樣寬來擋住這個縫隙，這裡捲頁距離要一併算上這段
+      // 間距，不然每次捲動的距離會少了這一截，翻頁會對不準）。
+      const step = Math.max(1, pageWidth() - paddingLeft - paddingRight + columnGap);
+      if (!lineHeight || Number.isNaN(lineHeight) || lineHeight <= 0 || usable <= 0) {
+        return { pageStep: step, pageCount: 1 };
+      }
+      const linesPerPage = Math.max(1, Math.floor(usable / lineHeight));
+      const pageHeight = linesPerPage * lineHeight + paddingTop + paddingBottom;
+
+      body.style.setProperty("column-width", "auto", "important");
+      body.style.setProperty("height", "auto", "important");
+      const naturalHeight = body.scrollHeight;
+      body.style.removeProperty("column-width");
+
+      body.style.setProperty("height", `${pageHeight}px`, "important");
+      doc.documentElement.style.setProperty("height", `${pageHeight}px`, "important");
+
+      // 減一點點是為了吸收次像素等級的誤差，不會讓剛好整除的內容被誤判多
+      // 算一頁空白頁；用 `ceil` 不是 `round`，多出來的一小段內容一定要算成
+      // 獨立一頁，不能被捨去。
+      const pageCount = Math.max(1, Math.ceil((naturalHeight - 0.5) / pageHeight));
+      return { pageStep: step, pageCount };
+    }
+
+    // 捲一頁的距離不能靠「假設全章每一行等寬」去猜：章節內文常常混雜標題
+    // （字比較大）跟內文（字比較小），統一行寬只是概算，跟瀏覽器實際排出
+    // 來的行界有落差，而且這個落差是累加的——愈後面的頁面誤差愈大，最後
+    // 甚至會整行、整段文字被跳過去（頁面邊界算得比實際內容還遠，捲動位置
+    // 直接超過去，中間內容看不到）。改成直接用 `Range.getClientRects()`
+    // 量出瀏覽器真正排出來的每一行（每個文字節點可能跨好幾個 rect，一個
+    // rect 就是一行），依可用寬度把連續的行分組成一頁一頁，在每一頁的
+    // 起點插入一個看不見的標記元素，翻頁時呼叫該標記的
+    // `scrollIntoView()`——完全用瀏覽器自己量出來的真實幾何跟原生捲動
+    // 邏輯，不會累積誤差，也不用另外處理 `scrollLeft` 方向慣例的問題（見
+    // `scrollToPage` 的說明）。
+    function clearPageMarkers() {
+      if (!pageMarkers) return;
+      for (const marker of pageMarkers) {
+        const parent = marker && marker.parentNode;
+        if (parent) {
+          parent.removeChild(marker);
+          parent.normalize();
+        }
+      }
+      pageMarkers = null;
+    }
+
+    function collectVerticalLineSegments(doc) {
+      const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT, {
+        acceptNode: (n) => (n.nodeValue && n.nodeValue.trim().length > 0 ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP),
+      });
+      const segments = [];
+      const range = doc.createRange();
+      let node = walker.nextNode();
+      while (node) {
+        range.selectNodeContents(node);
+        const rects = range.getClientRects();
+        for (let i = 0; i < rects.length; i++) {
+          const r = rects[i];
+          if (r.width > 0 && r.height > 0) {
+            segments.push({ node, rect: r });
+          }
+        }
+        node = walker.nextNode();
+      }
+      // 由大到小：vertical-rl 的行進方向是由右到左，右邊界比較大的行在
+      // 閱讀順序上比較前面。
+      segments.sort((a, b) => b.rect.right - a.rect.right);
+      return segments;
+    }
+
+    // 在指定文字節點裡二分搜尋，找出目標 rect（某一行）實際從第幾個字元
+    // 開始——`getClientRects()` 只給幾何位置，不會直接告訴我們字元位移。
+    // 不能用 caret 的 `top` 座標判斷：`top` 每次換行都會重置回接近 0，
+    // 一個文字節點如果橫跨好幾行，`top` 不是全域單調遞增，二分搜尋依它
+    // 找會找錯位置（這是這次翻頁「同一頁按下一頁卻幾乎沒動、後來又漏掉
+    // 最後一頁」的真正原因）。直式書的行進方向是由右到左，`right` 座標
+    // 才是全域單調遞減（同一行內不變，換到下一行才會變小），改用這個當
+    // 比較依據。
+    function findLineStartOffset(doc, node, rect) {
+      const length = node.nodeValue.length;
+      const probe = doc.createRange();
+      const rectAt = (offset) => {
+        probe.setStart(node, offset);
+        probe.setEnd(node, offset);
+        return probe.getClientRects()[0] || null;
+      };
+      const startRect = rectAt(0);
+      if (startRect && Math.abs(startRect.right - rect.right) < 1) {
+        return 0;
+      }
+      let lo = 0;
+      let hi = length;
+      while (lo < hi) {
+        const mid = Math.floor((lo + hi) / 2);
+        const r = rectAt(mid);
+        if (!r) {
+          hi = mid;
+          continue;
+        }
+        if (r.right <= rect.right + 0.5) {
+          hi = mid;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      return lo;
+    }
+
+    function computeVerticalPageBoundaries(doc, budget) {
+      const segments = collectVerticalLineSegments(doc);
+      if (segments.length === 0) return [];
+      const boundarySegments = [segments[0]];
+      let pageStartRight = segments[0].rect.right;
+      for (let i = 1; i < segments.length; i++) {
+        if (pageStartRight - segments[i].rect.right > budget) {
+          boundarySegments.push(segments[i]);
+          pageStartRight = segments[i].rect.right;
+        }
+      }
+      // 先把每個邊界的字元位移都算好，再「從最後一頁往回」插標記：同一個
+      // 文字節點如果橫跨好幾個頁面邊界（沒有段落分隔的長段落），
+      // `Range.insertNode` 會把文字節點從插入點切成兩半，只影響插入點
+      // 之後的部分，從比較後面的位移開始插，前面算好的位移才不會因為節點
+      // 被切開而錯位。
+      const offsets = boundarySegments.map((seg) => findLineStartOffset(doc, seg.node, seg.rect));
+      const markers = new Array(boundarySegments.length);
+      for (let i = boundarySegments.length - 1; i >= 0; i--) {
+        const seg = boundarySegments[i];
+        const marker = doc.createElement("span");
+        marker.style.cssText = "display:inline-block;width:0;height:0;overflow:hidden;";
+        const markerRange = doc.createRange();
+        markerRange.setStart(seg.node, offsets[i]);
+        markerRange.collapse(true);
+        markerRange.insertNode(marker);
+        markers[i] = marker;
+      }
+      return markers;
+    }
+
+    function measureVerticalChapter(doc) {
+      clearPageMarkers();
+      const cs = doc.defaultView.getComputedStyle(doc.body);
+      const paddingLeft = parseFloat(cs.paddingLeft) || 0;
+      const paddingRight = parseFloat(cs.paddingRight) || 0;
+      const totalWidth = pageWidth();
+      // 分組門檻不能直接用整個畫面寬：`body` 自己有 `padding`，內容真正能
+      // 用的寬度要扣掉左右 padding，另外再扣一點點安全邊界（次像素捨入、
+      // `scrollIntoView` 對齊時的些微誤差）——寧可讓某幾頁最後多留一點點
+      // 空白，也不要讓分組塞進比畫面裝得下還多的內容，那樣會變成「翻頁
+      // 翻到一半」還要再翻一次才是真的下一頁，最後一頁也會因為多出來的
+      // 內容沒有下一個標記可以顯示，直接被跳過去。
+      const budget = Math.max(1, totalWidth - paddingLeft - paddingRight - 4);
+      pageMarkers = computeVerticalPageBoundaries(doc, budget);
+      // 每一頁該對齊到畫面的哪個位置，不能直接用 `pageWidth()`（整個視窗
+      // 寬）：章節一開始完全沒捲動過的預設狀態，第一行文字（含標題本身的
+      // 字級/margin）本來就不是剛好切齊在視窗最右邊，而是內縮一段距離
+      // （padding、標題自己的樣式）。這個「原本第一頁自然停在哪裡」的
+      // 位置，才是其他每一頁都該對齊過去的目標——這裡趁章節剛載入、還沒
+      // 被捲動過的這一刻量下來，直接用 `pageWidth()` 當目標，每一頁都會
+      // 比正確位置多幾行的落差（少對齊到 padding／標題造成的內縮量）。
+      verticalPageTarget = pageMarkers.length > 0 ? pageMarkers[0].getBoundingClientRect().right : pageWidth();
+      // 暫時的除錯輸出，排查直式分頁問題用：把每個標記的位置跟緊接著的
+      // 文字印出來，直接看出頁面邊界實際落在哪裡，之後穩定了就拿掉。
+      // 用 JSON.stringify 印成一整行純文字，瀏覽器 console 對物件/陣列預設
+      // 只顯示摺疊起來的預覽，直接複製貼上常常貼不到完整內容，字串就沒有
+      // 這個問題。
+      console.log(
+        "[ereader-debug-markers] budget=" +
+          budget +
+          " " +
+          JSON.stringify(
+            pageMarkers.map((m, i) => {
+              const rect = m.getBoundingClientRect();
+              const following = (m.nextSibling && m.nextSibling.textContent) || "";
+              return { page: i, right: Math.round(rect.right), top: Math.round(rect.top), text: following.slice(0, 16) };
+            })
+          )
+      );
+      return { pageCount: Math.max(1, pageMarkers.length) };
+    }
+
+    // iframe 換了新章節、真正排版完成之後才量得到正確的尺寸（`load` 事件
+    // 本身可能早於樣式套用完成），用 `requestAnimationFrame` 保險等一個
+    // 畫面週期；`measureHorizontalChapter` 改高度本身又會觸發一次新的
+    // layout，所以再等一個畫面週期才捲到指定頁，不然捲動用的還是改高度
+    // 之前的舊版面。`landing` 是這次要停在第幾頁：數字就直接用，`"last"`
+    // 表示停在這章的最後一頁（從下一章往回翻的情境）。
+    // 有些 epub 的 CSS 會用 app 專用的 `res://` 字型路徑（例如
+    // `url(res:///system/fonts/...)`），瀏覽器根本讀不到，會先等一段字型
+    // 載入逾時的時間才 fallback 回下一個字型；這段時間內量到的文字幾何
+    // （`getClientRects()`）可能是還沒套用最終字型前的暫時排版，算出來的
+    // 分頁邊界會不準——這正是「第一次開某一章分頁算錯，但重複測過的章節
+    // 又正常」的原因（重複測過的章節，字型 fallback 早就穩定了）。用
+    // `document.fonts.ready`（所有字型不管成功或失敗都確定下來才 resolve）
+    // 卡住量測，等字型狀態穩定再排版，不能只靠 `requestAnimationFrame`
+    // （那只保證畫面更新週期，不保證字型已經 fallback 完成）。
+    //
+    // `fonts.ready` 可能要等很久（`res://` 這種讀不到的字型，瀏覽器要等到
+    // 逾時才 fallback，可能好幾秒），這段等待期間使用者很可能已經翻頁/換
+    // 章節了——用 `measurementToken` 幫每一次呼叫編號，等到 promise/rAF
+    // resolve 時如果編號已經跟目前最新的不一樣，就代表章節換過了，這次
+    // 量測結果作廢，不能再拿舊章節（甚至已經被瀏覽器拆掉的舊 document）
+    // 量出來的錯誤數字去蓋掉新章節剛設好的正確狀態，這正是「回上一章
+    // 卻卡在只有一頁」的真正原因。
+    function onFrameLoaded(landing) {
+      const doc = frameEl.contentDocument;
+      if (!doc || !doc.body) return;
+      const myToken = ++measurementToken;
+      // 換章節這段期間（等字型穩定為止）標記起來，`recomputeAfterResize`
+      // 看到這個標記就整個跳過，不會拿 `loadChapterAtPage` 剛重置、還沒被
+      // 這裡填回正確答案的 `pageIndex=0`／`pageCount=1` 去算出錯誤的目標
+      // 頁碼、搶著把捲動位置改回第一頁——這正是「回上一章卻卡在第一頁，
+      // 不是最後一頁」的真正原因：`ResizeObserver` 觀察的容器（工具列文字
+      // 長度改變、`updateToolbarText` 造成的版面微調）在換章節的過程中很
+      // 容易被觸發，這個 resize 事件如果在字型穩定前就搶著跑完，就會用
+      // 還沒設好的暫存值把正確結果蓋掉。
+      chapterLoadInFlight = true;
+      const fontsReady = (doc.fonts && doc.fonts.ready) || Promise.resolve();
+      fontsReady.then(() => {
+        if (myToken !== measurementToken) return;
+        requestAnimationFrame(() => {
+          if (myToken !== measurementToken) return;
+          const measured = measureChapter(doc);
+          requestAnimationFrame(async () => {
+            if (myToken !== measurementToken) return;
+            pageCount = measured.pageCount;
+            pageStep = measured.pageStep || 1;
+            chapterVertical = measured.vertical;
+            pageIndex = landing === "last" ? pageCount - 1 : Math.min(Math.max(0, landing), pageCount - 1);
+            // 實測過：剛載入章節直接跳到後面的頁碼（例如從下一章往回翻，
+            // 落在這一章最後一頁）畫面會卡在第一頁不動，但同一章節內
+            // 循序漸進按下一頁完全正常——代表問題不是分頁算錯或捲動方向
+            // 錯，是瀏覽器對「剛載入的文件」的可捲動範圍判斷還沒跟上一次
+            // 大跳躍的捲動（即使 `getBoundingClientRect()`/`scrollWidth`
+            // 當下已經回報正確數字）。改成模擬使用者實際翻頁的路徑：先
+            // 真的停在第一頁，一頁一頁循序捲到目標頁，讓瀏覽器逐步跟上。
+            if (chapterVertical && pageIndex > 0) {
+              scrollToPage(doc, 0);
+              for (let i = 1; i <= pageIndex; i++) {
+                await new Promise((resolve) => requestAnimationFrame(resolve));
+                if (myToken !== measurementToken) return;
+                scrollToPage(doc, i);
+              }
+            } else {
+              scrollToPage(doc, pageIndex);
+            }
+            updateToolbarText();
+            chapterLoadInFlight = false;
+          });
+        });
+      });
+    }
+
+    // 螢幕轉向（橫/直）時，`vw`/`vh` 單位讓瀏覽器自己重新排版（不需要我們
+    // 插入任何新 CSS），但 `pageStep`／分頁數量／目前頁碼都是我們自己
+    // 快取、依舊尺寸算出來的，要跟著重新算一次（`measureChapter`），並
+    // 盡量停在同一個「讀到大概幾成」的位置（用比例換算到新的頁數，不是
+    // 每次都跳回第一頁）。
+    function recomputeAfterResize() {
+      if (chapterLoadInFlight) return;
+      const doc = frameEl && frameEl.contentDocument;
+      if (!doc || !doc.body) return;
+      const fraction = pageCount > 0 ? pageIndex / pageCount : 0;
+      const measured = measureChapter(doc);
+      requestAnimationFrame(() => {
+        pageCount = measured.pageCount;
+        pageStep = measured.pageStep || 1;
+        chapterVertical = measured.vertical;
+        pageIndex = Math.min(Math.round(fraction * pageCount), pageCount - 1);
+        scrollToPage(doc, pageIndex);
+        updateToolbarText();
+      });
+    }
+
+    async function saveProgress(chapterIndex) {
+      try {
+        await fetch(`/api/ereader/book/${encodeURIComponent(current.name)}/progress`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ chapter: chapterIndex }),
+        });
+      } catch (_err) {
+        // 存進度失敗不影響當下閱讀，最多下次重開這本書時進度沒更新到最新。
+      }
+    }
+
+    // `landing` 同 `onFrameLoaded` 的說明：換章節時要停在第幾頁。
+    function loadChapterAtPage(chapterIndex, landing) {
+      const { meta } = current;
+      if (chapterIndex < 0 || chapterIndex >= meta.spine.length) return;
+      meta.current_chapter = chapterIndex;
+      meta.progress_percent = Math.round(((chapterIndex + 1) / meta.spine.length) * 100);
+      pageIndex = 0;
+      pageCount = 1;
+      pageMarkers = null;
+      verticalPageTarget = null;
+      frameEl.dataset.landing = landing;
+      frameEl.src = resourceUrl(current.name, meta.spine[chapterIndex].href);
+      updateToolbarText();
+      saveProgress(chapterIndex);
+    }
+
+    // 換頁：`direction` 是 +1（往後一頁）或 -1（往前一頁），絕對方向（跟畫面
+    // 上哪顆按鈕/哪一側對應到這個方向是分開的兩件事，見 `renderReader`／
+    // 分頁 tap zone 的說明）。超出這一章的頁面範圍就換到下一章／上一章，
+    // 分別停在該章的第一頁／最後一頁，翻頁翻到章節邊界時感覺是連續的。
+    function turnPage(direction) {
+      if (!current) return;
+      const next = pageIndex + direction;
+      if (next >= 0 && next < pageCount) {
+        pageIndex = next;
+        const doc = frameEl.contentDocument;
+        if (doc && doc.defaultView) {
+          scrollToPage(doc, pageIndex);
+        }
+        updateToolbarText();
+        return;
+      }
+      const nextChapter = current.meta.current_chapter + direction;
+      loadChapterAtPage(nextChapter, direction > 0 ? 0 : "last");
+    }
+
+    function handleZoneClick(direction) {
+      if (suppressNextClick) {
+        suppressNextClick = false;
+        return;
+      }
+      turnPage(direction);
+    }
+
+    function renderReader() {
+      ld.detailBody.innerHTML = "";
+      const { name, meta } = current;
+      const wrap = document.createElement("div");
+      wrap.className = "ereader-reader";
+      const toolbar = document.createElement("div");
+      toolbar.className = "ereader-toolbar";
+      titleEl = document.createElement("span");
+      titleEl.className = "ereader-toolbar-title";
+      const prevBtn = document.createElement("button");
+      prevBtn.title = "上一頁";
+      prevBtn.addEventListener("click", () => turnPage(-1));
+      const nextBtn = document.createElement("button");
+      nextBtn.title = "下一頁";
+      nextBtn.addEventListener("click", () => turnPage(1));
+      toolbar.appendChild(titleEl);
+      // 直式（rtl）書翻頁習慣是從右到左，上一頁/下一頁按鈕的左右順序跟著
+      // 對調（語意不變，還是「往前一頁」/「往後一頁」，只是哪個按鈕畫在
+      // 左邊變了，符合直式書讀者的翻頁直覺）。符號故意不跟著「往前/往後」
+      // 的語意走，而是跟著「畫面位置」走：不管橫式直式，畫在左邊的按鈕都
+      // 用 `‹`、畫在右邊的都用 `›`，使用者單純憑左右位置操作，不用去記
+      // 哪個符號對應哪個功能。
+      if (meta.direction === "rtl") {
+        nextBtn.textContent = "‹";
+        prevBtn.textContent = "›";
+        toolbar.appendChild(nextBtn);
+        toolbar.appendChild(prevBtn);
+      } else {
+        prevBtn.textContent = "‹";
+        nextBtn.textContent = "›";
+        toolbar.appendChild(prevBtn);
+        toolbar.appendChild(nextBtn);
+      }
+
+      const frameWrap = document.createElement("div");
+      frameWrap.className = "ereader-frame-wrap";
+      frameEl = document.createElement("iframe");
+      frameEl.className = "ereader-frame";
+      frameEl.setAttribute("sandbox", "allow-same-origin");
+      frameEl.addEventListener("load", () => {
+        const landing = frameEl.dataset.landing;
+        onFrameLoaded(landing === "last" ? "last" : Number(landing) || 0);
+      });
+      // 點兩側翻頁：不用伸進 iframe 內部掛事件（每次換章節文件都會重來，
+      // 而且 iframe 沒開 `allow-scripts`），疊在 iframe 上面兩塊透明區塊接
+      // click 就好。方向跟按鈕一樣依 `direction` 對調，靠右/靠左要對應到
+      // 「往後一頁」還是「往前一頁」。
+      const leftZone = document.createElement("div");
+      leftZone.className = "ereader-tap-zone ereader-tap-left";
+      const rightZone = document.createElement("div");
+      rightZone.className = "ereader-tap-zone ereader-tap-right";
+      const forwardOnRight = meta.direction !== "rtl";
+      leftZone.addEventListener("click", () => handleZoneClick(forwardOnRight ? -1 : 1));
+      rightZone.addEventListener("click", () => handleZoneClick(forwardOnRight ? 1 : -1));
+      frameWrap.appendChild(frameEl);
+      frameWrap.appendChild(leftZone);
+      frameWrap.appendChild(rightZone);
+
+      // 滑動翻頁（手機上主要靠這個）：往左滑＝往後一頁（LTR 書），跟 tap
+      // zone 同一套方向對調邏輯。滑動距離太短當成點擊，交給上面兩塊 tap
+      // zone 的 click 處理，不要兩邊都觸發翻頁。
+      frameWrap.addEventListener(
+        "touchstart",
+        (e) => {
+          touchStartX = e.touches[0].clientX;
+        },
+        { passive: true }
+      );
+      frameWrap.addEventListener(
+        "touchend",
+        (e) => {
+          if (touchStartX === null) return;
+          const dx = e.changedTouches[0].clientX - touchStartX;
+          touchStartX = null;
+          if (Math.abs(dx) < 40) return;
+          suppressNextClick = true;
+          const forward = forwardOnRight ? dx < 0 : dx > 0;
+          turnPage(forward ? 1 : -1);
+        },
+        { passive: true }
+      );
+
+      wrap.appendChild(toolbar);
+      wrap.appendChild(frameWrap);
+      ld.detailBody.appendChild(wrap);
+
+      // `renderReader` 不只換章節會呼叫（回書架再開別本書也會再呼叫一次），
+      // 每次都要先把上一次的 observer 斷開，不然會一直疊加、觀察著已經被
+      // `ld.detailBody.innerHTML = ""` 移除的舊 `frameWrap`。
+      if (resizeObserver) resizeObserver.disconnect();
+      resizeObserver = new ResizeObserver(recomputeAfterResize);
+      resizeObserver.observe(frameWrap);
+
+      const entry = meta.spine[meta.current_chapter];
+      frameEl.dataset.landing = "0";
+      frameEl.src = entry ? resourceUrl(name, entry.href) : "about:blank";
+      updateToolbarText();
+    }
+
+    refreshShelf();
+    const intervalId = setInterval(refreshShelf, 15000);
+
+    return function stop() {
+      stopped = true;
+      clearInterval(intervalId);
+      if (resizeObserver) resizeObserver.disconnect();
+    };
+  }
+
   // storage 分頁點 `notepad/` 資料夾底下的檔名要切去 notepad 分頁並顯示
   // 那個檔案：跟 tablet 版一樣，用一個模組層級變數記住「下次開 notepad
   // 分頁要先載入哪個檔案」。
@@ -3268,6 +4067,7 @@
     { name: "device", icon: "📟", label: "device" },
     { name: "global", icon: "🌍", label: "global" },
     { name: "system", icon: "⚙️", label: "system" },
+    { name: "ereader", icon: "📖", label: "ereader" },
     { name: "storage", icon: "🗂️", label: "storage" },
     { name: "notepad", icon: "📝", label: "notepad" },
   ];
@@ -3282,6 +4082,7 @@
     weather: { start: startWeatherTab },
     system: { start: makePlainPanelTab("system") },
     player: { start: startPlayerTab },
+    ereader: { start: startEreaderTab },
     storage: { start: startStorageTab },
     notepad: { start: startNotepadTab },
     todo: { start: startTodoTab },
