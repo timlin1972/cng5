@@ -24,7 +24,7 @@ pub use activities::ActivitiesPlugin;
 pub use clock::ClockPlugin;
 pub use device::DevicePlugin;
 pub(crate) use ereader::{
-    book_cover, book_meta, book_resource, chapter_is_vertical, inject_pagination_style, list_books,
+    book_cover, book_meta, book_resource, chapter_is_vertical, haodoo_import, inject_pagination_style, list_books,
     normalize_vertical_css, safe_ebook_path, save_chapter_progress,
 };
 pub use ereader::EReaderPlugin;

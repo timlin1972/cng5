@@ -471,6 +471,15 @@
      `.ld-wrap`/`.ld-list`/`.ld-detail-body` 同一套 list-detail 版面（見
      `createListDetailView`），返回按鈕直接用 `ld` 內建的那顆，不用自己
      另外做一顆。 */
+  .ereader-shelf-wrap { height: 100%; display: flex; flex-direction: column; overflow: hidden; }
+  .ereader-shelf { flex: 1; overflow: auto; }
+  .ereader-shelf-toolbar { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid #3a4150; flex-wrap: wrap; }
+  .ereader-shelf-toolbar button { background: #232833; color: #d8dee9; border: 1px solid #3a4150; border-radius: 6px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 14px; }
+  .ereader-shelf-toolbar input[type="text"] { flex: 1; min-width: 100px; background: #1b1f27; color: #d8dee9; border: 1px solid #3a4150; border-radius: 6px; padding: 5px 10px; font: inherit; font-size: 14px; }
+  .ereader-haodoo-status { flex: none; font-size: 13px; color: #6a7383; }
+  .ereader-haodoo { display: flex; flex-direction: column; height: 100%; }
+  .ereader-haodoo-frame-wrap { flex: 1; position: relative; overflow: hidden; }
+  .ereader-haodoo-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: none; background: #fff; }
   .ereader-empty { padding: 16px; text-align: center; color: #6a7383; }
   .ereader-book-row { display: flex; gap: 10px; padding: 10px 12px; border-bottom: 1px solid #262a33; align-items: center; }
   .ereader-book-row:active { background: #1e2530; }
@@ -2420,16 +2429,133 @@
   // 模組）。
   function startEreaderTab(container) {
     const ld = createListDetailView(container);
+
+    // `ld.listEl` 本身是 `flex:1; overflow:auto`（見 `.ld-list`），如果把
+    // toolbar 跟書架清單直接兩個都當它的子元素、各自 overflow，會有兩層
+    // 各自滾動的風險；跟 storage 分頁同一套做法：包一層 `height:100%` 的
+    // flex column（`shelfWrap`）塞進 `ld.listEl`，裡面 toolbar 固定高度、
+    // 書架清單 `flex:1` 自己滾動，`ld.listEl` 本身因為 `shelfWrap` 剛好
+    // 填滿而不會再產生第二層卷軸。`renderShelf` 只清空 `shelf`（書架清單
+    // 本身），toolbar 不會被重繪動作一起清掉。
+    //
+    // 「好讀下載」借用 `ld.detailBody`（本來給看書用的那個「詳細畫面」
+    // 插槽）顯示一個內嵌 `<iframe>` 連到 haodoo.net（該站沒有擋
+    // X-Frame-Options/CSP frame-ancestors，實測可以內嵌），返回鍵直接用
+    // `ld` 內建那顆，跟看書畫面共用同一套返回邏輯。但好讀的下載按鈕是
+    // `<input onClick="DownloadEpub(...)">`，不是普通連結，而且是跨網域
+    // iframe，same-origin policy 完全不允許我們的 JS 讀取或監聽 iframe
+    // 內部的點擊/網址變化，沒辦法做到「使用者在 iframe 裡按下載、我們自動
+    // 攔截」。折衷做法：使用者在好讀裡找到書後把該書「詳細頁」的網址複製
+    // 貼上到下面欄位（一般 `<a href>` 連結，iframe 裡右鍵一樣能複製連結
+    // 網址），按下「下載」由後端（`crate::plugins::haodoo_import`）直接
+    // 抓 epub 存進 `storage/ebooks/`，不用自己先存到本機再手動上傳一輪。
+    // 「上傳電子書」保留給不是從好讀來的檔案，走本機檔案選擇 + fetch，跟
+    // storage 分頁的上傳是同一套模式。
+    const shelfWrap = document.createElement("div");
+    shelfWrap.className = "ereader-shelf-wrap";
+    const toolbar = document.createElement("div");
+    toolbar.className = "ereader-shelf-toolbar";
+    const haodooBtn = document.createElement("button");
+    haodooBtn.textContent = "🌐 好讀下載";
+    haodooBtn.title = "瀏覽好讀（haodoo.net），貼上書籍網址直接下載進書架";
+    const uploadBtn = document.createElement("button");
+    uploadBtn.textContent = "⬆ 上傳電子書";
+    const uploadInput = document.createElement("input");
+    uploadInput.type = "file";
+    uploadInput.accept = ".epub";
+    uploadInput.style.display = "none";
+    uploadBtn.addEventListener("click", () => uploadInput.click());
+    uploadInput.addEventListener("change", async () => {
+      const file = uploadInput.files[0];
+      if (!file) return;
+      await fetch(`/api/ereader/upload/${encodeURIComponent(file.name)}`, { method: "POST", body: file });
+      uploadInput.value = "";
+      refreshShelf();
+    });
+    toolbar.appendChild(haodooBtn);
+    toolbar.appendChild(uploadBtn);
+    toolbar.appendChild(uploadInput);
+    const shelf = document.createElement("div");
+    shelf.className = "ereader-shelf";
+    shelfWrap.appendChild(toolbar);
+    shelfWrap.appendChild(shelf);
+    ld.listEl.appendChild(shelfWrap);
+
     let stopped = false;
     let current = null; // { name, meta }
 
+    function renderHaodoo() {
+      ld.detailBody.innerHTML = "";
+      const wrap = document.createElement("div");
+      wrap.className = "ereader-haodoo";
+      const bar = document.createElement("div");
+      bar.className = "ereader-shelf-toolbar";
+      const urlInput = document.createElement("input");
+      urlInput.type = "text";
+      urlInput.placeholder = "貼上好讀書籍詳細頁網址（https://haodoo.net/?M=book&P=...）";
+      const verticalLabel = document.createElement("label");
+      const verticalCheckbox = document.createElement("input");
+      verticalCheckbox.type = "checkbox";
+      verticalLabel.appendChild(verticalCheckbox);
+      verticalLabel.appendChild(document.createTextNode(" 直式"));
+      const downloadBtn = document.createElement("button");
+      downloadBtn.textContent = "下載";
+      const status = document.createElement("span");
+      status.className = "ereader-haodoo-status";
+      bar.appendChild(urlInput);
+      bar.appendChild(verticalLabel);
+      bar.appendChild(downloadBtn);
+      bar.appendChild(status);
+      const frameWrap = document.createElement("div");
+      frameWrap.className = "ereader-haodoo-frame-wrap";
+      const frame = document.createElement("iframe");
+      frame.className = "ereader-haodoo-frame";
+      frame.src = "https://haodoo.net/";
+      frameWrap.appendChild(frame);
+      wrap.appendChild(bar);
+      wrap.appendChild(frameWrap);
+      ld.detailBody.appendChild(wrap);
+
+      downloadBtn.addEventListener("click", async () => {
+        const url = urlInput.value.trim();
+        if (!url) return;
+        downloadBtn.disabled = true;
+        status.textContent = "下載中…";
+        try {
+          const res = await fetch("/api/ereader/haodoo-import", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url, vertical: verticalCheckbox.checked }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            status.textContent = `已加入書架：${data.name}`;
+            urlInput.value = "";
+            refreshShelf();
+          } else {
+            status.textContent = await res.text();
+          }
+        } catch (_err) {
+          status.textContent = "下載失敗，確認網路連線後再試一次";
+        } finally {
+          downloadBtn.disabled = false;
+        }
+      });
+    }
+
+    haodooBtn.addEventListener("click", () => {
+      current = null;
+      renderHaodoo();
+      ld.showDetail();
+    });
+
     function renderShelf(books) {
-      ld.listEl.innerHTML = "";
+      shelf.innerHTML = "";
       if (books.length === 0) {
         const empty = document.createElement("div");
         empty.className = "ereader-empty";
-        empty.textContent = "(storage/ebooks/ 底下還沒有任何 .epub 檔案，先用 storage 分頁上傳)";
-        ld.listEl.appendChild(empty);
+        empty.textContent = "(storage/ebooks/ 底下還沒有任何 .epub 檔案，用上面的「上傳電子書」加一本進來)";
+        shelf.appendChild(empty);
         return;
       }
       for (const b of books) {
@@ -2458,7 +2584,7 @@
         row.appendChild(cover);
         row.appendChild(info);
         row.addEventListener("click", () => openBook(b.name));
-        ld.listEl.appendChild(row);
+        shelf.appendChild(row);
       }
     }
 

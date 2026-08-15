@@ -20,10 +20,10 @@ use crate::plugin::{
     APP_VERSION,
 };
 use crate::plugins::{
-    book_cover, book_meta, book_resource, chapter_is_vertical, inject_pagination_style, list_books, list_dir, make_dir,
-    normalize_vertical_css, remove, rename_path, safe_ebook_path, safe_music_copy_path, safe_storage_path,
-    save_chapter_progress, walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, WorldClockPlugin,
-    DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    book_cover, book_meta, book_resource, chapter_is_vertical, haodoo_import, inject_pagination_style, list_books,
+    list_dir, make_dir, normalize_vertical_css, remove, rename_path, safe_ebook_path, safe_music_copy_path,
+    safe_storage_path, save_chapter_progress, walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin,
+    WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -35,6 +35,10 @@ pub(crate) const PORT: u16 = 9759;
 const TICK: Duration = Duration::from_millis(300);
 /// `output` 這個假 panel 只推最新這麼多行，避免瀏覽器端的內容無限長下去。
 const OUTPUT_TAIL_LINES: usize = 500;
+/// `web::Bytes` extractor 預設 payload 上限只有 256KB（`actix_web` 的
+/// `PayloadConfig` 預設值），epub 電子書常常上百 MB（附圖多的書更大），
+/// 所以上傳電子書這條路徑要單獨調大上限，不能跟其他 API 共用預設值。
+const EREADER_UPLOAD_LIMIT: usize = 512 * 1024 * 1024;
 
 const FRONTEND_HTML: &str = include_str!("web/frontend.html");
 const TABLET_HTML: &str = include_str!("web/tablet.html");
@@ -160,6 +164,12 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/ereader/book/{name}/cover", web::get().to(ereader_book_cover))
             .route("/api/ereader/book/{name}/progress", web::post().to(ereader_book_progress))
             .route("/api/ereader/book/{name}/resource/{path:.*}", web::get().to(ereader_book_resource))
+            .service(
+                web::resource("/api/ereader/upload/{name}")
+                    .app_data(web::PayloadConfig::new(EREADER_UPLOAD_LIMIT))
+                    .route(web::post().to(ereader_upload)),
+            )
+            .route("/api/ereader/haodoo-import", web::post().to(ereader_haodoo_import))
             .route("/api/notepad/content", web::get().to(notepad_get_content))
             .route("/api/notepad/content", web::post().to(notepad_save_content))
             .route("/api/device/register", web::post().to(device_register))
@@ -1151,6 +1161,57 @@ async fn ereader_book_resource(path: web::Path<(String, String)>) -> HttpRespons
         return HttpResponse::Ok().content_type(mime).body(inject_pagination_style(&html, vertical));
     }
     HttpResponse::Ok().content_type(mime).body(bytes)
+}
+
+/// `POST /api/ereader/upload/{name}`：把使用者從外部書源（例如好讀）下載好
+/// 的 epub 檔案存進 `storage/ebooks/`，同名直接覆蓋。檔名（含副檔名）由
+/// 呼叫端決定——前端固定帶瀏覽器選到的檔案原始檔名，`safe_ebook_path` 擋
+/// 路徑分隔符/上層目錄，額外要求副檔名是 `.epub`，避免書架裡混進不相關的
+/// 檔案（`list_books` 本來就只認 `.epub`，這裡先擋掉單純是不留垃圾檔案在
+/// 資料夾裡）。這條路徑額外設了比預設值大很多的 payload 上限（見
+/// `EREADER_UPLOAD_LIMIT`），電子書常常上百 MB，不能跟其他 API 共用
+/// 256KB 的預設上限。
+async fn ereader_upload(path: web::Path<String>, body: web::Bytes) -> HttpResponse {
+    let name = path.into_inner();
+    if !name.to_ascii_lowercase().ends_with(".epub") {
+        return HttpResponse::BadRequest().finish();
+    }
+    let Some(file_path) = safe_ebook_path(&name) else {
+        return HttpResponse::BadRequest().finish();
+    };
+    match std::fs::write(&file_path, &body) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct HaodooImportBody {
+    url: String,
+    #[serde(default)]
+    vertical: bool,
+}
+
+#[derive(Serialize)]
+struct HaodooImportResponse {
+    name: String,
+}
+
+/// `POST /api/ereader/haodoo-import`：貼一個好讀（haodoo.net）書籍詳細頁的
+/// 網址，伺服器端直接把 epub 抓下來存進 `storage/ebooks/`，前端不用先下載
+/// 到本機再手動上傳一輪（見 `crate::plugins::haodoo_import` 的說明）。這裡
+/// 會實際發出 HTTP 請求（用 `curl`），用 `spawn_blocking` 丟去背景執行緒，
+/// 跟 `remote_cross_relay` 同一套「阻塞式 I/O 不要卡住 async runtime」的
+/// 做法。
+async fn ereader_haodoo_import(body: web::Json<HaodooImportBody>) -> HttpResponse {
+    let HaodooImportBody { url, vertical } = body.into_inner();
+    let result = tokio::task::spawn_blocking(move || haodoo_import(&url, vertical))
+        .await
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("內部錯誤")));
+    match result {
+        Ok(name) => HttpResponse::Ok().json(HaodooImportResponse { name }),
+        Err(err) => HttpResponse::BadRequest().body(format!("{err:#}")),
+    }
 }
 
 /// `GET /api/music/file/{name}/cover`：讀 mp3 的 ID3 標籤，把 `download` 指令

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use epub::doc::EpubDoc;
@@ -11,9 +12,11 @@ use crate::plugin::{Plugin, SharedContext};
 
 /// 電子書檔案放這裡（相對於程式執行時的工作目錄）。特意放在 `storage/`
 /// 底下（不是像 `music/` 那樣獨立一個頂層資料夾）：`storage` plugin 本來就
-/// 有真正的二進位上傳端點（`POST /api/storage/upload`），使用者已經可以
-/// 透過現有的 storage 網頁介面把 `.epub` 檔案丟進來，這個 plugin 不需要
-/// 另外做一套上傳功能。
+/// 有真正的二進位上傳端點（`POST /api/storage/upload`），一開始就能透過
+/// 現有的 storage 網頁介面把 `.epub` 檔案丟進來；後來 ereader 自己另外加了
+/// `POST /api/ereader/upload/{name}`（見 `web.rs`）跟 `haodoo_import`（好讀
+/// 網站一鍵下載，見下方），但檔案還是統一放在這裡，書架清單不用管檔案是
+/// 怎麼進來的。
 pub(crate) const EBOOK_DIR: &str = "storage/ebooks";
 
 /// 閱讀進度存放位置，跟 `todo`/`notepad` 同一套「放在 `storage/` 底下自己
@@ -52,6 +55,88 @@ pub(crate) fn safe_ebook_path(name: &str) -> Option<PathBuf> {
         return None;
     }
     Some(Path::new(EBOOK_DIR).join(name))
+}
+
+/// 好讀（haodoo.net）書籍一鍵匯入：使用者把書籍詳細頁（`?M=book&P=<代號>`）
+/// 的網址貼過來，這裡把「抓頁面 → 解析下載代號 → 抓 epub 檔案 → 存進
+/// `storage/ebooks/`」整套流程做完，不用使用者自己先下載到本機再手動上傳
+/// 一輪。
+///
+/// 好讀書籍詳細頁裡的下載按鈕是 `<input type=button onClick=
+/// "DownloadEpub('<檔案代號>')">`（直式是 `DownloadVEpub`），不是普通的
+/// `<a href>` 連結，沒辦法直接把按鈕的網址抓出來——而且這個檔案代號比網址
+/// 上的 `P=` 代號多一個字首字母（不同分類前綴不同，例如武俠類是 `G`、科幻
+/// 類是 `J`），這個字首是網站樣板直接寫死在 HTML 裡，猜不出來，只能從頁面
+/// 內容解析。解析出代號後跟該網站自己的 `d.js`（`DownloadEpub`/
+/// `DownloadVEpub`）做一樣的事：把代號從第一個字元切開，組成
+/// `https://haodoo.net/PDB/<字首>/<代號去掉字首>.epub` 這個真正的檔案
+/// 網址（這個網址是公開、不需要登入的靜態檔案，用 curl 直接抓即可）。
+///
+/// 這裡先擋 host 一定要是 `haodoo.net`，避免這個功能被拿去當成「叫伺服器
+/// 幫忙打任意網址」的跳板（SSRF）——好讀本體 `haodoo.net` 跟後來另外註冊
+/// 的 `haodoo.org` 其實是完全不同的兩個網站（後者是 WordPress.com 上的
+/// 部落格，没有這裡假設的下載連結格式），所以刻意不放行 `haodoo.org`。
+pub(crate) fn haodoo_import(page_url: &str, vertical: bool) -> Result<String> {
+    let is_haodoo_net = ["https://haodoo.net/", "http://haodoo.net/", "https://www.haodoo.net/", "http://www.haodoo.net/"]
+        .iter()
+        .any(|prefix| page_url.starts_with(prefix));
+    if !is_haodoo_net {
+        bail!("只接受 haodoo.net 書籍詳細頁的網址");
+    }
+    let html_bytes = curl_get(page_url)?;
+    let html = String::from_utf8_lossy(&html_bytes).into_owned();
+    let needle = if vertical { "DownloadVEpub('" } else { "DownloadEpub('" };
+    let start = html.find(needle).context("這個網址找不到下載按鈕，確認是好讀的書籍詳細頁網址（?M=book&P=...）")? + needle.len();
+    let end = html[start..].find('\'').context("下載代號解析失敗")? + start;
+    let code = &html[start..end];
+    let Some((prefix, rest)) = code.split_at_checked(1) else {
+        bail!("下載代號是空的");
+    };
+    let epub_url = format!("https://haodoo.net/PDB/{prefix}/{rest}.epub");
+    let epub_bytes = curl_get(&epub_url)?;
+    if epub_bytes.is_empty() {
+        bail!("下載電子書失敗");
+    }
+    let title = extract_book_title(&html).unwrap_or_else(|| code.to_string());
+    // 同一本書的橫式/直式是兩個不同檔案（epub 內部 `writing-mode` 不同，
+    // `chapter_is_vertical` 判斷出來的翻頁方式也會不一樣），檔名不加這個
+    // 標記的話，使用者兩種都下載會後蓋前，書架上只留得住最後下載那一種。
+    let variant_suffix = if vertical { "（直式）" } else { "" };
+    let file_name = format!("{}{variant_suffix}.epub", sanitize_ebook_filename(&title));
+    let dest = safe_ebook_path(&file_name).context("檔名不合法")?;
+    fs::write(&dest, &epub_bytes).context("寫入檔案失敗")?;
+    Ok(file_name)
+}
+
+fn curl_get(url: &str) -> Result<Vec<u8>> {
+    let output = Command::new("curl").args(["--silent", "--fail", "--max-time", "20", url]).output().context("執行 curl 失敗")?;
+    if !output.status.success() {
+        bail!("下載失敗：{url}");
+    }
+    Ok(output.stdout)
+}
+
+/// 書籍詳細頁裡書名夾在 `《...》` 之間（例如 `《少年衛斯理》`），頁面上這種
+/// 標記不只書名一處會用到（網站自己的 logo/頁尾也是），但書名固定是頁面裡
+/// 第一個出現的，足夠當檔名用——抓不到、或抓到的剛好是網站自己的名稱就
+/// 放棄，讓呼叫端退回用下載代號當檔名。
+fn extract_book_title(html: &str) -> Option<String> {
+    let start = html.find('《')? + '《'.len_utf8();
+    let end = html[start..].find('》')? + start;
+    let title = html[start..end].trim();
+    if title.is_empty() || title == "好讀" {
+        None
+    } else {
+        Some(title.to_string())
+    }
+}
+
+/// 書名拿來當檔名前先擋掉路徑分隔符——`safe_ebook_path` 本來就會擋，這裡
+/// 先做一次是避免書名剛好含有 `/`（真實存在，例如叢書合輯常見「上/下」
+/// 這種寫法）時，直接被 `safe_ebook_path` 拒絕、白白抓了老半天的檔案卻存
+/// 不進去。
+fn sanitize_ebook_filename(name: &str) -> String {
+    name.chars().map(|c| if c == '/' || c == '\\' { '_' } else { c }).collect()
 }
 
 type Doc = EpubDoc<std::io::BufReader<std::fs::File>>;
@@ -614,6 +699,40 @@ mod tests {
         assert!(safe_ebook_path("a/b.epub").is_none());
         assert!(safe_ebook_path("a\\b.epub").is_none());
         assert_eq!(safe_ebook_path("book.epub"), Some(Path::new(EBOOK_DIR).join("book.epub")));
+    }
+
+    #[test]
+    fn extract_book_title_finds_first_bracketed_title_and_skips_site_name() {
+        let html = r#"<font color="CC0000">倪匡</font>《少年衛斯理》<br>連結到《好讀》首頁"#;
+        assert_eq!(extract_book_title(html), Some("少年衛斯理".to_string()));
+        assert_eq!(extract_book_title("沒有書名標記的頁面"), None);
+        assert_eq!(extract_book_title("《好讀》"), None);
+    }
+
+    #[test]
+    fn sanitize_ebook_filename_replaces_path_separators() {
+        assert_eq!(sanitize_ebook_filename("上/下集"), "上_下集");
+        assert_eq!(sanitize_ebook_filename("a\\b"), "a_b");
+        assert_eq!(sanitize_ebook_filename("正常書名"), "正常書名");
+    }
+
+    #[test]
+    fn haodoo_import_rejects_non_haodoo_host() {
+        let err = haodoo_import("https://evil.example.com/?M=book&P=1", false).unwrap_err();
+        assert!(err.to_string().contains("haodoo.net"));
+    }
+
+    #[test]
+    #[ignore = "手動驗證用，會真的打 haodoo.net，不放進一般 CI/測試流程"]
+    fn haodoo_import_real_network_smoke_test() {
+        let dir = std::env::temp_dir().join("cng5-ereader-test-haodoo");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(EBOOK_DIR)).expect("建立測試用暫存目錄失敗");
+        let _guard = CwdGuard::enter(&dir);
+        let name = haodoo_import("https://haodoo.net/?M=book&P=13H8", false).expect("下載失敗");
+        assert!(Path::new(EBOOK_DIR).join(&name).exists());
+        let name_v = haodoo_import("https://haodoo.net/?M=book&P=13H8", true).expect("直式下載失敗");
+        assert!(Path::new(EBOOK_DIR).join(&name_v).exists());
     }
 
     #[test]
