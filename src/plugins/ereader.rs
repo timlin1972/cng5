@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
-use epub::doc::EpubDoc;
+use epub::doc::{EpubDoc, NavPoint};
 use serde::Serialize;
 
 use crate::output::OutputBuffer;
@@ -187,6 +187,16 @@ pub(crate) struct SpineEntry {
     pub(crate) href: String,
 }
 
+/// 目錄裡的一條項目：顯示名稱＋點了要跳去 `spine` 的第幾章。epub 的目錄
+/// （`toc.ncx`）本來就是獨立於 `spine` 之外的一份「人類看得懂的章節標題」
+/// 清單，跟章節內容檔案的實際順序（`spine`）是兩回事，所以要各自轉換成
+/// 同一個座標（spine index）才能對得起來。
+#[derive(Clone, Serialize)]
+pub(crate) struct TocEntry {
+    pub(crate) label: String,
+    pub(crate) chapter: usize,
+}
+
 /// `GET /api/ereader/book/{name}/meta` 的回應，也是 CLI 的 `open`/`next`/
 /// `prev` 共用的內部結構。
 #[derive(Clone, Serialize)]
@@ -196,8 +206,48 @@ pub(crate) struct BookMeta {
     /// `"ltr"` 或 `"rtl"`，見 `page_progression_direction`。
     pub(crate) direction: &'static str,
     pub(crate) spine: Vec<SpineEntry>,
+    pub(crate) toc: Vec<TocEntry>,
     pub(crate) current_chapter: usize,
     pub(crate) progress_percent: u32,
+}
+
+/// 遞迴走訪 `doc.toc`（`epub` crate 從 `toc.ncx` 解析出來的巢狀
+/// `NavPoint` 樹），把每個節點轉成 `TocEntry`——巢狀的子節點（通常是同一個
+/// 章節內的子標題）攤平成同一份清單，不做縮排分層，跳章節用不到那麼細的
+/// 結構。`resolve` 負責把 `NavPoint.content`（章節內部資源路徑，可能帶
+/// `#anchor` 片段，例如指向同一個檔案內的某個子標題）轉成 `spine` 的
+/// index；片段拿掉再查是因為 `resources`/`spine` 記錄的都是檔案路徑本身，
+/// 不含 `#anchor`，帶著片段查一定查不到。查不到的節點（理論上不該發生，
+/// 但目錄壞掉的 epub 現實中真的存在）直接跳過，不中斷其餘節點的處理。
+fn flatten_toc(points: &[NavPoint], resolve: &impl Fn(&Path) -> Option<usize>, out: &mut Vec<TocEntry>) {
+    for point in points {
+        let content = point.content.to_string_lossy();
+        let path_only = content.split('#').next().unwrap_or(&content);
+        if let Some(chapter) = resolve(Path::new(path_only)) {
+            let label = point.label.trim();
+            if !label.is_empty() {
+                out.push(TocEntry { label: label.to_string(), chapter });
+            }
+        }
+        flatten_toc(&point.children, resolve, out);
+    }
+}
+
+/// 沒有目錄（`toc.ncx` 缺失或解析不出東西，現實中真的有這種 epub）時的
+/// 退路：直接拿 `spine` 順序生成「第 N 章」這種通用標題，讓目錄面板永遠
+/// 有東西可以選，不會因為某本書的目錄資料不完整就整個開天窗。
+fn default_toc(spine_len: usize) -> Vec<TocEntry> {
+    (0..spine_len).map(|i| TocEntry { label: format!("第 {} 章", i + 1), chapter: i }).collect()
+}
+
+fn build_toc(doc: &Doc, spine_len: usize) -> Vec<TocEntry> {
+    let mut entries = Vec::new();
+    flatten_toc(&doc.toc, &|path| doc.resource_uri_to_chapter(&path.to_path_buf()), &mut entries);
+    if entries.is_empty() {
+        default_toc(spine_len)
+    } else {
+        entries
+    }
 }
 
 fn progress_percent(current_chapter: usize, total_chapters: usize) -> u32 {
@@ -222,9 +272,10 @@ pub(crate) fn book_meta(name: &str) -> Result<BookMeta> {
         .iter()
         .filter_map(|item| doc.resources.get(&item.idref).map(|r| SpineEntry { href: r.path.to_string_lossy().into_owned() }))
         .collect();
+    let toc = build_toc(&doc, spine.len());
     let current_chapter = chapter_progress(name).min(spine.len().saturating_sub(1));
     let percent = progress_percent(current_chapter, spine.len());
-    Ok(BookMeta { title, author, direction, spine, current_chapter, progress_percent: percent })
+    Ok(BookMeta { title, author, direction, spine, toc, current_chapter, progress_percent: percent })
 }
 
 /// 給 `web.rs` 的 `/api/ereader/book/{name}/resource/{path}` 用：回傳
@@ -707,6 +758,64 @@ mod tests {
         assert_eq!(extract_book_title(html), Some("少年衛斯理".to_string()));
         assert_eq!(extract_book_title("沒有書名標記的頁面"), None);
         assert_eq!(extract_book_title("《好讀》"), None);
+    }
+
+    #[test]
+    fn default_toc_generates_generic_labels_from_spine_length() {
+        let toc = default_toc(3);
+        assert_eq!(toc.len(), 3);
+        assert_eq!(toc[0].label, "第 1 章");
+        assert_eq!(toc[0].chapter, 0);
+        assert_eq!(toc[2].label, "第 3 章");
+        assert_eq!(toc[2].chapter, 2);
+        assert!(default_toc(0).is_empty());
+    }
+
+    #[test]
+    fn flatten_toc_resolves_content_paths_and_strips_anchor_fragments() {
+        let points = vec![
+            NavPoint { label: " 第一章 ".to_string(), content: PathBuf::from("OEBPS/c1.xhtml"), children: vec![], play_order: Some(1) },
+            NavPoint {
+                label: "第二章".to_string(),
+                // 目錄項目常常帶 `#anchor` 指向同一個檔案內的子標題，查
+                // spine index 要先把這段去掉，不然一定查不到。
+                content: PathBuf::from("OEBPS/c2.xhtml#section2"),
+                children: vec![],
+                play_order: Some(2),
+            },
+        ];
+        let resolve = |path: &Path| match path.to_str() {
+            Some("OEBPS/c1.xhtml") => Some(0),
+            Some("OEBPS/c2.xhtml") => Some(1),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        flatten_toc(&points, &resolve, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].label, "第一章");
+        assert_eq!(out[0].chapter, 0);
+        assert_eq!(out[1].label, "第二章");
+        assert_eq!(out[1].chapter, 1);
+    }
+
+    #[test]
+    fn flatten_toc_flattens_nested_children_and_skips_unresolvable_entries() {
+        let points = vec![NavPoint {
+            label: "父章節".to_string(),
+            content: PathBuf::from("OEBPS/parent.xhtml"),
+            play_order: Some(1),
+            children: vec![
+                NavPoint { label: "子小節".to_string(), content: PathBuf::from("OEBPS/parent.xhtml#sub"), children: vec![], play_order: Some(2) },
+                NavPoint { label: "查無此檔".to_string(), content: PathBuf::from("OEBPS/missing.xhtml"), children: vec![], play_order: Some(3) },
+            ],
+        }];
+        let resolve = |path: &Path| if path.to_str() == Some("OEBPS/parent.xhtml") { Some(0) } else { None };
+        let mut out = Vec::new();
+        flatten_toc(&points, &resolve, &mut out);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].label, "父章節");
+        assert_eq!(out[1].label, "子小節");
+        assert_eq!(out[1].chapter, 0);
     }
 
     #[test]

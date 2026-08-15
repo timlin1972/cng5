@@ -354,6 +354,11 @@
   .ereader-tap-zone { position: absolute; top: 0; bottom: 0; width: 18%; cursor: pointer; }
   .ereader-tap-left { left: 0; }
   .ereader-tap-right { right: 0; }
+  .ereader-toc-overlay { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; justify-content: flex-end; z-index: 5; }
+  .ereader-toc-list { width: min(320px, 80%); background: #1b1f27; overflow-y: auto; padding: 6px 0; }
+  .ereader-toc-row { padding: 10px 16px; color: #d8dee9; cursor: pointer; border-bottom: 1px solid #262a33; font-size: 13px; }
+  .ereader-toc-row:hover { background: #232833; }
+  .ereader-toc-row-current { color: #6f9dff; font-weight: bold; }
   /* 迷你歌詞：放在播放模式按鈕下面，固定只留幾行的高度（不是像封面那樣
      佔滿整個方框），`scrollActiveLyricIntoView` 會捲動這個小視窗讓目前
      唱到的那一行保持在可視範圍內。 */
@@ -1944,6 +1949,10 @@
       fontPlusBtn.textContent = "A+";
       fontPlusBtn.title = "放大字體";
       fontPlusBtn.addEventListener("click", () => changeFontScale(FONT_SCALE_STEP));
+      const tocBtn = document.createElement("button");
+      tocBtn.textContent = "目錄";
+      tocBtn.title = "選擇章節";
+      tocBtn.addEventListener("click", () => toggleToc());
       const prevBtn = document.createElement("button");
       prevBtn.title = "上一頁";
       prevBtn.addEventListener("click", () => turnPage(-1));
@@ -1954,6 +1963,7 @@
       toolbar.appendChild(titleEl);
       toolbar.appendChild(fontMinusBtn);
       toolbar.appendChild(fontPlusBtn);
+      toolbar.appendChild(tocBtn);
       // 直式（rtl）書翻頁習慣是從右到左，上一頁/下一頁按鈕的左右順序跟著
       // 對調（語意不變，還是「往前一頁」/「往後一頁」，只是哪個按鈕畫在
       // 左邊變了，符合直式書讀者的翻頁直覺）。符號故意不跟著「往前/往後」
@@ -1995,6 +2005,50 @@
       frameWrap.appendChild(frameEl);
       frameWrap.appendChild(leftZone);
       frameWrap.appendChild(rightZone);
+
+      // 目錄：`meta.toc`（見 `crate::plugins::ereader::build_toc`）是後端
+      // 已經把 epub 自己的 `toc.ncx` 轉成「顯示名稱 + 對應到 spine 第幾章」
+      // 的清單，這裡不用自己解析，直接渲染成可點的列表。疊在 `frameWrap`
+      // 上面（不是整個 `readerView`），工具列本身不會被蓋住，點列表外的
+      // 暗色背景可以直接關掉，不用特地找關閉鈕。
+      const tocOverlay = document.createElement("div");
+      tocOverlay.className = "ereader-toc-overlay";
+      tocOverlay.style.display = "none";
+      const tocList = document.createElement("div");
+      tocList.className = "ereader-toc-list";
+      tocOverlay.appendChild(tocList);
+      tocOverlay.addEventListener("click", (e) => {
+        if (e.target === tocOverlay) hideToc();
+      });
+      frameWrap.appendChild(tocOverlay);
+
+      function renderToc() {
+        tocList.innerHTML = "";
+        for (const entry of meta.toc) {
+          const row = document.createElement("div");
+          row.className = "ereader-toc-row" + (entry.chapter === meta.current_chapter ? " ereader-toc-row-current" : "");
+          row.textContent = entry.label;
+          row.addEventListener("click", () => {
+            hideToc();
+            if (entry.chapter !== meta.current_chapter) loadChapterAtPage(entry.chapter, 0);
+          });
+          tocList.appendChild(row);
+        }
+      }
+
+      function showToc() {
+        renderToc();
+        tocOverlay.style.display = "flex";
+      }
+
+      function hideToc() {
+        tocOverlay.style.display = "none";
+      }
+
+      function toggleToc() {
+        if (tocOverlay.style.display === "none") showToc();
+        else hideToc();
+      }
 
       // 滑動翻頁：往左滑＝往後一頁（LTR 書），跟 tap zone 同一套方向對調
       // 邏輯。滑動距離太短當成點擊，交給上面兩塊 tap zone 的 click 處理，
