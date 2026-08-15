@@ -3078,20 +3078,6 @@
       const writingMode = cs.writingMode || "";
       const vertical = writingMode.indexOf("vertical") === 0;
       const result = vertical ? measureVerticalChapter(doc) : measureHorizontalChapter(doc, cs);
-      // 暫時的除錯輸出，排查直式分頁問題用，之後穩定了就拿掉：把量測到的
-      // 關鍵數字印到 console，方便使用者直接複製貼回來，不用自己再讀程式碼
-      // 猜哪個數字算錯。
-      console.log(
-        "[ereader-debug] " +
-          JSON.stringify({
-            writingMode,
-            frameClientWidth: frameEl.clientWidth,
-            frameClientHeight: frameEl.clientHeight,
-            bodyScrollWidth: doc.body.scrollWidth,
-            bodyScrollHeight: doc.body.scrollHeight,
-            result,
-          })
-      );
       return Object.assign({ vertical }, result);
     }
 
@@ -3156,23 +3142,6 @@
               setScroll(startX - diff);
             }
           }
-          // 暫時的除錯輸出：捲完之後實際落在哪個 scrollLeft，跟畫面實際
-          // 看到的文字範圍，之後穩定了就拿掉。
-          const bodyRect = body.getBoundingClientRect();
-          console.log(
-            "[ereader-debug-scroll] " +
-              JSON.stringify({
-                index,
-                pageCount,
-                htmlScrollLeft: html.scrollLeft,
-                bodyScrollLeft: body.scrollLeft,
-                clientWidth: frameEl.clientWidth,
-                markerRight: Math.round(marker.getBoundingClientRect().right),
-                bodyRight: Math.round(bodyRect.right),
-                bodyLeft: Math.round(bodyRect.left),
-                text: ((marker.nextSibling && marker.nextSibling.textContent) || "").slice(0, 16),
-              })
-          );
         }
         return;
       }
@@ -3199,29 +3168,6 @@
       if (Math.abs(html.scrollLeft - target) > 0.5) {
         html.scrollLeft = target;
       }
-      // 暫時的除錯輸出，排查橫式書分頁問題用，之後穩定了就拿掉。
-      const bodyRect = body.getBoundingClientRect();
-      const htmlRect = html.getBoundingClientRect();
-      console.log(
-        "[ereader-debug-hscroll] " +
-          JSON.stringify({
-            index,
-            pageCount,
-            pageStep,
-            windowScrollX: doc.defaultView.scrollX,
-            htmlScrollLeft: html.scrollLeft,
-            bodyScrollLeft: body.scrollLeft,
-            clientWidth: frameEl.clientWidth,
-            bodyScrollWidth: body.scrollWidth,
-            bodyClientWidth: body.clientWidth,
-            htmlScrollWidth: html.scrollWidth,
-            htmlClientWidth: html.clientWidth,
-            bodyRectLeft: Math.round(bodyRect.left),
-            bodyRectRight: Math.round(bodyRect.right),
-            htmlRectLeft: Math.round(htmlRect.left),
-            htmlRectRight: Math.round(htmlRect.right),
-          })
-      );
     }
 
     // 橫式書：`inject_pagination_style` 插入的多欄排版 CSS 讓每一欄本來就
@@ -3457,23 +3403,6 @@
       // 被捲動過的這一刻量下來，直接用 `pageWidth()` 當目標，每一頁都會
       // 比正確位置多幾行的落差（少對齊到 padding／標題造成的內縮量）。
       verticalPageTarget = pageMarkers.length > 0 ? pageMarkers[0].getBoundingClientRect().right : pageWidth();
-      // 暫時的除錯輸出，排查直式分頁問題用：把每個標記的位置跟緊接著的
-      // 文字印出來，直接看出頁面邊界實際落在哪裡，之後穩定了就拿掉。
-      // 用 JSON.stringify 印成一整行純文字，瀏覽器 console 對物件/陣列預設
-      // 只顯示摺疊起來的預覽，直接複製貼上常常貼不到完整內容，字串就沒有
-      // 這個問題。
-      console.log(
-        "[ereader-debug-markers] budget=" +
-          budget +
-          " " +
-          JSON.stringify(
-            pageMarkers.map((m, i) => {
-              const rect = m.getBoundingClientRect();
-              const following = (m.nextSibling && m.nextSibling.textContent) || "";
-              return { page: i, right: Math.round(rect.right), top: Math.round(rect.top), text: following.slice(0, 16) };
-            })
-          )
-      );
       return { pageCount: Math.max(1, pageMarkers.length) };
     }
 
