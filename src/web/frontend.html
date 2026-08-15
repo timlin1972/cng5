@@ -3056,8 +3056,50 @@
     let touchStartX = null;
     let suppressNextClick = false;
 
+    // 字級調整：存在 `localStorage`（不是伺服器端），關掉分頁/重新整理
+    // 瀏覽器都還記得上次調到多大，跟這本書、這一章都無關，是使用者對這個
+    // 瀏覽器/裝置的個人偏好。
+    const FONT_SCALE_STORAGE_KEY = "cng5-ereader-font-scale";
+    const FONT_SCALE_MIN = 0.7;
+    const FONT_SCALE_MAX = 2;
+    const FONT_SCALE_STEP = 0.1;
+    let fontScale = (() => {
+      const stored = parseFloat(localStorage.getItem(FONT_SCALE_STORAGE_KEY));
+      return Number.isFinite(stored) && stored >= FONT_SCALE_MIN && stored <= FONT_SCALE_MAX ? stored : 1;
+    })();
+
     function pageWidth() {
       return (frameEl && frameEl.contentWindow && frameEl.contentWindow.innerWidth) || frameEl.clientWidth || 1;
+    }
+
+    // 章節每次都是全新的 iframe 文件（換章節等於整份文件重新載入），這裡
+    // 先把「這份文件原本、還沒被我們動過」的字級記在 `body` 的
+    // `data-` 屬性上（只在文件第一次套用時量一次），之後不管字級調整幾次
+    // 都是以這個原始值為基準乘上目前的縮放倍率，不會因為連續調整而複合
+    // 疊加（例如放大兩次不會變成 1.1 x 1.1，而是單純的 1 + 2 * 0.1）。
+    function applyFontScale(doc) {
+      const body = doc.body;
+      if (!body) return;
+      if (!body.dataset.cng5BaseFontSize) {
+        const natural = parseFloat(doc.defaultView.getComputedStyle(body).fontSize);
+        body.dataset.cng5BaseFontSize = String(Number.isFinite(natural) && natural > 0 ? natural : 16);
+      }
+      const base = parseFloat(body.dataset.cng5BaseFontSize);
+      body.style.setProperty("font-size", `${base * fontScale}px`, "important");
+    }
+
+    // 字級改變會動到每行能放幾個字/欄裡能塞幾行，分頁邊界整個要重算——跟
+    // 面板拖拉縮放大小是同一種情況，直接借用 `recomputeAfterResize`
+    // 「保留目前讀到大概幾成的位置、重新分頁」那套邏輯，不用重複寫一次。
+    function changeFontScale(delta) {
+      const next = Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, Math.round((fontScale + delta) * 10) / 10));
+      if (next === fontScale) return;
+      fontScale = next;
+      localStorage.setItem(FONT_SCALE_STORAGE_KEY, String(fontScale));
+      const doc = frameEl && frameEl.contentDocument;
+      if (!doc || !doc.body) return;
+      applyFontScale(doc);
+      recomputeAfterResize();
     }
 
     function updateToolbarText() {
@@ -3432,6 +3474,9 @@
     function onFrameLoaded(landing) {
       const doc = frameEl.contentDocument;
       if (!doc || !doc.body) return;
+      // 新章節是全新文件，套用目前的字級偏好，不然每換一章字級都會被
+      // book 自己的原始 CSS 重設回去。
+      applyFontScale(doc);
       const myToken = ++measurementToken;
       // 換章節這段期間（等字型穩定為止）標記起來，`recomputeAfterResize`
       // 看到這個標記就整個跳過，不會拿 `loadChapterAtPage` 剛重置、還沒被
@@ -3557,6 +3602,14 @@
       backBtn.addEventListener("click", showShelf);
       titleEl = document.createElement("span");
       titleEl.className = "ereader-toolbar-title";
+      const fontMinusBtn = document.createElement("button");
+      fontMinusBtn.textContent = "A-";
+      fontMinusBtn.title = "縮小字體";
+      fontMinusBtn.addEventListener("click", () => changeFontScale(-FONT_SCALE_STEP));
+      const fontPlusBtn = document.createElement("button");
+      fontPlusBtn.textContent = "A+";
+      fontPlusBtn.title = "放大字體";
+      fontPlusBtn.addEventListener("click", () => changeFontScale(FONT_SCALE_STEP));
       const prevBtn = document.createElement("button");
       prevBtn.title = "上一頁";
       prevBtn.addEventListener("click", () => turnPage(-1));
@@ -3565,6 +3618,8 @@
       nextBtn.addEventListener("click", () => turnPage(1));
       toolbar.appendChild(backBtn);
       toolbar.appendChild(titleEl);
+      toolbar.appendChild(fontMinusBtn);
+      toolbar.appendChild(fontPlusBtn);
       // 直式（rtl）書翻頁習慣是從右到左，上一頁/下一頁按鈕的左右順序跟著
       // 對調（語意不變，還是「往前一頁」/「往後一頁」，只是哪個按鈕畫在
       // 左邊變了，符合直式書讀者的翻頁直覺）。符號故意不跟著「往前/往後」
