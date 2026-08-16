@@ -5511,10 +5511,12 @@
     { name: "music-group", icon: "🎧", label: "Music", members: ["player", "music"] },
     // 圖示故意不用 `system` 已經佔用的 "ℹ️"，避免兩顆 icon 長得一樣造成
     // 混淆。
-    { name: "infos", icon: "🧭", label: "Infos", members: ["clock", "weather", "worldclock", "qr"] },
+    { name: "infos", icon: "🧭", label: "Infos", members: ["clock", "weather", "worldclock"] },
     // `name` 一樣故意跟 member 裡的 `remote` 分開取（`remote-group`），
     // 圖示也故意跟 `remote`（📡）/`remote-output`（🛰️）都不一樣。
     { name: "remote-group", icon: "🎛️", label: "Remote", members: ["remote", "remote-output"] },
+    // 這台機器自己的狀態類功能：連線活動記錄、跨裝置同步、系統資訊。
+    { name: "host", icon: "🏠", label: "Host", members: ["activities", "sync", "system", "shell", "qr"] },
   ];
   // member 名稱 -> 所屬分組名稱，`addDockItem`/`setDockOpen`/`bringToFront`
   // 都要查這個決定「這顆 icon 該放進分組彈出框還是主 dock bar」跟「這個
