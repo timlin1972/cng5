@@ -127,6 +127,56 @@
   .dock-item.active .dock-icon { background: rgba(111, 157, 255, 0.22); }
   .dock-icon:hover { background: rgba(255, 255, 255, 0.12); }
   .dock-icon:active { background: rgba(255, 255, 255, 0.2); }
+  /* 彈出框故意用 `position: fixed`，位置由 JS 在打開時依代表圖示當下的
+     `getBoundingClientRect()` 算好貼上去（見 `addDockGroup`）：`#dockbar`
+     本身 `overflow-x: auto`，CSS 規則規定「一軸不是 visible、另一軸沒特別
+     指定就會被強制變成 auto」，也就是垂直方向也會被裁切——如果彈出框是
+     `#dockbar` 的 DOM 子孫，往上彈出去的部分會被整個裁掉，直接看不到
+     （這正是「按下去沒東西跳出來」的原因）。光靠 `position: fixed` 救不了
+     這個問題：只要還在 dockbar 的 DOM 子樹裡，一樣會被裁掉，真正的解法是
+     把這個元素整個移出 dockbar 的 DOM 子樹（直接掛在 `document.body`
+     底下，見 `addDockGroup`），`position: fixed` 才會是相對整個視窗定位、
+     不再受任何祖先的 `overflow` 影響。 */
+  .dock-group-bubble-wrap {
+    position: fixed;
+    transform: translateX(-50%);
+    z-index: 30;
+  }
+  /* 像漫畫對話框那樣的圓角框 + 下方尖角，尖角用 `::before`（外框色，較大）
+     疊 `::after`（底色，略小、往上蓋 1px）做出邊框效果，裡面塞的 icon
+     直接沿用 `.dock-item`/`.dock-icon`/`.dock-dot`，跟平常 dock 上的樣式
+     完全一致。 */
+  .dock-group-bubble {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 220px;
+    gap: 2px;
+    padding: 8px;
+    background: #262a33;
+    border: 1px solid #3a4150;
+    border-radius: 18px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  }
+  .dock-group-bubble::before {
+    content: "";
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    border: 9px solid transparent;
+    border-top-color: #3a4150;
+  }
+  .dock-group-bubble::after {
+    content: "";
+    position: absolute;
+    top: calc(100% - 1px);
+    left: 50%;
+    transform: translateX(-50%);
+    border: 8px solid transparent;
+    border-top-color: #262a33;
+  }
   #cmdbar {
     display: flex;
     align-items: center;
@@ -1273,10 +1323,19 @@
     panel.style.zIndex = String(++zTop);
     panel.classList.add("active");
     for (const item of dockItems.values()) item.classList.remove("active");
+    for (const item of dockGroupItems.values()) item.classList.remove("active");
     for (const [name, entry] of open) {
       if (entry.el === panel) {
         const item = dockItems.get(name);
         if (item) item.classList.add("active");
+        // 這個 panel 屬於某個收攏分組的話，代表圖示也一起亮前景方框，
+        // 見 `DOCK_GROUPS` 的說明——不然分組彈出框收起來之後，使用者
+        // 完全看不出目前前景的 panel 其實藏在某個代表圖示底下。
+        const groupName = memberToGroup.get(name);
+        if (groupName) {
+          const groupItem = dockGroupItems.get(groupName);
+          if (groupItem) groupItem.classList.add("active");
+        }
         break;
       }
     }
@@ -5212,6 +5271,135 @@
   // 拿掉小點。
   const dockItems = new Map();
 
+  // 代表圖示分組：dock 上的 icon 一多，不容易一眼找到自己要的那個，把
+  // 功能相近、沒那麼常按的幾個收攏成一個代表圖示，點下去彈出一個類似
+  // 漫畫對話框的小面板（見 `.dock-group-bubble` 的 CSS），裡面放實際的
+  // icon（跟平常放在 dock 上一樣可以點）。往後如果還想收攏別的功能，加
+  // 一筆到這裡就好，不用改下面的渲染邏輯。
+  // 分組自己的 `name` 刻意跟任何真正的 panel/plugin 名字都不撞（例如
+  // `music-group` 不是 `music`）：`player`/`music` 這兩個 member 名字本來
+  // 就存在，分組自己另外取名字才不會讓人搞混「這是分組識別碼」還是
+  // 「這是某個 panel 的名字」，即使兩者剛好長得很像。
+  const DOCK_GROUPS = [
+    { name: "devices", icon: "🖥️", label: "Devices", members: ["topology", "device", "global"] },
+    { name: "music-group", icon: "🎧", label: "Music", members: ["player", "music"] },
+    // 圖示故意不用 `system` 已經佔用的 "ℹ️"，避免兩顆 icon 長得一樣造成
+    // 混淆。
+    { name: "infos", icon: "🧭", label: "Infos", members: ["clock", "weather", "worldclock", "qr"] },
+    // `name` 一樣故意跟 member 裡的 `remote` 分開取（`remote-group`），
+    // 圖示也故意跟 `remote`（📡）/`remote-output`（🛰️）都不一樣。
+    { name: "remote-group", icon: "🎛️", label: "Remote", members: ["remote", "remote-output"] },
+  ];
+  // member 名稱 -> 所屬分組名稱，`addDockItem`/`setDockOpen`/`bringToFront`
+  // 都要查這個決定「這顆 icon 該放進分組彈出框還是主 dock bar」跟「這個
+  // panel 的狀態要不要順便反映到代表圖示上」。
+  const memberToGroup = new Map();
+  for (const group of DOCK_GROUPS) {
+    for (const member of group.members) memberToGroup.set(member, group.name);
+  }
+  // 分組名稱 -> 彈出框內容的 DOM 元素（`addDockItem` 用來決定要塞去哪
+  // 裡）／代表圖示本身的 dock-item 元素（跟 `dockItems` 分開存，因為代表
+  // 圖示的名字（例如 "devices"）不對應任何真正的 panel，不能跟 panel
+  // name 混在一起查）。
+  const dockGroupBubbles = new Map();
+  const dockGroupItems = new Map();
+
+  function closeAllDockGroupBubbles() {
+    for (const bubble of dockGroupBubbles.values()) {
+      bubble.parentElement.style.display = "none";
+    }
+  }
+  // 點 dock 以外任何地方（例如某個 panel 本身）都要把彈出框收起來，跟
+  // player 播放模式選單同一套「點外面關掉」慣例。
+  document.addEventListener("click", closeAllDockGroupBubbles);
+
+  function addDockGroup(group) {
+    const item = document.createElement("div");
+    item.className = "dock-item dock-group-item";
+    const bubbleWrap = document.createElement("div");
+    bubbleWrap.className = "dock-group-bubble-wrap";
+    bubbleWrap.style.display = "none";
+    const bubble = document.createElement("div");
+    bubble.className = "dock-group-bubble";
+    bubbleWrap.appendChild(bubble);
+    // 見 `.dock-group-bubble-wrap` 的說明：一定要掛在 `document.body`，不
+    // 能掛在 `item`/`#dockbar` 底下，不然會被 dockbar 的 `overflow-x: auto`
+    // 隱含裁掉垂直方向溢出的內容。
+    document.body.appendChild(bubbleWrap);
+    const dot = document.createElement("span");
+    dot.className = "dock-dot";
+    const btn = document.createElement("button");
+    btn.className = "dock-icon";
+    btn.innerHTML = group.icon;
+    btn.title = group.label;
+
+    function openBubble() {
+      // 彈出框現在是 `document.body` 的直接子元素、`position: fixed`，
+      // 不會再自動跟著 `item` 走，位置要在打開的當下自己算：水平置中在
+      // 代表圖示正上方，`bottom` 用「視窗高度減掉圖示頂端」換算，貼齊
+      // 圖示上緣再留一點間距。一次只能有一個分組的彈出框顯示，開這個之前
+      // 先把其他都關掉。
+      closeAllDockGroupBubbles();
+      const rect = btn.getBoundingClientRect();
+      bubbleWrap.style.left = `${rect.left + rect.width / 2}px`;
+      bubbleWrap.style.bottom = `${window.innerHeight - rect.top + 12}px`;
+      bubbleWrap.style.display = "flex";
+    }
+
+    // 滑鼠移到代表圖示上就自動展開，不用特地點一下——但彈出框本身是
+    // `document.body` 的獨立元素，跟 `item`（代表圖示）中間隔著一段
+    // 間距（見 CSS 的 `bottom: calc(...) + 12px`），滑鼠從圖示移到彈出框
+    // 中途會先短暫「離開」圖示，如果一離開就立刻關掉，滑過那段間距時
+    // 框會先消失、根本點不到裡面的 icon。改成延遲一小段時間（給滑鼠足夠
+    // 時間移到彈出框上）才真的關掉，滑鼠中途進了彈出框（或又移回圖示）
+    // 就取消這次關閉。
+    let hideTimer = null;
+    function cancelHide() {
+      if (hideTimer !== null) {
+        clearTimeout(hideTimer);
+        hideTimer = null;
+      }
+    }
+    function scheduleHide() {
+      cancelHide();
+      hideTimer = setTimeout(() => {
+        bubbleWrap.style.display = "none";
+        hideTimer = null;
+      }, 250);
+    }
+    item.addEventListener("mouseenter", () => {
+      cancelHide();
+      openBubble();
+    });
+    item.addEventListener("mouseleave", scheduleHide);
+    bubbleWrap.addEventListener("mouseenter", cancelHide);
+    bubbleWrap.addEventListener("mouseleave", scheduleHide);
+
+    // 保留點擊切換：滑鼠 hover 開好之後點一下代表圖示會關掉（再點一次
+    // 圖示才會重新打開），觸控裝置沒有 hover 事件，點擊是唯一能打開的
+    // 方式。
+    btn.addEventListener("click", (e) => {
+      // 一定要擋掉冒泡，不然這個 click 事件傳到 `document` 之後，上面
+      // 那個 `closeAllDockGroupBubbles` 監聽器會緊接著把剛剛才打開的
+      // 彈出框立刻關掉。
+      e.stopPropagation();
+      cancelHide();
+      const isOpen = bubbleWrap.style.display !== "none";
+      if (isOpen) {
+        closeAllDockGroupBubbles();
+      } else {
+        openBubble();
+      }
+    });
+    item.appendChild(dot);
+    item.appendChild(btn);
+    dockbar.appendChild(item);
+    dockGroupItems.set(group.name, item);
+    dockGroupBubbles.set(group.name, bubble);
+  }
+
+  for (const group of DOCK_GROUPS) addDockGroup(group);
+
   // 小點代表「這個 panel 目前存在」（`open` 這個 Map 裡有它），不管它現在是
   // 顯示中還是被最小化——跟 title bar 的 `×`（`closePanel`，真的整個關掉、
   // 小點才會消失）是兩件事：dock icon 本身點下去（`toggleFromDock`）只是
@@ -5223,6 +5411,16 @@
     // 真的關掉了（不是最小化）就不可能還是前景，順手把前景方框也拿掉，
     // 不用等下一次別的 panel bringToFront 才間接清掉。
     if (!isOpen) item.classList.remove("active");
+    // 這個 panel 屬於某個收攏分組的話，代表圖示自己的小點要反映「分組
+    // 裡隨便一個 panel 還開著」，不是只看這一個 panel。
+    const groupName = memberToGroup.get(name);
+    if (groupName) {
+      const group = DOCK_GROUPS.find((g) => g.name === groupName);
+      const groupItem = dockGroupItems.get(groupName);
+      if (group && groupItem) {
+        groupItem.classList.toggle("open", group.members.some((member) => open.has(member)));
+      }
+    }
   }
 
   // dock icon 點下去：panel 還沒開就開一個（`openPanel` 自己會把小點點亮，
@@ -5249,16 +5447,26 @@
     // 寫的常數，不是使用者輸入，用 `innerHTML` 不會有 XSS 風險。
     btn.innerHTML = icon;
     btn.title = name;
-    btn.addEventListener("click", () => toggleFromDock(name));
+    btn.addEventListener("click", () => {
+      toggleFromDock(name);
+      // 從分組彈出框裡點開一個功能之後，彈出框自己收起來，不用使用者
+      // 手動關掉；不屬於任何分組的 icon 呼叫這個也只是沒事發生。
+      closeAllDockGroupBubbles();
+    });
     item.appendChild(dot);
     item.appendChild(btn);
-    dockbar.appendChild(item);
+    // 屬於某個收攏分組的 icon 塞進該分組的彈出框裡，不放進主 dock bar，
+    // 見 `DOCK_GROUPS` 的說明。
+    const groupName = memberToGroup.get(name);
+    const target = groupName ? dockGroupBubbles.get(groupName) : dockbar;
+    target.appendChild(item);
     dockItems.set(name, item);
   }
 
   // player/shell/topology 立刻加進 dock，不用等 `/api/plugins` 回來——跟以前
   // 那兩顆固定按鈕一樣，一開始就能點，不會因為 plugin 清單還沒抓回來就暫時
-  // 消失。
+  // 消失。topology 屬於 `devices` 分組，`addDockItem` 會自動把它放進對應的
+  // 彈出框，不是主 dock bar。
   addDockItem("player", "🎵");
   addDockItem("shell", "❯_");
   addDockItem("topology", "🌐");
