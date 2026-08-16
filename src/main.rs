@@ -29,7 +29,7 @@ use plugin::{ContextInner, Plugin};
 use plugins::{
     ActivitiesPlugin, ClockPlugin, DevicePlugin, EReaderPlugin, GitRepoPlugin, GlobalPlugin, MusicPlugin,
     NotepadPlugin, OutputPlugin, QrPlugin, RemoteOutputPlugin, RemotePlugin, StoragePlugin, SyncPlugin,
-    SystemPlugin, TodoPlugin, WeatherPlugin, WolPlugin, WorldClockPlugin,
+    SystemPlugin, TodoPlugin, WallpaperPlugin, WeatherPlugin, WolPlugin, WorldClockPlugin,
 };
 use shell::{lock_shell, run_host_shell, run_remote_shell, run_upgrade, PluginFactory, Shell, UiMode};
 
@@ -111,6 +111,10 @@ fn main() -> Result<()> {
         (
             "todo",
             Box::new(|ctx| Box::new(TodoPlugin::new(ctx)) as Box<dyn Plugin>),
+        ),
+        (
+            "wallpaper",
+            Box::new(|ctx| Box::new(WallpaperPlugin::new(ctx)) as Box<dyn Plugin>),
         ),
         (
             "weather",

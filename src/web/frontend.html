@@ -61,6 +61,13 @@
     width: 100%;
     flex: 1;
     overflow: hidden;
+    /* 桌布圖片（`applyWallpaper` 設 `background-image`）維持原始比例、
+       填滿整個 `#desk`，比例對不上視窗的部分用裁切（不是變形也不是留白
+       底色）：長邊超出視窗的部分，左右或上下各自裁掉一半，`center` 保證
+       裁掉的量兩邊平均、圖片主體置中。 */
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
   }
   /* mac OS Dock 風格的啟動列：每個 plugin/panel 各一顆固定的 icon，取代原本
      左上角的下拉選單——所有功能永遠列在這裡，不用先點開選單才看得到有哪些
@@ -997,6 +1004,22 @@
   .todo-row.done .todo-text { color: #6c7280; text-decoration: line-through; }
   .todo-row button { background: none; border: none; color: #9aa4b8; cursor: pointer; font-size: 13px; padding: 2px; }
   .todo-row button:hover { color: #d8dee9; }
+  .wallpaper-body { height: 100%; overflow-y: auto; padding: 10px; }
+  .wallpaper-empty { padding: 16px; text-align: center; color: #9aa4b8; font-size: 12px; }
+  .wallpaper-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+  .wallpaper-thumb {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    padding: 0;
+    border: 2px solid transparent;
+    border-radius: 6px;
+    overflow: hidden;
+    cursor: pointer;
+    background: #1b1e26;
+  }
+  .wallpaper-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .wallpaper-thumb:hover { border-color: #3a4150; }
+  .wallpaper-thumb.selected { border-color: #6f9dff; }
   .data-table-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
   .data-table-empty { padding: 8px; color: #9aa4b8; }
   /* `flex: 1`／`overflow: auto` 掛在這層包住 `<table>` 的 div，不是掛在
@@ -1306,6 +1329,19 @@
   const hostnameLabel = document.getElementById("hostname-label");
   const versionLabel = document.getElementById("version-label");
   const dockbar = document.getElementById("dockbar");
+
+  // 桌布：`#desk` 本身的 CSS 已經是 `background-size: cover;
+  // background-position: center;`（見該規則），維持圖片原始比例、裁掉超出
+  // 視窗比例的部分，不會變形也不會露出底色——沒選過桌布（`name` 是
+  // `null`/`undefined`）就清空背景圖，退回原本的純色。圖片本身沿用既有的
+  // `GET /api/storage/download?path=wallpaper/<檔名>`，不用另外做端點。
+  function applyWallpaper(name) {
+    desk.style.backgroundImage = name ? `url("/api/storage/download?path=wallpaper/${encodeURIComponent(name)}")` : "";
+  }
+  fetch("/api/wallpaper/current")
+    .then((r) => r.json())
+    .then((d) => applyWallpaper(d.selected))
+    .catch(() => {});
 
   // 每個 tab 自己的 panel 版面（位置/大小/疊放順序/開了哪些），只存在這個
   // JS 變數裡，重新整理就消失，也完全不會送回後端——跟後端 `rect`/`show`/
@@ -4202,6 +4238,7 @@
     let worldclockUi = null;
     let ereaderUi = null;
     let todoUi = null;
+    let wallpaperUi = null;
     if (name === "player") {
       // 跟任何 plugin 都無關的獨立播放器：不訂閱 SSE（`body` 保持 `undefined`），
       // 左邊檔案清單＋下載列，右邊封面＋播放控制。
@@ -5045,6 +5082,58 @@
       refresh();
 
       todoUi = { container };
+    } else if (name === "wallpaper") {
+      panel.style.width = "420px";
+      panel.style.height = "340px";
+
+      const container = document.createElement("div");
+      container.className = "wallpaper-body";
+      const grid = document.createElement("div");
+      grid.className = "wallpaper-grid";
+      container.appendChild(grid);
+
+      async function refresh() {
+        let names;
+        let current;
+        try {
+          const [namesRes, currentRes] = await Promise.all([fetch("/api/wallpaper/list"), fetch("/api/wallpaper/current")]);
+          names = await namesRes.json();
+          current = (await currentRes.json()).selected;
+        } catch (_err) {
+          return; // 這次沒抓到就算了，使用者下一次開這個 panel 會再重新抓一次。
+        }
+        grid.innerHTML = "";
+        if (names.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "wallpaper-empty";
+          empty.textContent = "(storage/wallpaper/ 底下還沒有任何圖片檔案)";
+          grid.appendChild(empty);
+          return;
+        }
+        for (const wallpaperName of names) {
+          const thumb = document.createElement("button");
+          thumb.className = "wallpaper-thumb" + (wallpaperName === current ? " selected" : "");
+          thumb.title = wallpaperName;
+          const img = document.createElement("img");
+          img.src = `/api/storage/download?path=${encodeURIComponent(`wallpaper/${wallpaperName}`)}`;
+          img.alt = wallpaperName;
+          thumb.appendChild(img);
+          thumb.addEventListener("click", async () => {
+            await fetch("/api/wallpaper/select", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: wallpaperName }),
+            });
+            applyWallpaper(wallpaperName);
+            refresh();
+          });
+          grid.appendChild(thumb);
+        }
+      }
+
+      refresh();
+
+      wallpaperUi = { container };
     } else if (name === "global" || name === "device") {
       panel.style.width = "640px";
       panel.style.height = "320px";
@@ -5104,6 +5193,8 @@
         ? ereaderUi.container
         : todoUi
         ? todoUi.container
+        : wallpaperUi
+        ? wallpaperUi.container
         : body
     );
     resizeHandles.forEach((h) => panel.appendChild(h));
@@ -5247,6 +5338,7 @@
       worldclockUi,
       ereaderUi,
       todoUi,
+      wallpaperUi,
       // dock icon 點下去要能「切換最小化」，重複用跟 title bar 上那顆 `_`
       // 按鈕完全同一套邏輯（見上面 `toggleLayoutState`）——不是關閉，關閉
       // 是 title bar 上的 `×`（`closePanel`），兩者對 dock 小點的影響不同，
@@ -5527,6 +5619,7 @@
     sync: "🔄",
     system: "ℹ️",
     todo: "✅",
+    wallpaper: "🖼️",
     weather: "🌤️",
     qr: QR_ICON,
     worldclock: "🗺️",

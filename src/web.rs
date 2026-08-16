@@ -20,10 +20,11 @@ use crate::plugin::{
     APP_VERSION,
 };
 use crate::plugins::{
-    book_cover, book_meta, book_resource, chapter_is_vertical, haodoo_import, inject_pagination_style, list_books,
-    list_dir, make_dir, normalize_vertical_css, remove, rename_path, safe_ebook_path, safe_music_copy_path,
-    safe_storage_path, save_chapter_progress, walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin,
-    WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    book_cover, book_meta, book_resource, chapter_is_vertical, current_wallpaper, haodoo_import,
+    inject_pagination_style, list_books, list_dir, list_wallpapers, make_dir, normalize_vertical_css, remove,
+    rename_path, safe_ebook_path, safe_music_copy_path, safe_storage_path, save_chapter_progress, select_wallpaper,
+    walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, WorldClockPlugin, DEFAULT_NOTEPAD_FILE,
+    MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -170,6 +171,9 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
                     .route(web::post().to(ereader_upload)),
             )
             .route("/api/ereader/haodoo-import", web::post().to(ereader_haodoo_import))
+            .route("/api/wallpaper/list", web::get().to(wallpaper_list))
+            .route("/api/wallpaper/current", web::get().to(wallpaper_current))
+            .route("/api/wallpaper/select", web::post().to(wallpaper_select))
             .route("/api/notepad/content", web::get().to(notepad_get_content))
             .route("/api/notepad/content", web::post().to(notepad_save_content))
             .route("/api/device/register", web::post().to(device_register))
@@ -1210,6 +1214,39 @@ async fn ereader_haodoo_import(body: web::Json<HaodooImportBody>) -> HttpRespons
         .unwrap_or_else(|_| Err(anyhow::anyhow!("內部錯誤")));
     match result {
         Ok(name) => HttpResponse::Ok().json(HaodooImportResponse { name }),
+        Err(err) => HttpResponse::BadRequest().body(format!("{err:#}")),
+    }
+}
+
+/// `GET /api/wallpaper/list`：`storage/wallpaper/` 資料夾裡目前有的圖片
+/// 檔名（見 `crate::plugins::list_wallpapers`）。圖片本身的位元組不用另外
+/// 做端點，直接沿用既有的 `GET /api/storage/download?path=wallpaper/<檔名>`
+/// 就能拿到（`actix_files::NamedFile` 對圖片類型的 mime 預設就是
+/// `Content-Disposition: inline`，直接當 `<img src>`/CSS 背景圖用沒問題）。
+async fn wallpaper_list() -> impl Responder {
+    HttpResponse::Ok().json(list_wallpapers())
+}
+
+#[derive(Serialize)]
+struct WallpaperCurrentResponse {
+    selected: Option<String>,
+}
+
+/// `GET /api/wallpaper/current`：目前選的桌布檔名，沒選過是 `null`。
+async fn wallpaper_current() -> impl Responder {
+    HttpResponse::Ok().json(WallpaperCurrentResponse { selected: current_wallpaper() })
+}
+
+#[derive(Deserialize)]
+struct WallpaperSelectBody {
+    name: String,
+}
+
+/// `POST /api/wallpaper/select`：換桌布，`name` 必須是 `list_wallpaper`
+/// 清單裡真的存在的檔名（`select_wallpaper` 裡面會擋，見該函式的說明）。
+async fn wallpaper_select(body: web::Json<WallpaperSelectBody>) -> HttpResponse {
+    match select_wallpaper(&body.name) {
+        Ok(()) => HttpResponse::Ok().finish(),
         Err(err) => HttpResponse::BadRequest().body(format!("{err:#}")),
     }
 }
