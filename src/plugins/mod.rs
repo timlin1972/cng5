@@ -53,7 +53,7 @@ pub(crate) use system::REPORT_INTERVAL;
 pub use system::SystemPlugin;
 pub(crate) use table_diff::{RowDiffTracker, TableSnapshot};
 pub use todo::TodoPlugin;
-pub(crate) use wallpaper::{current_wallpaper, list_wallpapers, select_wallpaper};
+pub(crate) use wallpaper::{current_wallpaper, list_wallpapers, rotate_enabled, select_wallpaper, set_rotate_enabled};
 pub use wallpaper::WallpaperPlugin;
 pub use weather::WeatherPlugin;
 pub use wol::WolPlugin;

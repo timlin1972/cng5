@@ -1004,20 +1004,32 @@
   .todo-row.done .todo-text { color: #6c7280; text-decoration: line-through; }
   .todo-row button { background: none; border: none; color: #9aa4b8; cursor: pointer; font-size: 13px; padding: 2px; }
   .todo-row button:hover { color: #d8dee9; }
-  .wallpaper-body { height: 100%; overflow-y: auto; padding: 10px; }
+  .wallpaper-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .wallpaper-toolbar { flex: none; padding: 8px 10px; border-bottom: 1px solid #3a4150; font-size: 12px; color: #d8dee9; }
+  .wallpaper-toolbar label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
   .wallpaper-empty { padding: 16px; text-align: center; color: #9aa4b8; font-size: 12px; }
-  .wallpaper-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+  .wallpaper-grid { flex: 1; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 10px; }
+  /* 不用 `aspect-ratio` 撐高度：`<button>` 這種表單元件加上
+     `aspect-ratio`，在裡面又塞一張用百分比撐滿的 `<img>` 時，某些瀏覽器
+     會撐不出正確尺寸——`<button>` 的原生尺寸演算法在某些情況下沒有正確
+     套用 `aspect-ratio`，圖片乾脆就長回自己的原始像素尺寸，撐爆格子疊到
+     旁邊去。改成 `height:0` + `padding-bottom` 撐出 16:9 的高度：
+     `padding-bottom` 的百分比永遠是對「自己的寬度」換算（CSS 規定死的，
+     不會有上面那種循環依賴的問題），圖片改成絕對定位貼滿這個撐好的框，
+     不會再影響外層框本身的尺寸。 */
   .wallpaper-thumb {
     position: relative;
-    aspect-ratio: 16 / 9;
-    padding: 0;
+    display: block;
+    width: 100%;
+    height: 0;
+    padding: 0 0 56.25% 0;
     border: 2px solid transparent;
     border-radius: 6px;
     overflow: hidden;
     cursor: pointer;
     background: #1b1e26;
   }
-  .wallpaper-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .wallpaper-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
   .wallpaper-thumb:hover { border-color: #3a4150; }
   .wallpaper-thumb.selected { border-color: #6f9dff; }
   .data-table-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
@@ -1338,9 +1350,53 @@
   function applyWallpaper(name) {
     desk.style.backgroundImage = name ? `url("/api/storage/download?path=wallpaper/${encodeURIComponent(name)}")` : "";
   }
+
+  // 自動輪播：計時器整個在前端跑（見 `crate::plugins::wallpaper` 的
+  // manual 說明——桌布只有畫面顯示著才有意義，不需要程式本身在背景一直
+  // 跑），`wallpaperCurrentName` 記著目前這張，換下一張用它在清單裡的
+  // 位置往後推一個（最後一張繞回第一張），不是每次都重新讀伺服器目前
+  // 選的是哪張——這樣使用者自己手動選了一張之後，輪播能接著從那張繼續
+  // 往下走，不會沒對到。
+  const WALLPAPER_ROTATE_INTERVAL_MS = 5 * 60 * 1000;
+  let wallpaperRotateTimer = null;
+  let wallpaperCurrentName = null;
+
+  async function rotateWallpaperToNext() {
+    try {
+      const res = await fetch("/api/wallpaper/list");
+      const names = await res.json();
+      if (names.length === 0) return;
+      const idx = wallpaperCurrentName ? names.indexOf(wallpaperCurrentName) : -1;
+      const next = names[(idx + 1) % names.length];
+      await fetch("/api/wallpaper/select", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: next }),
+      });
+      wallpaperCurrentName = next;
+      applyWallpaper(next);
+    } catch (_err) {
+      // 這次沒換到就算了，等下一輪計時器再試一次。
+    }
+  }
+
+  function setWallpaperRotateEnabled(enabled) {
+    if (wallpaperRotateTimer !== null) {
+      clearInterval(wallpaperRotateTimer);
+      wallpaperRotateTimer = null;
+    }
+    if (enabled) {
+      wallpaperRotateTimer = setInterval(rotateWallpaperToNext, WALLPAPER_ROTATE_INTERVAL_MS);
+    }
+  }
+
   fetch("/api/wallpaper/current")
     .then((r) => r.json())
-    .then((d) => applyWallpaper(d.selected))
+    .then((d) => {
+      wallpaperCurrentName = d.selected;
+      applyWallpaper(d.selected);
+      setWallpaperRotateEnabled(d.rotate);
+    })
     .catch(() => {});
 
   // 每個 tab 自己的 panel 版面（位置/大小/疊放順序/開了哪些），只存在這個
@@ -5083,13 +5139,33 @@
 
       todoUi = { container };
     } else if (name === "wallpaper") {
-      panel.style.width = "420px";
-      panel.style.height = "340px";
+      panel.style.width = "620px";
+      panel.style.height = "480px";
 
       const container = document.createElement("div");
       container.className = "wallpaper-body";
+
+      const toolbar = document.createElement("div");
+      toolbar.className = "wallpaper-toolbar";
+      const rotateLabel = document.createElement("label");
+      const rotateCheckbox = document.createElement("input");
+      rotateCheckbox.type = "checkbox";
+      rotateLabel.appendChild(rotateCheckbox);
+      rotateLabel.appendChild(document.createTextNode(" 自動輪播（每 5 分鐘換一張）"));
+      toolbar.appendChild(rotateLabel);
+      rotateCheckbox.addEventListener("change", async () => {
+        const enabled = rotateCheckbox.checked;
+        await fetch("/api/wallpaper/rotate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled }),
+        });
+        setWallpaperRotateEnabled(enabled);
+      });
+
       const grid = document.createElement("div");
       grid.className = "wallpaper-grid";
+      container.appendChild(toolbar);
       container.appendChild(grid);
 
       async function refresh() {
@@ -5098,7 +5174,9 @@
         try {
           const [namesRes, currentRes] = await Promise.all([fetch("/api/wallpaper/list"), fetch("/api/wallpaper/current")]);
           names = await namesRes.json();
-          current = (await currentRes.json()).selected;
+          const currentData = await currentRes.json();
+          current = currentData.selected;
+          rotateCheckbox.checked = currentData.rotate;
         } catch (_err) {
           return; // 這次沒抓到就算了，使用者下一次開這個 panel 會再重新抓一次。
         }
@@ -5124,6 +5202,7 @@
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ name: wallpaperName }),
             });
+            wallpaperCurrentName = wallpaperName;
             applyWallpaper(wallpaperName);
             refresh();
           });

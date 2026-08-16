@@ -33,6 +33,8 @@ wallpaper：webui 桌面背景圖，從 storage/wallpaper/ 資料夾裡選一張
 範例：
   list            列出目前有的圖片（目前選的那張前面會標 *）
   select <檔名>   換成這一張
+  rotate on       開啟自動輪播（webui 每 5 分鐘自動換下一張）
+  rotate off      關閉自動輪播
 
 圖片檔案要自己先用 storage plugin（網頁介面的 storage 分頁）上傳進
 storage/wallpaper/ 資料夾，這個 plugin 不會自己抓/下載圖片。
@@ -40,6 +42,10 @@ storage/wallpaper/ 資料夾，這個 plugin 不會自己抓/下載圖片。
 webui 顯示時會維持圖片原始比例，不會變形，也不會露出底色——視窗比例跟圖片
 比例對不上的部分，是圖片本身被裁掉（比較長的那一邊左右或上下各裁一半），
 不是整張塞進去再補顏色墊底。
+
+自動輪播的計時器在瀏覽器那邊跑（不是這個程式本身），只有 webui 開著的時候
+才會真的換下一張，跟 sync plugin 之類「就算沒人在看也要一直跑」的背景工作
+不一樣——桌布本來就只有畫面顯示著的時候才有意義。
 ";
 
 fn is_image_file(name: &str) -> bool {
@@ -75,6 +81,12 @@ pub(crate) fn list_wallpapers() -> Vec<String> {
 #[derive(Default, Serialize, Deserialize)]
 struct WallpaperPrefs {
     selected: Option<String>,
+    /// 開著的話 webui 每 5 分鐘自動換下一張（見 `web.rs` 前端那段輪播
+    /// 邏輯，計時器在瀏覽器端，不是這裡）。`#[serde(default)]`：舊版存的
+    /// 設定檔沒有這個欄位，讀回來當作 `false`，不會因為多了新欄位就整份
+    /// 解析失敗、回退成完全預設值（連 `selected` 都不見）。
+    #[serde(default)]
+    rotate: bool,
 }
 
 fn load_prefs() -> WallpaperPrefs {
@@ -98,29 +110,48 @@ pub(crate) fn current_wallpaper() -> Option<String> {
 
 /// 換桌布：檔名必須是 `list_wallpapers()` 裡真的有的檔案，不能亂填一個不
 /// 存在的名字進去（webui 那邊會直接拿這個名字組圖片網址，選了不存在的
-/// 檔案只會讓桌面背景整個消失，不如一開始就擋掉）。
+/// 檔案只會讓桌面背景整個消失，不如一開始就擋掉）。先讀出目前存的設定再
+/// 只改 `selected` 這一欄，不是整份用新的覆蓋——不然自動輪播開著的時候，
+/// 輪播本身每次換下一張都會呼叫這個函式，順手就把 `rotate` 重設回
+/// `false`，變成換一張就自動關掉輪播。
 pub(crate) fn select_wallpaper(name: &str) -> Result<()> {
     let path = safe_wallpaper_path(name).context("不合法的檔名")?;
     if !path.is_file() {
         bail!("找不到這張桌布: {name}");
     }
-    save_prefs(&WallpaperPrefs { selected: Some(name.to_string()) })
+    let mut prefs = load_prefs();
+    prefs.selected = Some(name.to_string());
+    save_prefs(&prefs)
+}
+
+/// 自動輪播目前是不是開著的。
+pub(crate) fn rotate_enabled() -> bool {
+    load_prefs().rotate
+}
+
+/// 開關自動輪播，同樣只改 `rotate` 這一欄，不動 `selected`。
+pub(crate) fn set_rotate_enabled(enabled: bool) -> Result<()> {
+    let mut prefs = load_prefs();
+    prefs.rotate = enabled;
+    save_prefs(&prefs)
 }
 
 fn list_text() -> String {
+    let rotate_line = format!("自動輪播: {}", if rotate_enabled() { "開" } else { "關" });
     let names = list_wallpapers();
     if names.is_empty() {
-        return "(storage/wallpaper/ 底下還沒有任何圖片檔案)".to_string();
+        return format!("{rotate_line}\n(storage/wallpaper/ 底下還沒有任何圖片檔案)");
     }
     let current = current_wallpaper();
-    names
+    let list = names
         .into_iter()
         .map(|name| {
             let marker = if current.as_deref() == Some(name.as_str()) { "* " } else { "  " };
             format!("{marker}{name}")
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    format!("{rotate_line}\n{list}")
 }
 
 pub struct WallpaperPlugin {
@@ -136,7 +167,7 @@ impl WallpaperPlugin {
 
 impl Plugin for WallpaperPlugin {
     fn commands(&self) -> &'static [&'static str] {
-        &["list", "select <檔名>"]
+        &["list", "select <檔名>", "rotate <on|off>"]
     }
 
     fn dispatch(&mut self, cmd: &str, args: &[String], out: &OutputBuffer) -> Result<()> {
@@ -149,6 +180,16 @@ impl Plugin for WallpaperPlugin {
                 let Some(name) = args.first() else { bail!("用法: select <檔名>") };
                 select_wallpaper(name)?;
                 out.push(&format!("已選擇桌布: {name}\n"));
+                Ok(())
+            }
+            "rotate" => {
+                let enabled = match args.first().map(String::as_str) {
+                    Some("on") => true,
+                    Some("off") => false,
+                    _ => bail!("用法: rotate <on|off>"),
+                };
+                set_rotate_enabled(enabled)?;
+                out.push(&format!("自動輪播: {}\n", if enabled { "開" } else { "關" }));
                 Ok(())
             }
             other => bail!("wallpaper 不認得指令: {other}"),
@@ -251,6 +292,32 @@ mod tests {
         // 一直回傳一個已經不存在的檔名。
         fs::remove_file(Path::new(WALLPAPER_DIR).join("forest.png")).unwrap();
         assert_eq!(current_wallpaper(), None);
+    }
+
+    #[test]
+    fn select_wallpaper_preserves_rotate_flag_and_vice_versa() {
+        let dir = std::env::temp_dir().join("cng5-wallpaper-rotate-test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join(WALLPAPER_DIR)).expect("建立測試用暫存目錄失敗");
+        let _guard = CwdGuard::enter(&dir);
+
+        fs::write(Path::new(WALLPAPER_DIR).join("beach.jpg"), b"fake").unwrap();
+        fs::write(Path::new(WALLPAPER_DIR).join("forest.png"), b"fake").unwrap();
+
+        assert!(!rotate_enabled());
+        set_rotate_enabled(true).unwrap();
+        assert!(rotate_enabled());
+
+        // 換桌布（輪播每一輪都會呼叫這個）不能把 rotate 開關重設掉。
+        select_wallpaper("beach.jpg").unwrap();
+        assert!(rotate_enabled());
+        select_wallpaper("forest.png").unwrap();
+        assert!(rotate_enabled());
+
+        // 反過來，關掉輪播也不能動到目前選的桌布。
+        set_rotate_enabled(false).unwrap();
+        assert!(!rotate_enabled());
+        assert_eq!(current_wallpaper(), Some("forest.png".to_string()));
     }
 
     #[test]

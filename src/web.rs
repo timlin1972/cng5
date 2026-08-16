@@ -22,9 +22,9 @@ use crate::plugin::{
 use crate::plugins::{
     book_cover, book_meta, book_resource, chapter_is_vertical, current_wallpaper, haodoo_import,
     inject_pagination_style, list_books, list_dir, list_wallpapers, make_dir, normalize_vertical_css, remove,
-    rename_path, safe_ebook_path, safe_music_copy_path, safe_storage_path, save_chapter_progress, select_wallpaper,
-    walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin, WorldClockPlugin, DEFAULT_NOTEPAD_FILE,
-    MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    rename_path, rotate_enabled, safe_ebook_path, safe_music_copy_path, safe_storage_path, save_chapter_progress,
+    select_wallpaper, set_rotate_enabled, walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin,
+    WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -174,6 +174,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/wallpaper/list", web::get().to(wallpaper_list))
             .route("/api/wallpaper/current", web::get().to(wallpaper_current))
             .route("/api/wallpaper/select", web::post().to(wallpaper_select))
+            .route("/api/wallpaper/rotate", web::post().to(wallpaper_rotate))
             .route("/api/notepad/content", web::get().to(notepad_get_content))
             .route("/api/notepad/content", web::post().to(notepad_save_content))
             .route("/api/device/register", web::post().to(device_register))
@@ -1230,11 +1231,14 @@ async fn wallpaper_list() -> impl Responder {
 #[derive(Serialize)]
 struct WallpaperCurrentResponse {
     selected: Option<String>,
+    rotate: bool,
 }
 
-/// `GET /api/wallpaper/current`：目前選的桌布檔名，沒選過是 `null`。
+/// `GET /api/wallpaper/current`：目前選的桌布檔名（沒選過是 `null`）跟
+/// 自動輪播開關現在的狀態——前端開頁面時靠這個決定要不要啟動輪播計時器
+/// （見 `crate::plugins::rotate_enabled` 的說明，計時器本身在前端跑）。
 async fn wallpaper_current() -> impl Responder {
-    HttpResponse::Ok().json(WallpaperCurrentResponse { selected: current_wallpaper() })
+    HttpResponse::Ok().json(WallpaperCurrentResponse { selected: current_wallpaper(), rotate: rotate_enabled() })
 }
 
 #[derive(Deserialize)]
@@ -1248,6 +1252,21 @@ async fn wallpaper_select(body: web::Json<WallpaperSelectBody>) -> HttpResponse 
     match select_wallpaper(&body.name) {
         Ok(()) => HttpResponse::Ok().finish(),
         Err(err) => HttpResponse::BadRequest().body(format!("{err:#}")),
+    }
+}
+
+#[derive(Deserialize)]
+struct WallpaperRotateBody {
+    enabled: bool,
+}
+
+/// `POST /api/wallpaper/rotate`：開關自動輪播（實際計時器在前端跑，見
+/// `crate::plugins::set_rotate_enabled` 的說明），這裡只負責存這個開關的
+/// 狀態，讓重新整理/其他裝置也能讀到目前是開是關。
+async fn wallpaper_rotate(body: web::Json<WallpaperRotateBody>) -> HttpResponse {
+    match set_rotate_enabled(body.enabled) {
+        Ok(()) => HttpResponse::Ok().finish(),
+        Err(err) => HttpResponse::InternalServerError().body(format!("{err:#}")),
     }
 }
 
