@@ -1032,6 +1032,31 @@
   .wallpaper-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
   .wallpaper-thumb:hover { border-color: #3a4150; }
   .wallpaper-thumb.selected { border-color: #6f9dff; }
+  /* 故意不設 `background`（維持透明）：只用文字陰影墊出可讀性，不管
+     縮圖底色深淺都看得到，但不會有一塊實心色塊擋住圖片內容。平常不
+     顯示，滑鼠移到這張縮圖上才浮現（見下面 `:hover` 規則）。 */
+  .wallpaper-thumb-delete {
+    position: absolute;
+    right: 4px;
+    bottom: 4px;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    padding: 0;
+    color: #fff;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.12s ease, color 0.12s ease;
+    text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.9), 0 0 3px rgba(0, 0, 0, 0.9);
+  }
+  .wallpaper-thumb:hover .wallpaper-thumb-delete { opacity: 1; }
+  .wallpaper-thumb-delete:hover { color: #ff6b6b; }
   .data-table-body { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
   .data-table-empty { padding: 8px; color: #9aa4b8; }
   /* `flex: 1`／`overflow: auto` 掛在這層包住 `<table>` 的 div，不是掛在
@@ -5189,9 +5214,15 @@
           return;
         }
         for (const wallpaperName of names) {
-          const thumb = document.createElement("button");
+          // `thumb` 故意用 `<div>` 不是 `<button>`：裡面還要塞一顆真正的
+          // `<button>`（刪除鈕），`<button>` 裡面不能再放 `<button>`
+          // （不合法的巢狀互動內容），用 DOM API 疊出來雖然瀏覽器實際渲染
+          // 不會出事，但語意上不乾淨，乾脆外層改用 `<div>` + `role`。
+          const thumb = document.createElement("div");
           thumb.className = "wallpaper-thumb" + (wallpaperName === current ? " selected" : "");
           thumb.title = wallpaperName;
+          thumb.setAttribute("role", "button");
+          thumb.tabIndex = 0;
           const img = document.createElement("img");
           img.src = `/api/storage/download?path=${encodeURIComponent(`wallpaper/${wallpaperName}`)}`;
           img.alt = wallpaperName;
@@ -5206,6 +5237,30 @@
             applyWallpaper(wallpaperName);
             refresh();
           });
+
+          // 刪除鈕：平常不顯示，滑鼠移到這張縮圖上才浮現在右下角（見
+          // `.wallpaper-thumb:hover .wallpaper-thumb-delete` 的 CSS），故意
+          // 不給背景色、只有文字加陰影襯托可讀性——不管縮圖底色深淺都看
+          // 得到，但不會有一塊實心色塊擋住圖片內容。
+          const deleteBtn = document.createElement("button");
+          deleteBtn.className = "wallpaper-thumb-delete";
+          deleteBtn.textContent = "✕";
+          deleteBtn.title = "刪除這張桌布";
+          deleteBtn.addEventListener("click", async (e) => {
+            // 擋掉冒泡，不然點刪除鈕還會連帶觸發外層 `thumb` 的選取事件。
+            e.stopPropagation();
+            if (!window.confirm(`確定要刪除「${wallpaperName}」嗎？`)) return;
+            await fetch(`/api/storage/delete?path=${encodeURIComponent(`wallpaper/${wallpaperName}`)}`, { method: "POST" });
+            // 刪掉的剛好是目前套用中的桌布，桌面背景要跟著清掉，不然會
+            // 一直嘗試載入一張已經不存在的圖片。
+            if (wallpaperName === wallpaperCurrentName) {
+              wallpaperCurrentName = null;
+              applyWallpaper(null);
+            }
+            refresh();
+          });
+          thumb.appendChild(deleteBtn);
+
           grid.appendChild(thumb);
         }
       }
