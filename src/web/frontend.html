@@ -5110,6 +5110,10 @@
         try {
           const res = await fetch("/api/todo/list");
           items = await res.json();
+          // 打勾完成的排到清單最後面，方便一眼看出還剩哪些沒做；`sort`
+          // 是穩定排序（同樣是 done 或同樣是未 done 的幾筆，彼此順序不會
+          // 被打亂），不會動到後端存檔的順序，純粹是顯示時的排列。
+          items.sort((a, b) => (a.done === b.done ? 0 : a.done ? 1 : -1));
         } catch (_err) {
           return; // 這次沒抓到就算了，使用者下一次操作會再觸發一次 refresh。
         }
