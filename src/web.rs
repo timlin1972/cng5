@@ -22,9 +22,10 @@ use crate::plugin::{
 use crate::plugins::{
     book_cover, book_meta, book_resource, chapter_is_vertical, current_wallpaper, haodoo_import,
     inject_pagination_style, list_books, list_dir, list_wallpapers, make_dir, normalize_vertical_css, remove,
-    rename_path, rotate_enabled, safe_ebook_path, safe_music_copy_path, safe_storage_path, save_chapter_progress,
-    select_wallpaper, set_rotate_enabled, walk_with_hashes, DevicePlugin, GlobalPlugin, TodoPlugin, WeatherPlugin,
-    WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR, SUBTITLE_LANG_PRIORITY,
+    remove_conflict_files, rename_path, rotate_enabled, safe_ebook_path, safe_music_copy_path, safe_storage_path,
+    save_chapter_progress, select_wallpaper, set_rotate_enabled, walk_with_hashes, DevicePlugin, GlobalPlugin,
+    TodoPlugin, WeatherPlugin, WorldClockPlugin, DEFAULT_NOTEPAD_FILE, MUSIC_DIR, NOTEPAD_DIR, STORAGE_DIR,
+    SUBTITLE_LANG_PRIORITY,
 };
 use crate::shell::{default_shell_program, lock_shell, run_upgrade, send_cross_domain_request, Shell};
 use crate::sysinfo;
@@ -196,6 +197,7 @@ async fn run_server(shell: Arc<Mutex<Shell>>, output: Arc<OutputBuffer>, ctx: Sh
             .route("/api/storage/mkdir", web::post().to(storage_mkdir))
             .route("/api/storage/delete", web::post().to(storage_delete))
             .route("/api/storage/rename", web::post().to(storage_rename))
+            .route("/api/storage/remove-conflicts", web::post().to(storage_remove_conflicts))
             .route("/api/storage/sync-manifest", web::get().to(storage_sync_manifest))
     })
     .bind(("0.0.0.0", PORT))?
@@ -542,6 +544,22 @@ async fn storage_rename(query: web::Query<StorageRenameQuery>) -> HttpResponse {
     match rename_path(&from, &to) {
         Ok(()) => HttpResponse::Ok().finish(),
         Err(_) => HttpResponse::BadRequest().finish(),
+    }
+}
+
+#[derive(Serialize)]
+struct StorageRemoveConflictsResponse {
+    removed: usize,
+}
+
+/// `POST /api/storage/remove-conflicts`：整個 `storage/` 樹底下，檔名含
+/// 「衝突自」的檔案（`sync` plugin 偵測到衝突時留下的，見
+/// `crate::plugins::remove_conflict_files` 的說明）全部刪掉，回傳實際刪
+/// 掉幾個。
+async fn storage_remove_conflicts() -> HttpResponse {
+    match remove_conflict_files(Path::new(STORAGE_DIR)) {
+        Ok(removed) => HttpResponse::Ok().json(StorageRemoveConflictsResponse { removed }),
+        Err(err) => HttpResponse::InternalServerError().body(format!("{err:#}")),
     }
 }
 

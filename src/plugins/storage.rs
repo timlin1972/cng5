@@ -158,6 +158,35 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// 遞迴走訪 `dir` 底下所有檔案，收集檔名裡含有 `needle` 的路徑——只找
+/// 檔名，不算 hash：`walk_with_hashes` 那份是同步比對用的，每個檔案都要
+/// 讀整個內容算 SHA-256，這裡單純找檔名，檔案可能很大（電子書/音樂/
+/// 桌布），沒必要付那個成本。
+fn find_files_containing(dir: &Path, needle: &str, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in list_dir(dir)? {
+        let full_path = dir.join(&entry.name);
+        if entry.is_dir {
+            find_files_containing(&full_path, needle, out)?;
+        } else if entry.name.contains(needle) {
+            out.push(full_path);
+        }
+    }
+    Ok(())
+}
+
+/// `sync` plugin 偵測到同一個檔案在兩台機器上有不同修改時，會把其中一份
+/// 改名成「<原檔名> (衝突自 <裝置>，<日期>)」保留下來，不會自動選一份丟
+/// 掉（見 `sync.rs` 的說明）——使用者自己看過、確認不需要留著之後，才
+/// 透過這個功能一次清掉所有這種衝突檔案，不用一個個資料夾翻找。單一
+/// 檔案刪除失敗（例如權限問題）不會擋住其他檔案繼續刪，回傳值是「實際
+/// 刪掉幾個」，不是「找到幾個」。
+pub(crate) fn remove_conflict_files(root: &Path) -> Result<usize> {
+    let mut files = Vec::new();
+    find_files_containing(root, "衝突自", &mut files)?;
+    let removed = files.iter().filter(|path| remove(path, false).is_ok()).count();
+    Ok(removed)
+}
+
 /// 從 `path` 這個檔案的 `offset` 開始讀最多 `FILE_CHUNK_SIZE`（見
 /// `crate::plugin::FILE_CHUNK_SIZE`）個位元組，回傳 base64 編碼——給跨 domain
 /// 的 `RemoteRequest::StorageFilePull` 處理用（`global.rs` 的
@@ -696,6 +725,32 @@ mod tests {
         let root = test_root("walk-empty");
         let entries = walk_with_hashes(&root).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn remove_conflict_files_deletes_only_matching_nested_files() {
+        let root = test_root("remove-conflicts");
+        fs::create_dir_all(root.join("photos")).unwrap();
+        fs::write(root.join("normal.jpg"), b"x").unwrap();
+        fs::write(root.join("桌布 (衝突自 TimHCLin-PC，2026-08-16).jpg"), b"x").unwrap();
+        fs::write(root.join("photos/照片 (衝突自 другое-PC，2026-08-17).jpg"), b"x").unwrap();
+
+        let removed = remove_conflict_files(&root).unwrap();
+        assert_eq!(removed, 2);
+        assert!(root.join("normal.jpg").exists());
+        assert!(!root.join("桌布 (衝突自 TimHCLin-PC，2026-08-16).jpg").exists());
+        assert!(!root.join("photos/照片 (衝突自 другое-PC，2026-08-17).jpg").exists());
+        // 資料夾本身（就算名字也含有這個字串）不該被當成檔案處理。
+        assert!(root.join("photos").is_dir());
+    }
+
+    #[test]
+    fn remove_conflict_files_on_tree_without_conflicts_removes_nothing() {
+        let root = test_root("remove-conflicts-none");
+        fs::write(root.join("a.txt"), b"x").unwrap();
+        let removed = remove_conflict_files(&root).unwrap();
+        assert_eq!(removed, 0);
+        assert!(root.join("a.txt").exists());
     }
 
     #[test]

@@ -30,8 +30,8 @@ pub(crate) use ereader::{
 };
 pub use ereader::EReaderPlugin;
 pub(crate) use storage::{
-    list_dir, make_dir, paginate_sync_entries, read_chunk, remove, rename_path, safe_storage_path,
-    walk_with_hashes, write_chunk, STORAGE_DIR,
+    list_dir, make_dir, paginate_sync_entries, read_chunk, remove, remove_conflict_files, rename_path,
+    safe_storage_path, walk_with_hashes, write_chunk, STORAGE_DIR,
 };
 pub(crate) use storage::SyncEntry;
 pub use gitrepo::GitRepoPlugin;

@@ -3459,10 +3459,19 @@
     uploadInput.style.display = "none";
     const mkdirBtn = document.createElement("button");
     mkdirBtn.textContent = "＋ 新資料夾";
+    // `sync` plugin 偵測到同一個檔案在兩台機器上有不同修改時，會把
+    // 其中一份改名成「<原檔名> (衝突自 <裝置>，<日期>)」保留下來，不會
+    // 自動選一份丟掉；這顆按鈕讓使用者自己看過、確認不需要留著之後，
+    // 一次把整個 storage/ 底下所有這種衝突檔案清掉，不用一個個資料夾
+    // 翻找刪除。
+    const removeConflictsBtn = document.createElement("button");
+    removeConflictsBtn.textContent = "remove confliction";
+    removeConflictsBtn.title = "刪除 storage 底下所有檔名含「衝突自」的同步衝突檔案";
     toolbar.appendChild(breadcrumb);
     toolbar.appendChild(uploadBtn);
     toolbar.appendChild(uploadInput);
     toolbar.appendChild(mkdirBtn);
+    toolbar.appendChild(removeConflictsBtn);
 
     const table = document.createElement("table");
     table.className = "storage-table";
@@ -3638,6 +3647,14 @@
       if (!dirName) return;
       const dest = joinPath(state.currentPath, dirName);
       await fetch(`/api/storage/mkdir?path=${encodeURIComponent(dest)}`, { method: "POST" });
+      refresh();
+    });
+
+    removeConflictsBtn.addEventListener("click", async () => {
+      if (!window.confirm("確定要刪除 storage 底下所有檔名含「衝突自」的同步衝突檔案嗎？")) return;
+      const res = await fetch("/api/storage/remove-conflicts", { method: "POST" });
+      const data = await res.json();
+      window.alert(`已刪除 ${data.removed} 個衝突檔案`);
       refresh();
     });
 
